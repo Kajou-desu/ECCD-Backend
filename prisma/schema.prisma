@@ -1,0 +1,152 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  TEACHER
+  PARENT
+  ADMIN
+}
+
+enum AttendanceStatus {
+  present
+  absent
+  excused
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         Role      @default(PARENT)
+  isActive     Boolean   @default(true)
+  tokenVersion Int       @default(0)
+  createdAt    DateTime  @default(now())
+  children     ParentChild[]
+
+  @@map("users")
+}
+
+model PasswordResetOtp {
+  id        Int      @id @default(autoincrement())
+  email     String
+  otpCode   String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("password_reset_otps")
+}
+
+model Student {
+  id            Int       @id @default(autoincrement())
+  name          String
+  birthdate     DateTime?
+  classroom     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  parents       ParentChild[]
+  attendance    Attendance[]
+  submissions   Submission[]
+
+  @@map("students")
+}
+
+model ParentChild {
+  id        Int     @id @default(autoincrement())
+  parentId  Int
+  studentId Int
+  parent    User    @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([parentId, studentId])
+  @@map("parent_children")
+}
+
+model Attendance {
+  id        Int              @id @default(autoincrement())
+  studentId Int
+  date      DateTime         @db.Date
+  status    AttendanceStatus
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, date])
+  @@map("attendance")
+}
+
+model Album {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String?
+  createdAt   DateTime @default(now())
+
+  photos      Photo[]
+
+  @@map("albums")
+}
+
+model Photo {
+  id        Int      @id @default(autoincrement())
+  albumId   Int
+  fileUrl   String
+  createdAt DateTime @default(now())
+
+  album     Album @relation(fields: [albumId], references: [id], onDelete: Cascade)
+
+  @@map("photos")
+}
+
+model Material {
+  id          Int      @id @default(autoincrement())
+  title       String
+  category    String?
+  description String?
+  fileUrl     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  submissions Submission[]
+
+  @@map("materials")
+}
+
+model Submission {
+  id          Int      @id @default(autoincrement())
+  materialId  Int
+  studentId   Int
+  fileUrl     String
+  submittedAt DateTime @default(now())
+
+  material    Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@map("submissions")
+}
+
+model Event {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String?
+  date        DateTime @db.Date
+  createdAt   DateTime @default(now())
+
+  @@map("events")
+}
+
+model DailyTheme {
+  id        Int      @id @default(autoincrement())
+  date      DateTime @unique @db.Date
+  theme     String
+  createdAt DateTime @default(now())
+
+  @@map("daily_themes")
+}
