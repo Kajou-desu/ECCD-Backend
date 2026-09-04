@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireRole } from "../middleware/auth.js";
 import { getEvents } from "../controllers/events.controller.js";
 
 const router = Router();
 
-router.get("/", requireAuth, getEvents);
+router.get("/", requireAuth, requireRole("Teacher", "Admin"), getEvents);
 
 export default router;

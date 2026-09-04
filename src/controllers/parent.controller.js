@@ -17,29 +17,53 @@ export async function getChildren(req, res, next) {
 }
 
 // GET /api/students/:childId/progress
-// PARENT may only view their own child's progress.
+// Parent/Guardian may only view their own child's progress.
+//
+// Verified against actual ParentDashboard.jsx usage (progress.milestones,
+// progress.attendance, progress.schoolDays, progress.activityCount,
+// progress.weeklyGoals -> WeeklyGoalsCard, progress.recentActivities ->
+// RecentActivitiesCard), not the {materialsCompleted, materialsTotal,
+// attendance: {...}} shape this originally guessed.
+//
+// `weeklyGoals` has no real data source: there is no teacher-facing UI or
+// API anywhere (frontend or backend) to author curriculum goals for a
+// child. Returning [] here rather than fabricating placeholder goals —
+// building that out for real is a separate feature, not a wiring fix.
 export async function getChildProgress(req, res, next) {
   try {
     const studentId = parseId(req.params.childId, "childId");
     await assertCanAccessStudent(req.user, studentId);
 
-    const [totalMaterials, completedSubmissions, attendanceCounts] = await Promise.all([
-      prisma.material.count(),
-      prisma.submission.count({ where: { studentId } }),
-      prisma.attendance.groupBy({
-        by: ["status"],
+    const [attendanceRecords, submissions] = await Promise.all([
+      prisma.attendance.findMany({ where: { studentId } }),
+      prisma.submission.findMany({
         where: { studentId },
-        _count: { status: true },
+        include: { material: { select: { title: true, category: true } } },
+        orderBy: { submittedAt: "desc" },
+        take: 10,
       }),
     ]);
 
+    const totalDays = attendanceRecords.length;
+    const presentDays = attendanceRecords.filter((a) => a.status === "present").length;
+    const attendancePct = totalDays > 0 ? Math.round((presentDays / totalDays) * 100) : 0;
+
+    const recentActivities = submissions.map((s) => ({
+      id: s.id,
+      date: s.submittedAt.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+      activity: s.material?.title ?? "Untitled activity",
+      category: s.material?.category ?? "General",
+      status: "completed",
+      notes: "",
+    }));
+
     res.json({
-      studentId,
-      materialsCompleted: completedSubmissions,
-      materialsTotal: totalMaterials,
-      attendance: Object.fromEntries(
-        attendanceCounts.map((a) => [a.status, a._count.status])
-      ),
+      milestones: submissions.length,
+      attendance: `${attendancePct}%`,
+      schoolDays: totalDays,
+      activityCount: submissions.length,
+      weeklyGoals: [],
+      recentActivities,
     });
   } catch (err) {
     next(err);

@@ -4,6 +4,6 @@ import { getChildren } from "../controllers/parent.controller.js";
 
 const router = Router();
 
-router.get("/children", requireAuth, requireRole("PARENT"), getChildren);
+router.get("/children", requireAuth, requireRole("Parent", "Guardian"), getChildren);
 
 export default router;

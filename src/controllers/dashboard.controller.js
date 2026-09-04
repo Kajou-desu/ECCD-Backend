@@ -24,7 +24,21 @@ export async function getDailyTheme(_req, res, next) {
     const todayDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
 
     const theme = await prisma.dailyTheme.findUnique({ where: { date: todayDate } });
-    res.json(theme ?? { date: todayDate, theme: null });
+
+    if (!theme) {
+      // DailyThemeCard.jsx renders theme.title/description/objectives directly
+      // and calls .map() on objectives — never return null/undefined fields.
+      return res.json({
+        letter: "",
+        label: "",
+        subtitle: "",
+        title: "No theme set for today",
+        description: "",
+        objectives: [],
+      });
+    }
+
+    res.json(theme);
   } catch (err) {
     next(err);
   }

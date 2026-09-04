@@ -3,14 +3,16 @@ import { AppError } from "../middleware/errorHandler.js";
 
 /**
  * Enforces that req.user may access data for `studentId`.
- * - TEACHER / ADMIN: full access (staff manage all students).
- * - PARENT: only if a ParentChild link exists for req.user.id.
+ * - Teacher / Admin: full access (staff manage all students).
+ * - Parent / Guardian: only if a ParentChild link exists for req.user.id.
+ *   (Guardian is treated identically to Parent here, matching the
+ *   frontend's isParent() helper in src/auth/permissions.js.)
  * Default is DENY — any unexpected role or missing link is forbidden.
  */
 export async function assertCanAccessStudent(user, studentId) {
-  if (user.role === "TEACHER" || user.role === "ADMIN") return;
+  if (user.role === "Teacher" || user.role === "Admin") return;
 
-  if (user.role === "PARENT") {
+  if (user.role === "Parent" || user.role === "Guardian") {
     const link = await prisma.parentChild.findUnique({
       where: { parentId_studentId: { parentId: user.id, studentId } },
     });

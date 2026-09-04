@@ -21,6 +21,6 @@ router.use("/submissions", submissionRoutes); // /api/submissions
 router.use("/parent", parentRoutes); // /api/parent/children
 router.use("/events", eventRoutes); // /api/events
 router.use("/dashboard", dashboardRoutes); // /api/dashboard/*
-router.use("/files", fileRoutes); // /api/files/:filename (authenticated)
+router.use("/files", fileRoutes); // /api/files/:filename (public - see files.routes.js)
 
 export default router;

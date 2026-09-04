@@ -12,14 +12,34 @@ function toDate(dateString) {
 }
 
 // Teacher/admin only (enforced at route level) — full roster view.
+// useAttendance.js expects a FLAT record where `id` is the student's own id
+// (it gets passed straight into updateAttendance(id, ...) -> PUT
+// /attendance/:studentId), not a nested { student: {...} } shape. It also
+// expects every student to appear even if nobody has marked them yet today.
 export async function getAttendance(req, res, next) {
   try {
     const date = requireDateString(req.query.date);
-    const records = await prisma.attendance.findMany({
-      where: { date: toDate(date) },
-      include: { student: { select: { id: true, name: true, classroom: true } } },
-    });
-    res.json(records);
+    const dateObj = toDate(date);
+
+    const [students, records] = await Promise.all([
+      prisma.student.findMany({
+        select: { id: true, name: true, session: true, photo: true },
+        orderBy: { name: "asc" },
+      }),
+      prisma.attendance.findMany({ where: { date: dateObj } }),
+    ]);
+
+    const statusByStudentId = new Map(records.map((r) => [r.studentId, r.status]));
+
+    const result = students.map((s) => ({
+      id: s.id,
+      name: s.name,
+      session: s.session,
+      photo: s.photo,
+      status: statusByStudentId.get(s.id) ?? null,
+    }));
+
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -76,7 +96,13 @@ export async function recordAttendance(req, res, next) {
 }
 
 // GET /api/students/:childId/attendance?month=YYYY-MM
-// Any authenticated role may call this; PARENT is restricted to their own children.
+// Any authenticated role may call this; Parent/Guardian is restricted to their own children.
+// ParentAttendance.jsx does NOT consume a raw array — it expects a composite
+// { stats, daily, logs } object, verified against mockParentData.js's
+// ATTENDANCE_DATA_BY_CHILD (the app's own ground-truth fixture):
+//   stats: { attendanceRate, presentDays, absentDays, excusedDays, lateArrivals }
+//   daily: { [dayOfMonth]: "present" | "absent" | "excused" }  (ParentAttendanceCalendar.jsx)
+//   logs:  [{ date, status, time }]                            (ParentRecentLogs.jsx)
 export async function getChildAttendance(req, res, next) {
   try {
     const childId = parseId(req.params.childId, "childId");
@@ -92,7 +118,50 @@ export async function getChildAttendance(req, res, next) {
       where: { studentId: childId, date: { gte: start, lt: end } },
       orderBy: { date: "asc" },
     });
-    res.json(records);
+
+    const daily = {};
+    let presentDays = 0;
+    let absentDays = 0;
+    let excusedDays = 0;
+
+    const logs = records.map((r) => {
+      const day = r.date.getUTCDate();
+      daily[day] = r.status;
+
+      if (r.status === "present") presentDays += 1;
+      else if (r.status === "absent") absentDays += 1;
+      else if (r.status === "excused") excusedDays += 1;
+
+      return {
+        date: r.date.toLocaleDateString("en-US", {
+          month: "short",
+          day: "2-digit",
+          year: "numeric",
+        }),
+        status: r.status,
+        // Check-in time isn't tracked anywhere in this app yet — "---" is
+        // the exact sentinel ParentRecentLogs.jsx checks for to hide the
+        // "Check-in:" line.
+        time: "---",
+      };
+    });
+    logs.reverse(); // most recent first, matching "Recent Logs"
+
+    const totalRecorded = records.length;
+    const attendanceRate =
+      totalRecorded > 0 ? Math.round((presentDays / totalRecorded) * 100) : 0;
+
+    res.json({
+      stats: {
+        attendanceRate,
+        presentDays,
+        absentDays,
+        excusedDays,
+        lateArrivals: 0, // not tracked — no source of truth for this yet
+      },
+      daily,
+      logs,
+    });
   } catch (err) {
     next(err);
   }

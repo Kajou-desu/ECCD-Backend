@@ -13,8 +13,8 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", getMaterials);
-router.post("/", requireRole("TEACHER", "ADMIN"), upload.single("file"), createMaterial);
-router.put("/:id", requireRole("TEACHER", "ADMIN"), upload.single("file"), updateMaterial);
-router.delete("/:id", requireRole("TEACHER", "ADMIN"), deleteMaterial);
+router.post("/", requireRole("Teacher", "Admin"), upload.single("file"), createMaterial);
+router.put("/:id", requireRole("Teacher", "Admin"), upload.single("file"), updateMaterial);
+router.delete("/:id", requireRole("Teacher", "Admin"), deleteMaterial);
 
 export default router;

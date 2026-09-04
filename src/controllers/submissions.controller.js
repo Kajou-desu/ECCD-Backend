@@ -4,7 +4,7 @@ import { assertCanAccessStudent } from "../utils/ownership.js";
 import { parseId } from "../utils/validate.js";
 
 // GET /api/students/:childId/submissions
-// PARENT may only view their own child's submissions.
+// Parent/Guardian may only view their own child's submissions.
 export async function getSubmissions(req, res, next) {
   try {
     const childId = parseId(req.params.childId, "childId");
@@ -41,6 +41,7 @@ export async function submitStudentWork(req, res, next) {
         materialId,
         studentId,
         fileUrl: fileUrl(req, req.file.filename),
+        fileName: req.file.originalname,
       },
     });
     res.status(201).json(submission);

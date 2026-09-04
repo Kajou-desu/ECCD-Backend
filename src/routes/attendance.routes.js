@@ -10,8 +10,8 @@ const router = Router();
 
 router.use(requireAuth);
 
-router.get("/", getAttendance);
-router.put("/:studentId", requireRole("TEACHER", "ADMIN"), updateAttendance);
-router.post("/", requireRole("TEACHER", "ADMIN"), recordAttendance);
+router.get("/", requireRole("Teacher", "Admin"), getAttendance);
+router.put("/:studentId", requireRole("Teacher", "Admin"), updateAttendance);
+router.post("/", requireRole("Teacher", "Admin"), recordAttendance);
 
 export default router;

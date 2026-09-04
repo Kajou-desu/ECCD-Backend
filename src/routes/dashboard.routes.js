@@ -1,10 +1,10 @@
 import { Router } from "express";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireRole } from "../middleware/auth.js";
 import { getDashboardStats, getDailyTheme } from "../controllers/dashboard.controller.js";
 
 const router = Router();
 
-router.get("/stats", requireAuth, getDashboardStats);
-router.get("/daily-theme", requireAuth, getDailyTheme);
+router.get("/stats", requireAuth, requireRole("Teacher", "Admin"), getDashboardStats);
+router.get("/daily-theme", requireAuth, requireRole("Teacher", "Admin"), getDailyTheme);
 
 export default router;

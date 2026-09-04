@@ -38,9 +38,9 @@ app.use("/api/login", authLimiter);
 app.use("/api/auth", authLimiter);
 app.use("/api", apiLimiter, apiRoutes);
 
-// Note: uploaded files are NOT served via a public static mount. They are
-// served through the authenticated /api/files/:filename route, since this
-// app stores children's photos and schoolwork.
+// Note: uploaded files are served publicly (not behind auth) via
+// /api/files/:filename — see files.routes.js for why. Relies on
+// crypto-random filenames + upload MIME whitelist as compensating controls.
 
 app.use(notFoundHandler);
 app.use(errorHandler);

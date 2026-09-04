@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
+import { parseId, requireNonEmptyString, optionalString } from "../utils/validate.js";
 
 export async function getMaterials(_req, res, next) {
   try {
@@ -12,14 +13,15 @@ export async function getMaterials(_req, res, next) {
 
 export async function createMaterial(req, res, next) {
   try {
-    const { title, category, description } = req.body;
-    if (!title) return res.status(400).json({ message: "Title required" });
+    const title = requireNonEmptyString(req.body.title, "title", 200);
+    const category = optionalString(req.body.category, 100);
+    const description = optionalString(req.body.description, 2000);
 
     const material = await prisma.material.create({
       data: {
         title,
-        category: category ?? null,
-        description: description ?? null,
+        category,
+        description,
         fileUrl: req.file ? fileUrl(req, req.file.filename) : null,
       },
     });
@@ -31,13 +33,15 @@ export async function createMaterial(req, res, next) {
 
 export async function updateMaterial(req, res, next) {
   try {
+    const id = parseId(req.params.id, "id");
     const { title, category, description } = req.body;
+
     const material = await prisma.material.update({
-      where: { id: Number(req.params.id) },
+      where: { id },
       data: {
-        ...(title !== undefined && { title }),
-        ...(category !== undefined && { category }),
-        ...(description !== undefined && { description }),
+        ...(title !== undefined && { title: requireNonEmptyString(title, "title", 200) }),
+        ...(category !== undefined && { category: optionalString(category, 100) }),
+        ...(description !== undefined && { description: optionalString(description, 2000) }),
         ...(req.file && { fileUrl: fileUrl(req, req.file.filename) }),
       },
     });
@@ -50,7 +54,8 @@ export async function updateMaterial(req, res, next) {
 
 export async function deleteMaterial(req, res, next) {
   try {
-    await prisma.material.delete({ where: { id: Number(req.params.id) } });
+    const id = parseId(req.params.id, "id");
+    await prisma.material.delete({ where: { id } });
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Material not found" });

@@ -50,12 +50,18 @@ function fileFilter(_req, file, cb) {
 export const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 10 * 1024 * 1024, files: 1 }, // 10MB, one file per request
+  // NOTE: no `files` limit here. This instance is shared across
+  // upload.single() (materials, submissions) AND upload.array() routes
+  // (student documents: up to 10, album photos: up to 20) — a global
+  // files:1 cap here would reject every multi-file request regardless of
+  // the per-route .array(field, maxCount) limit. Per-route counts are
+  // enforced where .array()/.single() is called (see routes/*.js).
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB per file
 });
 
-// Files are served through an authenticated route (see files.routes.js), not
-// a public static mount, since this app stores children's photos and
-// schoolwork submissions.
+// Deliberately public (see files.routes.js for why), so the URL itself is
+// the only thing standing between a request and the file — filenames are
+// crypto.randomBytes-derived specifically because of that.
 export function fileUrl(req, filename) {
   return `${req.protocol}://${req.get("host")}/api/files/${filename}`;
 }

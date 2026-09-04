@@ -4,10 +4,10 @@ import { AppError } from "../middleware/errorHandler.js";
 
 const UPLOAD_DIR = path.resolve("uploads");
 
-// Serves a previously uploaded file to any authenticated user.
-// Filename is restricted to the basename to prevent path traversal
-// (e.g. "../../etc/passwd") — we never join raw, unvalidated client input
-// into a filesystem path.
+// Serves a previously uploaded file. Public by design (see files.routes.js
+// for why) — filename is restricted to the basename to prevent path
+// traversal (e.g. "../../etc/passwd"); we never join raw, unvalidated
+// client input into a filesystem path.
 export function getFile(req, res, next) {
   try {
     const requested = path.basename(req.params.filename);
