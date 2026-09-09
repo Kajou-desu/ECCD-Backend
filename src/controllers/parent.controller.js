@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
 import { parseId } from "../utils/validate.js";
 
 // GET /api/parent/children — identity derived from JWT (req.user.id), never
@@ -10,7 +11,7 @@ export async function getChildren(req, res, next) {
       where: { parentId: req.user.id },
       include: { student: true },
     });
-    res.json(links.map((l) => l.student));
+    res.json(links.map((l) => ({ ...l.student, photo: signFileUrl(req, l.student.photo) })));
   } catch (err) {
     next(err);
   }

@@ -13,6 +13,7 @@ import {
   requireBirthday,
 } from "../utils/validate.js";
 import { toDocumentResponse } from "../utils/studentDocumentResponse.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
 
 // Lean shape for roster/table/dashboard views (StudentTable, EventCard,
 // UploadStudentWork picker, useStudents search).
@@ -43,11 +44,12 @@ function toDateOnly(date) {
 
 // FileUploadField.jsx reads file.name for existing documents, not fileName —
 // same aliasing pattern used for photo.url in albums.controller.js.
-function toStudentDetailResponse(student) {
+function toStudentDetailResponse(req, student) {
   return {
     ...student,
+    photo: signFileUrl(req, student.photo),
     birthday: toDateOnly(student.birthday),
-    documents: (student.documents || []).map(toDocumentResponse),
+    documents: (student.documents || []).map((doc) => toDocumentResponse(req, doc)),
   };
 }
 
@@ -93,13 +95,19 @@ function buildCreateData(body) {
 }
 
 // Teacher/admin only (enforced at route level) — full roster.
-export async function getStudents(_req, res, next) {
+export async function getStudents(req, res, next) {
   try {
     const students = await prisma.student.findMany({
       select: LIST_SELECT,
       orderBy: { name: "asc" },
     });
-    res.json(students.map((s) => ({ ...s, birthday: toDateOnly(s.birthday) })));
+    res.json(
+      students.map((s) => ({
+        ...s,
+        photo: signFileUrl(req, s.photo),
+        birthday: toDateOnly(s.birthday),
+      }))
+    );
   } catch (err) {
     next(err);
   }
@@ -118,7 +126,7 @@ export async function getStudent(req, res, next) {
       include: DETAIL_INCLUDE,
     });
     if (!student) return res.status(404).json({ message: "Student not found" });
-    res.json(toStudentDetailResponse(student));
+    res.json(toStudentDetailResponse(req, student));
   } catch (err) {
     next(err);
   }
@@ -129,7 +137,7 @@ export async function createStudent(req, res, next) {
   try {
     const data = buildCreateData(req.body);
     const student = await prisma.student.create({ data, include: DETAIL_INCLUDE });
-    res.status(201).json(toStudentDetailResponse(student));
+    res.status(201).json(toStudentDetailResponse(req, student));
   } catch (err) {
     next(err);
   }
@@ -186,7 +194,7 @@ export async function updateStudent(req, res, next) {
     }
 
     const student = await prisma.student.update({ where: { id }, data, include: DETAIL_INCLUDE });
-    res.json(toStudentDetailResponse(student));
+    res.json(toStudentDetailResponse(req, student));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Student not found" });
     next(err);

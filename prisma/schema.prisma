@@ -39,9 +39,12 @@ model PasswordResetOtp {
   id        Int      @id @default(autoincrement())
   email     String
   otpCode   String
+  isUsed    Boolean  @default(false)
   expiresAt DateTime
   createdAt DateTime @default(now())
 
+  @@index([email, otpCode, isUsed])
+  @@index([expiresAt])
   @@map("password_reset_otps")
 }
 
@@ -100,6 +103,9 @@ model Student {
   submissions Submission[]
   documents   StudentDocument[]
 
+  @@index([status])
+  @@index([session])
+  @@index([name])
   @@map("students")
 }
 
@@ -137,6 +143,8 @@ model Attendance {
   student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@unique([studentId, date])
+  @@index([date])
+  @@index([status])
   @@map("attendance")
 }
 
@@ -185,6 +193,7 @@ model Submission {
   fileUrl     String
   fileName    String
   submittedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   material    Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
   student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
@@ -206,6 +215,8 @@ model Event {
   category    EventCategory @default(Others)
   createdAt   DateTime      @default(now())
 
+  @@index([date])
+  @@index([category])
   @@map("events")
 }
 

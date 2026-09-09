@@ -29,7 +29,7 @@ export async function uploadStudentDocuments(req, res, next) {
       )
     );
 
-    res.status(201).json(created.map(toDocumentResponse));
+    res.status(201).json(created.map((doc) => toDocumentResponse(req, doc)));
   } catch (err) {
     next(err);
   }

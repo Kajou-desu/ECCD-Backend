@@ -3,13 +3,11 @@ import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { signToken } from "../utils/jwt.js";
 import { requireEmail } from "../utils/validate.js";
+import { sendOtpEmail } from "../lib/mailer.js";
 
 export async function login(req, res, next) {
   try {
     const { password } = req.body;
-    if (!req.body.email || !password) {
-      return res.status(400).json({ message: "Email and password required" });
-    }
     const email = requireEmail(req.body.email);
 
     const user = await prisma.user.findUnique({ where: { email } });
@@ -31,7 +29,6 @@ export async function login(req, res, next) {
 
 export async function forgotPassword(req, res, next) {
   try {
-    if (!req.body.email) return res.status(400).json({ message: "Email required" });
     const email = requireEmail(req.body.email);
 
     const user = await prisma.user.findUnique({ where: { email } });
@@ -44,8 +41,10 @@ export async function forgotPassword(req, res, next) {
 
     await prisma.passwordResetOtp.create({ data: { email, otpCode, expiresAt } });
 
-    // TODO: integrate real email/SMS provider
-    console.log(`[DEV] OTP for ${email}: ${otpCode}`);
+    // Errors here are logged server-side by the central error handler; we
+    // still don't want to leak delivery failures to the client response,
+    // since that could reveal whether the email exists.
+    await sendOtpEmail(email, otpCode);
 
     res.json({ message: "If the email exists, an OTP was sent" });
   } catch (err) {
@@ -56,16 +55,10 @@ export async function forgotPassword(req, res, next) {
 export async function resetPassword(req, res, next) {
   try {
     const { otpCode, newPassword } = req.body;
-    if (!req.body.email || !otpCode || !newPassword) {
-      return res.status(400).json({ message: "Missing fields" });
-    }
-    if (typeof newPassword !== "string" || newPassword.length < 10) {
-      return res.status(400).json({ message: "Password must be at least 10 characters" });
-    }
     const email = requireEmail(req.body.email);
 
     const record = await prisma.passwordResetOtp.findFirst({
-      where: { email, otpCode },
+      where: { email, otpCode, isUsed: false },
       orderBy: { createdAt: "desc" },
     });
 
@@ -78,7 +71,12 @@ export async function resetPassword(req, res, next) {
       where: { email },
       data: { passwordHash, tokenVersion: { increment: 1 } },
     });
-    await prisma.passwordResetOtp.deleteMany({ where: { email } });
+    // Consume every outstanding OTP for this email, not just the one used,
+    // so a code issued earlier in the same window can't be replayed.
+    await prisma.passwordResetOtp.updateMany({
+      where: { email, isUsed: false },
+      data: { isUsed: true },
+    });
 
     res.json({ message: "Password reset successful" });
   } catch (err) {

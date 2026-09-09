@@ -1,7 +1,12 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 import { parseId } from "../utils/validate.js";
+
+function toSubmissionResponse(req, submission) {
+  return { ...submission, fileUrl: signFileUrl(req, submission.fileUrl) };
+}
 
 // GET /api/students/:childId/submissions
 // Parent/Guardian may only view their own child's submissions.
@@ -14,7 +19,7 @@ export async function getSubmissions(req, res, next) {
       where: { studentId: childId },
       orderBy: { submittedAt: "desc" },
     });
-    res.json(submissions);
+    res.json(submissions.map((s) => toSubmissionResponse(req, s)));
   } catch (err) {
     next(err);
   }
@@ -44,7 +49,7 @@ export async function submitStudentWork(req, res, next) {
         fileName: req.file.originalname,
       },
     });
-    res.status(201).json(submission);
+    res.status(201).json(toSubmissionResponse(req, submission));
   } catch (err) {
     next(err);
   }

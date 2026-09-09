@@ -1,16 +1,14 @@
 import { Router } from "express";
 import { getFile } from "../controllers/files.controller.js";
 
-// Deliberately NOT behind requireAuth: the frontend renders every file URL
-// (photos, student avatars, materials, submissions, documents) via plain
+// Not behind requireAuth: the frontend renders every file URL (photos,
+// student avatars, materials, submissions, documents) via plain
 // <img src>, <a href>, and window.open — none of which can attach a Bearer
-// token, so an auth-gated route would silently break every image and file
-// link in the app. Compensating controls instead of session auth:
-//   - filenames are crypto.randomBytes-derived (effectively unguessable)
-//   - upload MIME whitelist (see middleware/upload.js)
-//   - path-traversal protection (see files.controller.js)
-// If stricter access control is needed later, the real fix is on the
-// frontend: switch these to authenticated fetch() + blob object URLs.
+// token, so a session-auth-gated route would break every image/file link.
+// Instead, every URL returned by the API is HMAC-signed with a short
+// expiry (see src/lib/signedFileUrl.js) computed fresh on each response,
+// verified here in files.controller.js — so a leaked/copied link stops
+// working after it expires rather than granting permanent access.
 const router = Router();
 
 router.get("/:filename", getFile);

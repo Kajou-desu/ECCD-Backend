@@ -12,7 +12,9 @@ import fileRoutes from "./files.routes.js";
 
 const router = Router();
 
-router.use("/", authRoutes); // /api/login, /api/auth/*
+// Mounted at both /api and /api/v1 (see app.js) — paths below are relative
+// to whichever prefix was used.
+router.use("/", authRoutes); // /login, /auth/login, /auth/forgot-password, /auth/reset-password
 router.use("/students", studentRoutes); // /api/students/*
 router.use("/attendance", attendanceRoutes); // /api/attendance/*
 router.use("/albums", albumRoutes); // /api/albums

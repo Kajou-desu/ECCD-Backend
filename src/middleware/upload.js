@@ -59,9 +59,10 @@ export const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB per file
 });
 
-// Deliberately public (see files.routes.js for why), so the URL itself is
-// the only thing standing between a request and the file — filenames are
-// crypto.randomBytes-derived specifically because of that.
+// Builds the initial stored URL at upload time. What's actually served is
+// re-signed fresh on every read (see src/lib/signedFileUrl.js) — this
+// value only needs to carry the filename through to storage; the
+// protocol/host portion is discarded and rebuilt at read time.
 export function fileUrl(req, filename) {
   return `${req.protocol}://${req.get("host")}/api/files/${filename}`;
 }

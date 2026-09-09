@@ -1,11 +1,16 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
 import { parseId, requireNonEmptyString, optionalString } from "../utils/validate.js";
 
-export async function getMaterials(_req, res, next) {
+function toMaterialResponse(req, material) {
+  return { ...material, fileUrl: signFileUrl(req, material.fileUrl) };
+}
+
+export async function getMaterials(req, res, next) {
   try {
     const materials = await prisma.material.findMany({ orderBy: { createdAt: "desc" } });
-    res.json(materials);
+    res.json(materials.map((m) => toMaterialResponse(req, m)));
   } catch (err) {
     next(err);
   }
@@ -25,7 +30,7 @@ export async function createMaterial(req, res, next) {
         fileUrl: req.file ? fileUrl(req, req.file.filename) : null,
       },
     });
-    res.status(201).json(material);
+    res.status(201).json(toMaterialResponse(req, material));
   } catch (err) {
     next(err);
   }
@@ -45,7 +50,7 @@ export async function updateMaterial(req, res, next) {
         ...(req.file && { fileUrl: fileUrl(req, req.file.filename) }),
       },
     });
-    res.json(material);
+    res.json(toMaterialResponse(req, material));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Material not found" });
     next(err);

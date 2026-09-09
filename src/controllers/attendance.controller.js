@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
 import {
   parseId,
   requireDateString,
@@ -35,7 +36,7 @@ export async function getAttendance(req, res, next) {
       id: s.id,
       name: s.name,
       session: s.session,
-      photo: s.photo,
+      photo: signFileUrl(req, s.photo),
       status: statusByStudentId.get(s.id) ?? null,
     }));
 

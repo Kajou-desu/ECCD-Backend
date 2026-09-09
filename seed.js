@@ -1,8 +1,9 @@
 import bcrypt from "bcryptjs";
+import crypto from "node:crypto";
 import { prisma } from "./src/lib/prisma.js";
 
 const EMAIL = "admin@school.com";
-const PASSWORD = "ChangeMe123!";
+const PASSWORD = process.env.ADMIN_SEED_PASSWORD || crypto.randomBytes(16).toString("hex");
 
 async function main() {
     const existing = await prisma.user.findUnique({ where: { email: EMAIL } });
@@ -22,7 +23,7 @@ async function main() {
     });
 
     console.log(`Seeded ${EMAIL} / ${PASSWORD}`);
-    console.log("Log in once, then change this password immediately.");
+    console.log("SAVE THIS PASSWORD — it will not be shown again. Log in once, then change it immediately.");
 }
 
 main()

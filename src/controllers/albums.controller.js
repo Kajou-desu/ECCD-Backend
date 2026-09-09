@@ -1,33 +1,34 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
 import { parseId, requireNonEmptyString } from "../utils/validate.js";
 
 // Frontend reads photo.url (not fileUrl) everywhere it renders a photo
 // (PhotoThumbnail, PhotoPreviewModal, AlbumCard cover image), so every
 // photo object returned from this controller is shaped { id, url, caption }.
-function toPhotoResponse(photo) {
-  return { id: photo.id, url: photo.fileUrl, caption: photo.caption };
+function toPhotoResponse(req, photo) {
+  return { id: photo.id, url: signFileUrl(req, photo.fileUrl), caption: photo.caption };
 }
 
-function toAlbumResponse(album) {
+function toAlbumResponse(req, album) {
   return {
     id: album.id,
     title: album.title,
     category: album.category,
     description: album.description,
     createdAt: album.createdAt,
-    photos: (album.photos || []).map(toPhotoResponse),
+    photos: (album.photos || []).map((photo) => toPhotoResponse(req, photo)),
   };
 }
 
 // Any authenticated role (teacher + parent views share this list).
-export async function getAlbums(_req, res, next) {
+export async function getAlbums(req, res, next) {
   try {
     const albums = await prisma.album.findMany({
       include: { photos: true },
       orderBy: { createdAt: "desc" },
     });
-    res.json(albums.map(toAlbumResponse));
+    res.json(albums.map((album) => toAlbumResponse(req, album)));
   } catch (err) {
     next(err);
   }
@@ -41,7 +42,7 @@ export async function createAlbum(req, res, next) {
       data: { title },
       include: { photos: true },
     });
-    res.status(201).json(toAlbumResponse(album));
+    res.status(201).json(toAlbumResponse(req, album));
   } catch (err) {
     next(err);
   }
@@ -86,7 +87,7 @@ export async function addAlbumPhotos(req, res, next) {
       )
     );
 
-    res.status(201).json(created.map(toPhotoResponse));
+    res.status(201).json(created.map((photo) => toPhotoResponse(req, photo)));
   } catch (err) {
     next(err);
   }

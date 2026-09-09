@@ -1,3 +1,5 @@
+import { logger } from "../lib/logger.js";
+
 // AppError: use this for any error whose message is SAFE to show the user
 // (e.g. "Invalid input", "Not found"). Anything else is treated as internal
 // and never exposed, per the "generic errors to client, details server-side
@@ -14,9 +16,9 @@ export function notFoundHandler(_req, res) {
   res.status(404).json({ message: "Not found" });
 }
 
-export function errorHandler(err, _req, res, _next) {
+export function errorHandler(err, req, res, _next) {
   // Full detail (stack, Prisma internals, etc.) goes to server logs only.
-  console.error(err);
+  logger.error({ err, reqId: req.id, path: req.path, method: req.method }, err.message);
 
   if (err.expose) {
     return res.status(err.status || 400).json({ message: err.message });
