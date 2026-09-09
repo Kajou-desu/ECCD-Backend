@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import { env } from "../config/env.js";
+import { logger } from "./logger.js";
 
 // Lazily built so a missing SMTP config doesn't crash the whole process at
 // import time — env.js already fails closed for the truly required vars;
@@ -25,7 +26,7 @@ function getTransporter() {
 // configured, so this path always sends for real there.
 export async function sendOtpEmail(email, otpCode) {
   if (!env.smtp.configured) {
-    console.log(`[DEV] OTP for ${email}: ${otpCode}`);
+    logger.info(`[DEV] OTP for ${email}: ${otpCode}`);
     return;
   }
 
