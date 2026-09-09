@@ -1,15 +1,28 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
-import { parseId, requireNonEmptyString, optionalString } from "../utils/validate.js";
+import { parseId, parsePagination, requireNonEmptyString, optionalString } from "../utils/validate.js";
 
 function toMaterialResponse(req, material) {
   return { ...material, fileUrl: signFileUrl(req, material.fileUrl) };
 }
 
+// ?page & ?pageSize are optional; omitting both returns every material
+// exactly as before (see parsePagination). Total count sent via
+// X-Total-Count when paginated, so the response body shape never changes.
 export async function getMaterials(req, res, next) {
   try {
-    const materials = await prisma.material.findMany({ orderBy: { createdAt: "desc" } });
+    const pagination = parsePagination(req.query);
+
+    const [materials, total] = await Promise.all([
+      prisma.material.findMany({
+        orderBy: { createdAt: "desc" },
+        ...(pagination && { skip: pagination.skip, take: pagination.take }),
+      }),
+      pagination ? prisma.material.count() : Promise.resolve(null),
+    ]);
+
+    if (pagination) res.set("X-Total-Count", String(total));
     res.json(materials.map((m) => toMaterialResponse(req, m)));
   } catch (err) {
     next(err);

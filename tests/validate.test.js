@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseId,
+  parsePagination,
   requireEmail,
   requireDateString,
   requireMonthString,
@@ -124,5 +125,29 @@ describe("requireBirthday", () => {
 
   it("rejects malformed birthdays", () => {
     expect(() => requireBirthday("15-06-2020")).toThrow(AppError);
+  });
+});
+
+describe("parsePagination", () => {
+  it("returns null when neither page nor pageSize is given, so callers fall back to unpaginated behavior", () => {
+    expect(parsePagination({})).toBeNull();
+  });
+
+  it("computes skip/take from page and pageSize", () => {
+    expect(parsePagination({ page: "2", pageSize: "10" })).toEqual({
+      page: 2,
+      pageSize: 10,
+      skip: 10,
+      take: 10,
+    });
+  });
+
+  it("rejects a pageSize above the configured max", () => {
+    expect(() => parsePagination({ page: "1", pageSize: "500" })).toThrow(AppError);
+  });
+
+  it("rejects non-integer or missing page/pageSize when the other is present", () => {
+    expect(() => parsePagination({ page: "1" })).toThrow(AppError); // pageSize missing
+    expect(() => parsePagination({ page: "abc", pageSize: "10" })).toThrow(AppError);
   });
 });

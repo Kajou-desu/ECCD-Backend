@@ -1,0 +1,390 @@
+diff --git a/.env.example b/.env.example
+index 745fe17..49d2295 100644
+--- a/.env.example
++++ b/.env.example
+@@ -37,3 +37,5 @@ REDIS_URL=""
+ # Used only by `node seed.js`. If unset, a random password is generated
+ # and printed once.
+ ADMIN_SEED_PASSWORD=""
++# Optional — defaults to admin@school.com if unset.
++ADMIN_SEED_EMAIL=""
+diff --git a/seed.js b/seed.js
+index 8767856..b0c5851 100644
+--- a/seed.js
++++ b/seed.js
+@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
+ import crypto from "node:crypto";
+ import { prisma } from "./src/lib/prisma.js";
+ 
+-const EMAIL = "admin@school.com";
++const EMAIL = process.env.ADMIN_SEED_EMAIL || "admin@school.com";
+ const PASSWORD = process.env.ADMIN_SEED_PASSWORD || crypto.randomBytes(16).toString("hex");
+ 
+ async function main() {
+diff --git a/src/app.js b/src/app.js
+index 308e66d..0e49b4a 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -7,7 +7,7 @@ import { prisma } from "./lib/prisma.js";
+ import { logger } from "./lib/logger.js";
+ import apiRoutes from "./routes/index.js";
+ import { notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
+-import { apiLimiter, authLimiter } from "./middleware/rateLimit.js";
++import { apiLimiter, authLimiter, authEmailLimiter } from "./middleware/rateLimit.js";
+ 
+ export const app = express();
+ 
+@@ -67,8 +67,10 @@ app.get("/health", async (_req, res) => {
+ const API_PREFIXES = ["/api", "/api/v1"];
+ const AUTH_PATHS = API_PREFIXES.flatMap((p) => [`${p}/login`, `${p}/auth`]);
+ 
+-// Stricter limiter on auth routes, general limiter on everything else under /api.
+-app.use(AUTH_PATHS, authLimiter);
++// Stricter limiters on auth routes (IP-keyed and email-keyed, so a
++// distributed attack against one account can't dodge the IP-based limit —
++// see rateLimit.js), general limiter on everything else under /api.
++app.use(AUTH_PATHS, authLimiter, authEmailLimiter);
+ app.use("/api/v1", apiLimiter, apiRoutes);
+ app.use("/api", apiLimiter, apiRoutes);
+ 
+diff --git a/src/controllers/albums.controller.js b/src/controllers/albums.controller.js
+index 337c807..bba6d6f 100644
+--- a/src/controllers/albums.controller.js
++++ b/src/controllers/albums.controller.js
+@@ -1,7 +1,7 @@
+ import { prisma } from "../lib/prisma.js";
+ import { fileUrl } from "../middleware/upload.js";
+ import { signFileUrl } from "../lib/signedFileUrl.js";
+-import { parseId, requireNonEmptyString } from "../utils/validate.js";
++import { parseId, parsePagination, requireNonEmptyString } from "../utils/validate.js";
+ 
+ // Frontend reads photo.url (not fileUrl) everywhere it renders a photo
+ // (PhotoThumbnail, PhotoPreviewModal, AlbumCard cover image), so every
+@@ -22,12 +22,30 @@ function toAlbumResponse(req, album) {
+ }
+ 
+ // Any authenticated role (teacher + parent views share this list).
++// Deliberately NOT scoped to a parent's own children — Album/Photo have no
++// student linkage at all (confirmed intentional in the 2026-09 QA review,
++// finding #2). This is a shared classroom gallery by design: every parent
++// sees every album/photo, same as a physical bulletin board in the
++// classroom would. Do not "fix" this into per-child scoping without a
++// deliberate product decision to change that behavior — it would need a
++// new student-linkage table and migration, not a small patch.
++// ?page & ?pageSize paginate the album list itself (not photos within an
++// album); omitting both returns every album exactly as before (see
++// parsePagination). Total album count sent via X-Total-Count when paginated.
+ export async function getAlbums(req, res, next) {
+   try {
+-    const albums = await prisma.album.findMany({
+-      include: { photos: true },
+-      orderBy: { createdAt: "desc" },
+-    });
++    const pagination = parsePagination(req.query);
++
++    const [albums, total] = await Promise.all([
++      prisma.album.findMany({
++        include: { photos: true },
++        orderBy: { createdAt: "desc" },
++        ...(pagination && { skip: pagination.skip, take: pagination.take }),
++      }),
++      pagination ? prisma.album.count() : Promise.resolve(null),
++    ]);
++
++    if (pagination) res.set("X-Total-Count", String(total));
+     res.json(albums.map((album) => toAlbumResponse(req, album)));
+   } catch (err) {
+     next(err);
+diff --git a/src/controllers/attendance.controller.js b/src/controllers/attendance.controller.js
+index b434cda..e9d327a 100644
+--- a/src/controllers/attendance.controller.js
++++ b/src/controllers/attendance.controller.js
+@@ -3,6 +3,7 @@ import { assertCanAccessStudent } from "../utils/ownership.js";
+ import { signFileUrl } from "../lib/signedFileUrl.js";
+ import {
+   parseId,
++  parsePagination,
+   requireDateString,
+   requireMonthString,
+   requireAttendanceStatus,
+@@ -17,19 +18,29 @@ function toDate(dateString) {
+ // (it gets passed straight into updateAttendance(id, ...) -> PUT
+ // /attendance/:studentId), not a nested { student: {...} } shape. It also
+ // expects every student to appear even if nobody has marked them yet today.
++// ?page & ?pageSize are optional; omitting both returns the full roster
++// exactly as before (see parsePagination). Total roster size sent via
++// X-Total-Count when paginated.
+ export async function getAttendance(req, res, next) {
+   try {
+     const date = requireDateString(req.query.date);
+     const dateObj = toDate(date);
++    const pagination = parsePagination(req.query);
+ 
+-    const [students, records] = await Promise.all([
++    const [students, total] = await Promise.all([
+       prisma.student.findMany({
+         select: { id: true, name: true, session: true, photo: true },
+         orderBy: { name: "asc" },
++        ...(pagination && { skip: pagination.skip, take: pagination.take }),
+       }),
+-      prisma.attendance.findMany({ where: { date: dateObj } }),
++      pagination ? prisma.student.count() : Promise.resolve(null),
+     ]);
+ 
++    // Only look up attendance for the students actually returned on this
++    // page, not the whole roster.
++    const records = await prisma.attendance.findMany({
++      where: { date: dateObj, studentId: { in: students.map((s) => s.id) } },
++    });
+     const statusByStudentId = new Map(records.map((r) => [r.studentId, r.status]));
+ 
+     const result = students.map((s) => ({
+@@ -40,6 +51,7 @@ export async function getAttendance(req, res, next) {
+       status: statusByStudentId.get(s.id) ?? null,
+     }));
+ 
++    if (pagination) res.set("X-Total-Count", String(total));
+     res.json(result);
+   } catch (err) {
+     next(err);
+diff --git a/src/controllers/materials.controller.js b/src/controllers/materials.controller.js
+index 91629d4..44438ee 100644
+--- a/src/controllers/materials.controller.js
++++ b/src/controllers/materials.controller.js
+@@ -1,15 +1,28 @@
+ import { prisma } from "../lib/prisma.js";
+ import { fileUrl } from "../middleware/upload.js";
+ import { signFileUrl } from "../lib/signedFileUrl.js";
+-import { parseId, requireNonEmptyString, optionalString } from "../utils/validate.js";
++import { parseId, parsePagination, requireNonEmptyString, optionalString } from "../utils/validate.js";
+ 
+ function toMaterialResponse(req, material) {
+   return { ...material, fileUrl: signFileUrl(req, material.fileUrl) };
+ }
+ 
++// ?page & ?pageSize are optional; omitting both returns every material
++// exactly as before (see parsePagination). Total count sent via
++// X-Total-Count when paginated, so the response body shape never changes.
+ export async function getMaterials(req, res, next) {
+   try {
+-    const materials = await prisma.material.findMany({ orderBy: { createdAt: "desc" } });
++    const pagination = parsePagination(req.query);
++
++    const [materials, total] = await Promise.all([
++      prisma.material.findMany({
++        orderBy: { createdAt: "desc" },
++        ...(pagination && { skip: pagination.skip, take: pagination.take }),
++      }),
++      pagination ? prisma.material.count() : Promise.resolve(null),
++    ]);
++
++    if (pagination) res.set("X-Total-Count", String(total));
+     res.json(materials.map((m) => toMaterialResponse(req, m)));
+   } catch (err) {
+     next(err);
+diff --git a/src/controllers/students.controller.js b/src/controllers/students.controller.js
+index 4b0803a..c29aece 100644
+--- a/src/controllers/students.controller.js
++++ b/src/controllers/students.controller.js
+@@ -3,6 +3,7 @@ import { assertCanAccessStudent } from "../utils/ownership.js";
+ import { composeStudentName } from "../utils/studentName.js";
+ import {
+   parseId,
++  parsePagination,
+   requireNonEmptyString,
+   optionalString,
+   optionalEmail,
+@@ -95,12 +96,25 @@ function buildCreateData(body) {
+ }
+ 
+ // Teacher/admin only (enforced at route level) — full roster.
++// ?page & ?pageSize are optional; omitting both returns the full roster
++// exactly as before (see parsePagination), so existing callers are
++// unaffected. When paginated, total roster size is sent via X-Total-Count
++// rather than changing the response body shape.
+ export async function getStudents(req, res, next) {
+   try {
+-    const students = await prisma.student.findMany({
+-      select: LIST_SELECT,
+-      orderBy: { name: "asc" },
+-    });
++    const pagination = parsePagination(req.query);
++
++    const [students, total] = await Promise.all([
++      prisma.student.findMany({
++        select: LIST_SELECT,
++        orderBy: { name: "asc" },
++        ...(pagination && { skip: pagination.skip, take: pagination.take }),
++      }),
++      pagination ? prisma.student.count() : Promise.resolve(null),
++    ]);
++
++    if (pagination) res.set("X-Total-Count", String(total));
++
+     res.json(
+       students.map((s) => ({
+         ...s,
+diff --git a/src/middleware/rateLimit.js b/src/middleware/rateLimit.js
+index 79552b1..7421042 100644
+--- a/src/middleware/rateLimit.js
++++ b/src/middleware/rateLimit.js
+@@ -61,3 +61,31 @@ export const authLimiter = rateLimit({
+   store: getStore("rl:auth:"),
+   passOnStoreError: true,
+ });
++
++// Exported separately (rather than inlined below) so it's unit-testable
++// without spinning up the whole rate-limit middleware.
++export function emailRateLimitKey(req) {
++  const email = req.body?.email;
++  // Falls back to a constant key when the body has no email (shouldn't
++  // happen post-validateBody, but never let a missing key generator input
++  // throw) — worst case it behaves like a low-traffic bucket shared by
++  // malformed requests, not a bypass.
++  return typeof email === "string" && email.trim() ? email.trim().toLowerCase() : "unknown";
++}
++
++// authLimiter above is keyed by IP by default, which stops a single-source
++// brute force but not an attacker spreading login/OTP attempts for one
++// target account across many IPs. This second limiter is keyed by the
++// request's `email` field instead, so it catches that case regardless of
++// how many IPs are used. Both limiters run on the same routes (see
++// AUTH_PATHS in app.js) — either one tripping blocks the request.
++export const authEmailLimiter = rateLimit({
++  windowMs: 15 * 60 * 1000,
++  limit: 10,
++  standardHeaders: true,
++  legacyHeaders: false,
++  message: { message: "Too many attempts for this account, please try again later" },
++  store: getStore("rl:auth-email:"),
++  passOnStoreError: true,
++  keyGenerator: emailRateLimitKey,
++});
+diff --git a/src/schemas/auth.schema.js b/src/schemas/auth.schema.js
+index 04d3e61..64402d0 100644
+--- a/src/schemas/auth.schema.js
++++ b/src/schemas/auth.schema.js
+@@ -15,5 +15,9 @@ export const forgotPasswordSchema = z.object({
+ export const resetPasswordSchema = z.object({
+   email: z.string().min(1, "Email is required"),
+   otpCode: z.string().min(1, "OTP code is required"),
+-  newPassword: z.string().min(10, "Password must be at least 10 characters"),
++  newPassword: z
++    .string()
++    .min(10, "Password must be at least 10 characters")
++    .regex(/[A-Za-z]/, "Password must contain at least one letter")
++    .regex(/[0-9]/, "Password must contain at least one number"),
+ });
+diff --git a/src/utils/validate.js b/src/utils/validate.js
+index af4a390..729d2a6 100644
+--- a/src/utils/validate.js
++++ b/src/utils/validate.js
+@@ -16,6 +16,23 @@ export function parseId(raw, label = "id") {
+   return id;
+ }
+ 
++// Opt-in pagination for list endpoints. Returns { page, pageSize, skip,
++// take } when BOTH ?page and ?pageSize are provided, or null when neither
++// is — callers use that null to fall back to their existing unpaginated
++// query, so responses are byte-for-byte unchanged for any client that
++// doesn't ask for a page (i.e. every current frontend caller).
++export function parsePagination(query, { maxPageSize = 200 } = {}) {
++  if (query.page === undefined && query.pageSize === undefined) return null;
++
++  const page = parseId(query.page, "page");
++  const pageSize = parseId(query.pageSize, "pageSize");
++  if (pageSize > maxPageSize) {
++    throw new AppError(`pageSize must be ${maxPageSize} or less`, 400);
++  }
++
++  return { page, pageSize, skip: (page - 1) * pageSize, take: pageSize };
++}
++
+ export function requireEmail(email) {
+   if (typeof email !== "string" || !EMAIL_RE.test(email)) {
+     throw new AppError("Invalid email", 400);
+diff --git a/tests/auth.schema.test.js b/tests/auth.schema.test.js
+new file mode 100644
+index 0000000..b5f0143
+--- /dev/null
++++ b/tests/auth.schema.test.js
+@@ -0,0 +1,39 @@
++import { describe, it, expect } from "vitest";
++import { resetPasswordSchema } from "../src/schemas/auth.schema.js";
++import { emailRateLimitKey } from "../src/middleware/rateLimit.js";
++
++describe("resetPasswordSchema", () => {
++  const base = { email: "user@example.com", otpCode: "123456" };
++
++  it("accepts a password with letters and numbers, 10+ chars", () => {
++    const result = resetPasswordSchema.safeParse({ ...base, newPassword: "newpassword123" });
++    expect(result.success).toBe(true);
++  });
++
++  it("rejects a password under 10 characters", () => {
++    const result = resetPasswordSchema.safeParse({ ...base, newPassword: "abc12345" });
++    expect(result.success).toBe(false);
++  });
++
++  it("rejects a letters-only password", () => {
++    const result = resetPasswordSchema.safeParse({ ...base, newPassword: "onlylettersnodigits" });
++    expect(result.success).toBe(false);
++  });
++
++  it("rejects a digits-only password", () => {
++    const result = resetPasswordSchema.safeParse({ ...base, newPassword: "1234567890" });
++    expect(result.success).toBe(false);
++  });
++});
++
++describe("emailRateLimitKey", () => {
++  it("lowercases and trims the request body's email", () => {
++    const req = { body: { email: "  User@Example.com  " } };
++    expect(emailRateLimitKey(req)).toBe("user@example.com");
++  });
++
++  it("falls back to a constant key when no email is present", () => {
++    expect(emailRateLimitKey({ body: {} })).toBe("unknown");
++    expect(emailRateLimitKey({ body: undefined })).toBe("unknown");
++  });
++});
+diff --git a/tests/validate.test.js b/tests/validate.test.js
+index 3fbbaf5..ca885ed 100644
+--- a/tests/validate.test.js
++++ b/tests/validate.test.js
+@@ -1,6 +1,7 @@
+ import { describe, it, expect } from "vitest";
+ import {
+   parseId,
++  parsePagination,
+   requireEmail,
+   requireDateString,
+   requireMonthString,
+@@ -126,3 +127,27 @@ describe("requireBirthday", () => {
+     expect(() => requireBirthday("15-06-2020")).toThrow(AppError);
+   });
+ });
++
++describe("parsePagination", () => {
++  it("returns null when neither page nor pageSize is given, so callers fall back to unpaginated behavior", () => {
++    expect(parsePagination({})).toBeNull();
++  });
++
++  it("computes skip/take from page and pageSize", () => {
++    expect(parsePagination({ page: "2", pageSize: "10" })).toEqual({
++      page: 2,
++      pageSize: 10,
++      skip: 10,
++      take: 10,
++    });
++  });
++
++  it("rejects a pageSize above the configured max", () => {
++    expect(() => parsePagination({ page: "1", pageSize: "500" })).toThrow(AppError);
++  });
++
++  it("rejects non-integer or missing page/pageSize when the other is present", () => {
++    expect(() => parsePagination({ page: "1" })).toThrow(AppError); // pageSize missing
++    expect(() => parsePagination({ page: "abc", pageSize: "10" })).toThrow(AppError);
++  });
++});

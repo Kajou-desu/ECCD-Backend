@@ -16,6 +16,23 @@ export function parseId(raw, label = "id") {
   return id;
 }
 
+// Opt-in pagination for list endpoints. Returns { page, pageSize, skip,
+// take } when BOTH ?page and ?pageSize are provided, or null when neither
+// is — callers use that null to fall back to their existing unpaginated
+// query, so responses are byte-for-byte unchanged for any client that
+// doesn't ask for a page (i.e. every current frontend caller).
+export function parsePagination(query, { maxPageSize = 200 } = {}) {
+  if (query.page === undefined && query.pageSize === undefined) return null;
+
+  const page = parseId(query.page, "page");
+  const pageSize = parseId(query.pageSize, "pageSize");
+  if (pageSize > maxPageSize) {
+    throw new AppError(`pageSize must be ${maxPageSize} or less`, 400);
+  }
+
+  return { page, pageSize, skip: (page - 1) * pageSize, take: pageSize };
+}
+
 export function requireEmail(email) {
   if (typeof email !== "string" || !EMAIL_RE.test(email)) {
     throw new AppError("Invalid email", 400);

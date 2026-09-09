@@ -61,3 +61,31 @@ export const authLimiter = rateLimit({
   store: getStore("rl:auth:"),
   passOnStoreError: true,
 });
+
+// Exported separately (rather than inlined below) so it's unit-testable
+// without spinning up the whole rate-limit middleware.
+export function emailRateLimitKey(req) {
+  const email = req.body?.email;
+  // Falls back to a constant key when the body has no email (shouldn't
+  // happen post-validateBody, but never let a missing key generator input
+  // throw) — worst case it behaves like a low-traffic bucket shared by
+  // malformed requests, not a bypass.
+  return typeof email === "string" && email.trim() ? email.trim().toLowerCase() : "unknown";
+}
+
+// authLimiter above is keyed by IP by default, which stops a single-source
+// brute force but not an attacker spreading login/OTP attempts for one
+// target account across many IPs. This second limiter is keyed by the
+// request's `email` field instead, so it catches that case regardless of
+// how many IPs are used. Both limiters run on the same routes (see
+// AUTH_PATHS in app.js) — either one tripping blocks the request.
+export const authEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many attempts for this account, please try again later" },
+  store: getStore("rl:auth-email:"),
+  passOnStoreError: true,
+  keyGenerator: emailRateLimitKey,
+});

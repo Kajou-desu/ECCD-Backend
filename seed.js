@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import { prisma } from "./src/lib/prisma.js";
 
-const EMAIL = "admin@school.com";
+const EMAIL = process.env.ADMIN_SEED_EMAIL || "admin@school.com";
 const PASSWORD = process.env.ADMIN_SEED_PASSWORD || crypto.randomBytes(16).toString("hex");
 
 async function main() {

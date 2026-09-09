@@ -3,6 +3,7 @@ import { assertCanAccessStudent } from "../utils/ownership.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import {
   parseId,
+  parsePagination,
   requireDateString,
   requireMonthString,
   requireAttendanceStatus,
@@ -17,19 +18,29 @@ function toDate(dateString) {
 // (it gets passed straight into updateAttendance(id, ...) -> PUT
 // /attendance/:studentId), not a nested { student: {...} } shape. It also
 // expects every student to appear even if nobody has marked them yet today.
+// ?page & ?pageSize are optional; omitting both returns the full roster
+// exactly as before (see parsePagination). Total roster size sent via
+// X-Total-Count when paginated.
 export async function getAttendance(req, res, next) {
   try {
     const date = requireDateString(req.query.date);
     const dateObj = toDate(date);
+    const pagination = parsePagination(req.query);
 
-    const [students, records] = await Promise.all([
+    const [students, total] = await Promise.all([
       prisma.student.findMany({
         select: { id: true, name: true, session: true, photo: true },
         orderBy: { name: "asc" },
+        ...(pagination && { skip: pagination.skip, take: pagination.take }),
       }),
-      prisma.attendance.findMany({ where: { date: dateObj } }),
+      pagination ? prisma.student.count() : Promise.resolve(null),
     ]);
 
+    // Only look up attendance for the students actually returned on this
+    // page, not the whole roster.
+    const records = await prisma.attendance.findMany({
+      where: { date: dateObj, studentId: { in: students.map((s) => s.id) } },
+    });
     const statusByStudentId = new Map(records.map((r) => [r.studentId, r.status]));
 
     const result = students.map((s) => ({
@@ -40,6 +51,7 @@ export async function getAttendance(req, res, next) {
       status: statusByStudentId.get(s.id) ?? null,
     }));
 
+    if (pagination) res.set("X-Total-Count", String(total));
     res.json(result);
   } catch (err) {
     next(err);

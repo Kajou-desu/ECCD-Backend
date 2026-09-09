@@ -7,7 +7,7 @@ import { prisma } from "./lib/prisma.js";
 import { logger } from "./lib/logger.js";
 import apiRoutes from "./routes/index.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
-import { apiLimiter, authLimiter } from "./middleware/rateLimit.js";
+import { apiLimiter, authLimiter, authEmailLimiter } from "./middleware/rateLimit.js";
 
 export const app = express();
 
@@ -67,8 +67,10 @@ app.get("/health", async (_req, res) => {
 const API_PREFIXES = ["/api", "/api/v1"];
 const AUTH_PATHS = API_PREFIXES.flatMap((p) => [`${p}/login`, `${p}/auth`]);
 
-// Stricter limiter on auth routes, general limiter on everything else under /api.
-app.use(AUTH_PATHS, authLimiter);
+// Stricter limiters on auth routes (IP-keyed and email-keyed, so a
+// distributed attack against one account can't dodge the IP-based limit —
+// see rateLimit.js), general limiter on everything else under /api.
+app.use(AUTH_PATHS, authLimiter, authEmailLimiter);
 app.use("/api/v1", apiLimiter, apiRoutes);
 app.use("/api", apiLimiter, apiRoutes);
 

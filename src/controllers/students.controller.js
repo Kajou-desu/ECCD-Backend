@@ -3,6 +3,7 @@ import { assertCanAccessStudent } from "../utils/ownership.js";
 import { composeStudentName } from "../utils/studentName.js";
 import {
   parseId,
+  parsePagination,
   requireNonEmptyString,
   optionalString,
   optionalEmail,
@@ -95,12 +96,25 @@ function buildCreateData(body) {
 }
 
 // Teacher/admin only (enforced at route level) — full roster.
+// ?page & ?pageSize are optional; omitting both returns the full roster
+// exactly as before (see parsePagination), so existing callers are
+// unaffected. When paginated, total roster size is sent via X-Total-Count
+// rather than changing the response body shape.
 export async function getStudents(req, res, next) {
   try {
-    const students = await prisma.student.findMany({
-      select: LIST_SELECT,
-      orderBy: { name: "asc" },
-    });
+    const pagination = parsePagination(req.query);
+
+    const [students, total] = await Promise.all([
+      prisma.student.findMany({
+        select: LIST_SELECT,
+        orderBy: { name: "asc" },
+        ...(pagination && { skip: pagination.skip, take: pagination.take }),
+      }),
+      pagination ? prisma.student.count() : Promise.resolve(null),
+    ]);
+
+    if (pagination) res.set("X-Total-Count", String(total));
+
     res.json(
       students.map((s) => ({
         ...s,

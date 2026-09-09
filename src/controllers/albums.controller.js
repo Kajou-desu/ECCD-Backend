@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
-import { parseId, requireNonEmptyString } from "../utils/validate.js";
+import { parseId, parsePagination, requireNonEmptyString } from "../utils/validate.js";
 
 // Frontend reads photo.url (not fileUrl) everywhere it renders a photo
 // (PhotoThumbnail, PhotoPreviewModal, AlbumCard cover image), so every
@@ -22,12 +22,30 @@ function toAlbumResponse(req, album) {
 }
 
 // Any authenticated role (teacher + parent views share this list).
+// Deliberately NOT scoped to a parent's own children — Album/Photo have no
+// student linkage at all (confirmed intentional in the 2026-09 QA review,
+// finding #2). This is a shared classroom gallery by design: every parent
+// sees every album/photo, same as a physical bulletin board in the
+// classroom would. Do not "fix" this into per-child scoping without a
+// deliberate product decision to change that behavior — it would need a
+// new student-linkage table and migration, not a small patch.
+// ?page & ?pageSize paginate the album list itself (not photos within an
+// album); omitting both returns every album exactly as before (see
+// parsePagination). Total album count sent via X-Total-Count when paginated.
 export async function getAlbums(req, res, next) {
   try {
-    const albums = await prisma.album.findMany({
-      include: { photos: true },
-      orderBy: { createdAt: "desc" },
-    });
+    const pagination = parsePagination(req.query);
+
+    const [albums, total] = await Promise.all([
+      prisma.album.findMany({
+        include: { photos: true },
+        orderBy: { createdAt: "desc" },
+        ...(pagination && { skip: pagination.skip, take: pagination.take }),
+      }),
+      pagination ? prisma.album.count() : Promise.resolve(null),
+    ]);
+
+    if (pagination) res.set("X-Total-Count", String(total));
     res.json(albums.map((album) => toAlbumResponse(req, album)));
   } catch (err) {
     next(err);
