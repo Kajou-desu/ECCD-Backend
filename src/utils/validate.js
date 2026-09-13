@@ -113,6 +113,16 @@ export function requireStudentStatus(value) {
   return v;
 }
 
+export function requirePassword(value, label = "password") {
+  if (typeof value !== "string" || value.length < 10) {
+    throw new AppError(`${label} must be at least 10 characters`, 400);
+  }
+  if (!/[A-Za-z]/.test(value) || !/[0-9]/.test(value)) {
+    throw new AppError(`${label} must contain at least one letter and one number`, 400);
+  }
+  return value;
+}
+
 export function requireBirthday(value) {
   if (typeof value !== "string" || !DATE_RE.test(value)) {
     throw new AppError("Invalid birthday, expected YYYY-MM-DD", 400);

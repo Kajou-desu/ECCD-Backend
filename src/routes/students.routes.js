@@ -8,7 +8,7 @@ import {
   updateStudent,
   deleteStudent,
 } from "../controllers/students.controller.js";
-import { uploadStudentDocuments } from "../controllers/studentDocuments.controller.js";
+import { uploadStudentDocuments, deleteStudentDocument } from "../controllers/studentDocuments.controller.js";
 import { getSubmissions } from "../controllers/submissions.controller.js";
 import { getChildAttendance } from "../controllers/attendance.controller.js";
 import { getChildProgress } from "../controllers/parent.controller.js";
@@ -28,6 +28,7 @@ router.post(
   upload.array("documents", 10),
   uploadStudentDocuments
 );
+router.delete("/:id/documents/:documentId", requireRole("Teacher", "Admin"), deleteStudentDocument);
 
 router.get("/:childId/submissions", getSubmissions);
 router.get("/:childId/attendance", getChildAttendance);

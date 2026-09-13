@@ -26,11 +26,17 @@ model User {
   email        String    @unique
   passwordHash String
   name         String
+  firstName    String?
+  middleName   String?
+  lastName     String?
+  phone        String?
+  address      String?
   role         Role      @default(Parent)
   isActive     Boolean   @default(true)
   tokenVersion Int       @default(0)
   createdAt    DateTime  @default(now())
   children     ParentChild[]
+  notifications Notification[]
 
   @@map("users")
 }
@@ -232,4 +238,19 @@ model DailyTheme {
   createdAt   DateTime @default(now())
 
   @@map("daily_themes")
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, isRead])
+  @@map("notifications")
 }

@@ -34,3 +34,23 @@ export async function uploadStudentDocuments(req, res, next) {
     next(err);
   }
 }
+
+// DELETE /api/students/:id/documents/:documentId
+// Teacher/admin only (enforced at route level). Scoped to studentId as
+// well as documentId so a document can't be deleted via a mismatched
+// student id in the URL.
+export async function deleteStudentDocument(req, res, next) {
+  try {
+    const studentId = parseId(req.params.id, "id");
+    const documentId = parseId(req.params.documentId, "documentId");
+
+    const result = await prisma.studentDocument.deleteMany({
+      where: { id: documentId, studentId },
+    });
+
+    if (result.count === 0) return res.status(404).json({ message: "Document not found" });
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+}
