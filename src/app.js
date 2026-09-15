@@ -28,15 +28,21 @@ app.use(
   })
 );
 
-if (!env.clientOrigin) {
+if (!env.clientOrigins.length) {
   console.warn(
-    "CLIENT_ORIGIN is not set — CORS will reject all cross-origin requests. " +
-      "Set it explicitly in production; never use '*'."
+    "CLIENT_ORIGIN is not set — CORS will reject all cross-origin requests."
   );
 }
+
 app.use(
   cors({
-    origin: env.clientOrigin || false,
+    origin: (origin, callback) => {
+      if (!origin || env.clientOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
     credentials: true,
   })
 );

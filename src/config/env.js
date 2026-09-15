@@ -37,9 +37,14 @@ if (!isProduction && !smtpConfigured) {
   );
 }
 
+const clientOrigins = (process.env.CLIENT_ORIGIN || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 export const env = {
   port: Number(process.env.PORT) || 4000,
-  clientOrigin: process.env.CLIENT_ORIGIN,
+  clientOrigins,
   nodeEnv,
   isProduction,
   redisUrl: process.env.REDIS_URL || null,
