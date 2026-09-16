@@ -4,6 +4,7 @@ import { prisma } from "../lib/prisma.js";
 import { signToken } from "../utils/jwt.js";
 import { requireEmail } from "../utils/validate.js";
 import { sendOtpEmail } from "../lib/mailer.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
 
 export async function login(req, res, next) {
   try {
@@ -17,10 +18,31 @@ export async function login(req, res, next) {
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) return res.status(401).json({ message: "Invalid credentials" });
 
+    // Capture the *previous* login before overwriting it — this is what's
+    // shown to the user as "Last Login" (lets them notice unrecognized
+    // access), not the login that's happening right now.
+    const previousLoginAt = user.lastLoginAt;
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    });
+
     const token = signToken(user);
     res.json({
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: {
+        id: user.id,
+        name: user.name,
+        firstName: user.firstName,
+        middleName: user.middleName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        createdAt: user.createdAt,
+        lastLoginAt: previousLoginAt,
+        profilePicture: user.profilePicture ? signFileUrl(req, user.profilePicture) : null,
+      },
     });
   } catch (err) {
     next(err);

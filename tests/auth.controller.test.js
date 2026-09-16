@@ -59,6 +59,42 @@ describe("login", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("returns the *previous* lastLoginAt, then updates it to now", async () => {
+    const passwordHash = await bcrypt.hash("correct-horse", 10);
+    const previousLogin = new Date("2026-01-01T00:00:00.000Z");
+    prisma.user.findUnique.mockResolvedValue({
+      id: 1,
+      email: "user@example.com",
+      name: "User",
+      role: "Admin",
+      isActive: true,
+      passwordHash,
+      tokenVersion: 0,
+      createdAt: new Date("2025-01-01T00:00:00.000Z"),
+      lastLoginAt: previousLogin,
+    });
+
+    const req = { body: { email: "user@example.com", password: "correct-horse" } };
+    const res = mockRes();
+    const next = vi.fn();
+
+    await login(req, res, next);
+
+    // The response shows the login *before* this one, not the one just now
+    // — so the user can notice unrecognized access.
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user: expect.objectContaining({ lastLoginAt: previousLogin }),
+      }),
+    );
+
+    // The DB is updated to the current login for next time.
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { lastLoginAt: expect.any(Date) },
+    });
+  });
+
   it("returns generic 401 for a wrong password (no user-enumeration hint)", async () => {
     const passwordHash = await bcrypt.hash("correct-horse", 10);
     prisma.user.findUnique.mockResolvedValue({

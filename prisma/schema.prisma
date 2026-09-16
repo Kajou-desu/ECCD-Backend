@@ -35,6 +35,8 @@ model User {
   isActive     Boolean   @default(true)
   tokenVersion Int       @default(0)
   createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+  profilePicture String?
   children     ParentChild[]
   notifications Notification[]
 

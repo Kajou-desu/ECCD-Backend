@@ -1,5 +1,20 @@
 import { prisma } from "../lib/prisma.js";
-import { requireMonthString } from "../utils/validate.js";
+import {
+  requireMonthString,
+  requireDateString,
+  requireNonEmptyString,
+  optionalString,
+} from "../utils/validate.js";
+import { AppError } from "../middleware/errorHandler.js";
+
+const EVENT_CATEGORIES = ["Holiday", "Birthday", "Others"];
+
+function requireEventCategory(value) {
+  if (!EVENT_CATEGORIES.includes(value)) {
+    throw new AppError(`Invalid category, expected one of: ${EVENT_CATEGORIES.join(", ")}`, 400);
+  }
+  return value;
+}
 
 // GET /api/events?month=YYYY-MM
 // CalendarEvents.jsx does NOT consume a raw array — verified against actual
@@ -37,6 +52,27 @@ export async function getEvents(req, res, next) {
     });
 
     res.json({ daily, logs });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/events — Teacher/Admin only (enforced at route level).
+export async function createEvent(req, res, next) {
+  try {
+    const title = requireNonEmptyString(req.body.title, "title", 200);
+    const dateString = requireDateString(req.body.date, "date");
+    const category = requireEventCategory(req.body.category);
+    const description = optionalString(req.body.description, 1000);
+
+    const [year, month, day] = dateString.split("-").map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+
+    const event = await prisma.event.create({
+      data: { title, date, category, description },
+    });
+
+    res.status(201).json(event);
   } catch (err) {
     next(err);
   }
