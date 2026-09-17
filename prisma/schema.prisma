@@ -145,6 +145,7 @@ model Attendance {
   studentId Int
   date      DateTime         @db.Date
   status    AttendanceStatus
+  arrivedAt DateTime?
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 

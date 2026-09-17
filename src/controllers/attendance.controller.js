@@ -41,14 +41,15 @@ export async function getAttendance(req, res, next) {
     const records = await prisma.attendance.findMany({
       where: { date: dateObj, studentId: { in: students.map((s) => s.id) } },
     });
-    const statusByStudentId = new Map(records.map((r) => [r.studentId, r.status]));
+    const attendanceByStudentId = new Map(records.map((r) => [r.studentId, r]));
 
     const result = students.map((s) => ({
       id: s.id,
       name: s.name,
       session: s.session,
       photo: signFileUrl(req, s.photo),
-      status: statusByStudentId.get(s.id) ?? null,
+      status: attendanceByStudentId.get(s.id)?.status ?? null,
+      arrivedAt: attendanceByStudentId.get(s.id)?.arrivedAt ?? null,
     }));
 
     if (pagination) res.set("X-Total-Count", String(total));
@@ -67,8 +68,16 @@ export async function updateAttendance(req, res, next) {
 
     const record = await prisma.attendance.upsert({
       where: { studentId_date: { studentId, date: toDate(date) } },
-      update: { status },
-      create: { studentId, date: toDate(date), status },
+      update: {
+        status,
+        arrivedAt: status === "present" ? new Date() : null,
+      },
+      create: {
+        studentId,
+        date: toDate(date),
+        status,
+        arrivedAt: status === "present" ? new Date() : null,
+      },
     });
     res.json(record);
   } catch (err) {
@@ -97,8 +106,16 @@ export async function recordAttendance(req, res, next) {
       validated.map(({ studentId, date, status }) =>
         prisma.attendance.upsert({
           where: { studentId_date: { studentId, date } },
-          update: { status },
-          create: { studentId, date, status },
+          update: {
+            status,
+            arrivedAt: status === "present" ? new Date() : null,
+          },
+          create: {
+            studentId,
+            date,
+            status,
+            arrivedAt: status === "present" ? new Date() : null,
+          },
         })
       )
     );
@@ -152,10 +169,7 @@ export async function getChildAttendance(req, res, next) {
           year: "numeric",
         }),
         status: r.status,
-        // Check-in time isn't tracked anywhere in this app yet — "---" is
-        // the exact sentinel ParentRecentLogs.jsx checks for to hide the
-        // "Check-in:" line.
-        time: "---",
+        arrivedAt: r.arrivedAt,
       };
     });
     logs.reverse(); // most recent first, matching "Recent Logs"
