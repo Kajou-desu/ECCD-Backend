@@ -4,6 +4,7 @@ import { upload } from "../middleware/upload.js";
 import {
   getAlbums,
   createAlbum,
+  updateAlbum,
   deleteAlbum,
   addAlbumPhotos,
   deleteAlbumPhoto,
@@ -15,6 +16,7 @@ router.use(requireAuth);
 
 router.get("/", getAlbums); // teacher + parent views share this list
 router.post("/", requireRole("Teacher", "Admin"), createAlbum);
+router.put("/:albumId", requireRole("Teacher", "Admin"), updateAlbum);
 router.delete("/:albumId", requireRole("Teacher", "Admin"), deleteAlbum);
 router.post(
   "/:albumId/photos",

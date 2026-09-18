@@ -24,7 +24,7 @@ function getTransporter() {
 // configured, falls back to logging so local setup doesn't require a mail
 // provider. In production, env.js already refuses to start without SMTP
 // configured, so this path always sends for real there.
-export async function sendOtpEmail(email, otpCode) {
+export async function sendOtpEmail(email, otpCode, purpose = "Password Reset") {
   if (!env.smtp.configured) {
     logger.info(`[DEV] OTP for ${email}: ${otpCode}`);
     return;
@@ -33,7 +33,7 @@ export async function sendOtpEmail(email, otpCode) {
   await getTransporter().sendMail({
     from: env.smtp.from,
     to: email,
-    subject: "ECCD SmartTrack — Password Reset Code",
+    subject: `ECCD SmartTrack — ${purpose} Code`,
     text: `Your password reset code is: ${otpCode}\n\nThis code expires in 10 minutes. If you didn't request this, you can ignore this email.`,
   });
 }

@@ -39,6 +39,7 @@ model User {
   profilePicture String?
   children     ParentChild[]
   notifications Notification[]
+  accountActionOtps AccountActionOtp[]
 
   @@map("users")
 }
@@ -56,6 +57,24 @@ model PasswordResetOtp {
   @@map("password_reset_otps")
 }
 
+
+model AccountActionOtp {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  action    String
+  otpCode   String
+  isUsed    Boolean  @default(false)
+  attempts  Int      @default(0)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, action, isUsed])
+  @@index([expiresAt])
+  @@map("account_action_otps")
+}
+
 enum Session {
   morning
   afternoon
@@ -68,6 +87,7 @@ enum StudentStatus {
 
 model Student {
   id        Int      @id @default(autoincrement())
+  studentCode String  @unique
 
   firstName  String
   middleName String?

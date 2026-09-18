@@ -66,6 +66,24 @@ export async function createAlbum(req, res, next) {
   }
 }
 
+
+export async function updateAlbum(req, res, next) {
+  try {
+    const id = parseId(req.params.albumId, "albumId");
+    const title = requireNonEmptyString(req.body.title, "title", 200);
+    const category = requireNonEmptyString(req.body.category || "Uncategorized", "category", 100);
+    const album = await prisma.album.update({
+      where: { id },
+      data: { title, category },
+      include: { photos: true },
+    });
+    res.json(toAlbumResponse(req, album));
+  } catch (err) {
+    if (err.code === "P2025") return res.status(404).json({ message: "Album not found" });
+    next(err);
+  }
+}
+
 // Teacher/admin only (enforced at route level).
 export async function deleteAlbum(req, res, next) {
   try {
@@ -110,6 +128,7 @@ export async function addAlbumPhotos(req, res, next) {
     next(err);
   }
 }
+
 
 // Teacher/admin only (enforced at route level).
 export async function deleteAlbumPhoto(req, res, next) {

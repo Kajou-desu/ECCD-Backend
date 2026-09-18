@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import crypto from "node:crypto";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 import { composeStudentName } from "../utils/studentName.js";
 import {
@@ -15,11 +16,14 @@ import {
 } from "../utils/validate.js";
 import { toDocumentResponse } from "../utils/studentDocumentResponse.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
+import { AppError } from "../middleware/errorHandler.js";
+import { logger } from "../lib/logger.js";
 
 // Lean shape for roster/table/dashboard views (StudentTable, EventCard,
 // UploadStudentWork picker, useStudents search).
 const LIST_SELECT = {
   id: true,
+  studentCode: true,
   name: true,
   photo: true,
   birthday: true,
@@ -52,6 +56,32 @@ function toStudentDetailResponse(req, student) {
     birthday: toDateOnly(student.birthday),
     documents: (student.documents || []).map((doc) => toDocumentResponse(req, doc)),
   };
+}
+
+function temporaryStudentCode() {
+  return `ECCD-2026-TEMP-${crypto.randomUUID()}`;
+}
+
+function finalStudentCode(studentId) {
+  return `ECCD-2026-${studentId}`;
+}
+
+// Takes the already-validated/normalized `data` object from
+// buildCreateData (not the raw request body) so the email lookup below
+// matches the same lowercased/trimmed form every account's email is
+// stored in — the raw body's email may differ only in case, which would
+// silently fail to find an existing account.
+function getPrimaryParent(data) {
+  if (data.motherName && data.motherEmail) {
+    return { name: data.motherName, email: data.motherEmail, phone: data.motherPhone, address: data.motherAddress, role: "Parent" };
+  }
+  if (data.fatherName && data.fatherEmail) {
+    return { name: data.fatherName, email: data.fatherEmail, phone: data.fatherPhone, address: data.fatherAddress, role: "Parent" };
+  }
+  if (data.guardianName && data.guardianEmail) {
+    return { name: data.guardianName, email: data.guardianEmail, phone: data.guardianPhone, address: data.guardianAddress, role: "Guardian" };
+  }
+  return null;
 }
 
 function buildCreateData(body) {
@@ -150,7 +180,31 @@ export async function getStudent(req, res, next) {
 export async function createStudent(req, res, next) {
   try {
     const data = buildCreateData(req.body);
-    const student = await prisma.student.create({ data, include: DETAIL_INCLUDE });
+    const student = await prisma.$transaction(async (tx) => {
+      const created = await tx.student.create({
+        data: { ...data, studentCode: temporaryStudentCode() },
+        include: DETAIL_INCLUDE,
+      });
+
+      const finalized = await tx.student.update({
+        where: { id: created.id },
+        data: { studentCode: finalStudentCode(created.id) },
+        include: DETAIL_INCLUDE,
+      });
+
+      const primary = getPrimaryParent(data);
+      if (primary) {
+        const account = await tx.user.findUnique({ where: { email: primary.email } });
+        if (account && ["Parent", "Guardian"].includes(account.role)) {
+          await tx.parentChild.upsert({
+            where: { parentId_studentId: { parentId: account.id, studentId: created.id } },
+            update: {},
+            create: { parentId: account.id, studentId: created.id },
+          });
+        }
+      }
+      return finalized;
+    });
     res.status(201).json(toStudentDetailResponse(req, student));
   } catch (err) {
     next(err);
@@ -223,6 +277,46 @@ export async function deleteStudent(req, res, next) {
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Student not found" });
+    next(err);
+  }
+}
+
+
+export async function importStudents(req, res, next) {
+  try {
+    const rows = Array.isArray(req.body?.students) ? req.body.students : [];
+    if (!rows.length) return res.status(400).json({ message: "No student records supplied" });
+    if (rows.length > 500) return res.status(400).json({ message: "A maximum of 500 students can be imported at once" });
+
+    const created = [];
+    const failed = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      try {
+        const student = await prisma.$transaction(async (tx) => {
+          const data = buildCreateData(rows[index]);
+          const created = await tx.student.create({
+            data: { ...data, studentCode: temporaryStudentCode() },
+            include: DETAIL_INCLUDE,
+          });
+          return tx.student.update({
+            where: { id: created.id },
+            data: { studentCode: finalStudentCode(created.id) },
+            include: DETAIL_INCLUDE,
+          });
+        });
+        created.push(toStudentDetailResponse(req, student));
+      } catch (err) {
+        if (err instanceof AppError) {
+          failed.push({ row: index + 2, message: err.message });
+        } else {
+          logger.error({ err, row: index + 2 }, "Unexpected error importing student row");
+          failed.push({ row: index + 2, message: "Invalid student record" });
+        }
+      }
+    }
+
+    res.status(201).json({ imported: created.length, failed, students: created });
+  } catch (err) {
     next(err);
   }
 }

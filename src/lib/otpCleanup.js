@@ -5,13 +5,16 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 async function cleanupExpiredOtps() {
   try {
-    const { count } = await prisma.passwordResetOtp.deleteMany({
-      where: {
-        OR: [{ isUsed: true }, { expiresAt: { lt: new Date() } }],
-      },
-    });
+    const where = {
+      OR: [{ isUsed: true }, { expiresAt: { lt: new Date() } }],
+    };
+    const [passwordReset, accountAction] = await Promise.all([
+      prisma.passwordResetOtp.deleteMany({ where }),
+      prisma.accountActionOtp.deleteMany({ where }),
+    ]);
+    const count = passwordReset.count + accountAction.count;
     if (count > 0) {
-      logger.info({ count }, "Cleaned up expired/used password reset OTPs");
+      logger.info({ count }, "Cleaned up expired/used OTPs");
     }
   } catch (err) {
     logger.error({ err }, "OTP cleanup failed");

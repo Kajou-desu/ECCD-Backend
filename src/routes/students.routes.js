@@ -7,6 +7,7 @@ import {
   createStudent,
   updateStudent,
   deleteStudent,
+  importStudents,
 } from "../controllers/students.controller.js";
 import { uploadStudentDocuments, deleteStudentDocument } from "../controllers/studentDocuments.controller.js";
 import { getSubmissions } from "../controllers/submissions.controller.js";
@@ -20,6 +21,7 @@ router.use(requireAuth);
 router.get("/", requireRole("Teacher", "Admin"), getStudents);
 router.get("/:id", getStudent); // ownership enforced in controller (Parent/Guardian scoped to own children)
 router.post("/", requireRole("Teacher", "Admin"), createStudent);
+router.post("/import", requireRole("Teacher", "Admin"), importStudents);
 router.put("/:id", requireRole("Teacher", "Admin"), updateStudent);
 router.delete("/:id", requireRole("Teacher", "Admin"), deleteStudent);
 router.post(

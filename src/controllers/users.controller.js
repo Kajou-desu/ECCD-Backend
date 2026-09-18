@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { composeUserName } from "../utils/userName.js";
 import { signToken } from "../utils/jwt.js";
@@ -13,8 +14,56 @@ import {
   requirePassword,
 } from "../utils/validate.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { sendOtpEmail } from "../lib/mailer.js";
 
 const ROLES = ["Teacher", "Parent", "Guardian", "Admin"];
+
+const ACTIONS = {
+  PASSWORD_CHANGE: "password_change",
+  ACCOUNT_DELETE: "account_delete",
+};
+
+async function issueAccountOtp(userId, email, action) {
+  await prisma.accountActionOtp.updateMany({
+    where: { userId, action, isUsed: false },
+    data: { isUsed: true },
+  });
+  const otpCode = String(crypto.randomInt(100000, 1000000));
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  await prisma.accountActionOtp.create({ data: { userId, action, otpCode, expiresAt } });
+  await sendOtpEmail(
+    email,
+    otpCode,
+    action === ACTIONS.PASSWORD_CHANGE ? "Password Change" : "Account Deletion",
+  );
+}
+
+// Plain !== leaks timing info proportional to how many leading digits
+// match. Codes are always fixed-length so a length check first is safe;
+// timingSafeEqual then compares the rest in constant time.
+function otpMatches(candidate, expected) {
+  const candidateBuf = Buffer.from(String(candidate ?? ""));
+  const expectedBuf = Buffer.from(String(expected));
+  if (candidateBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(candidateBuf, expectedBuf);
+}
+
+async function verifyAccountOtp(userId, action, otpCode) {
+  const record = await prisma.accountActionOtp.findFirst({
+    where: { userId, action, isUsed: false },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!record || record.expiresAt < new Date() || record.attempts >= 5) return false;
+  if (!otpMatches(otpCode, record.otpCode)) {
+    await prisma.accountActionOtp.update({
+      where: { id: record.id },
+      data: { attempts: { increment: 1 } },
+    });
+    return false;
+  }
+  await prisma.accountActionOtp.update({ where: { id: record.id }, data: { isUsed: true } });
+  return true;
+}
 
 // Excludes passwordHash/tokenVersion — never sent to the client.
 const PUBLIC_SELECT = {
@@ -30,6 +79,7 @@ const PUBLIC_SELECT = {
   isActive: true,
   createdAt: true,
   profilePicture: true,
+  children: { select: { studentId: true } },
 };
 
 // profilePicture is stored as a plain (unsigned) URL — signed fresh on
@@ -39,6 +89,7 @@ function toUserResponse(req, user) {
   return {
     ...user,
     profilePicture: user.profilePicture ? signFileUrl(req, user.profilePicture) : null,
+    studentIds: user.children?.map((child) => child.studentId) ?? [],
   };
 }
 
@@ -82,19 +133,38 @@ export async function registerUser(req, res, next) {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const user = await prisma.user.create({
-      data: {
-        firstName,
-        middleName,
-        lastName,
-        name: composeUserName({ firstName, middleName, lastName }),
-        email,
-        passwordHash,
-        role,
-        phone: optionalPhone(req.body.phone, "phone"),
-        address: optionalString(req.body.address, 500),
-      },
-      select: PUBLIC_SELECT,
+    const studentIds = Array.isArray(req.body.studentIds)
+      ? [...new Set(req.body.studentIds.map((id) => Number(id)).filter(Number.isInteger))]
+      : [];
+
+    if (studentIds.length && !["Parent", "Guardian"].includes(role)) {
+      return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
+    }
+
+    const user = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          firstName,
+          middleName,
+          lastName,
+          name: composeUserName({ firstName, middleName, lastName }),
+          email,
+          passwordHash,
+          role,
+          phone: optionalPhone(req.body.phone, "phone"),
+          address: optionalString(req.body.address, 500),
+        },
+        select: PUBLIC_SELECT,
+      });
+
+      if (studentIds.length) {
+        await tx.parentChild.createMany({
+          data: studentIds.map((studentId) => ({ parentId: created.id, studentId })),
+          skipDuplicates: true,
+        });
+      }
+
+      return tx.user.findUnique({ where: { id: created.id }, select: PUBLIC_SELECT });
     });
 
     res.status(201).json(toUserResponse(req, user));
@@ -144,7 +214,30 @@ export async function updateUser(req, res, next) {
       });
     }
 
-    const user = await prisma.user.update({ where: { id }, data, select: PUBLIC_SELECT });
+    const studentIds = Array.isArray(req.body.studentIds)
+      ? [...new Set(req.body.studentIds.map((value) => Number(value)).filter(Number.isInteger))]
+      : null;
+
+    if (studentIds && !["Parent", "Guardian"].includes(requestedRole) && studentIds.length) {
+      return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
+    }
+
+    const user = await prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({ where: { id }, data, select: PUBLIC_SELECT });
+
+      if (studentIds) {
+        await tx.parentChild.deleteMany({ where: { parentId: id } });
+        if (studentIds.length) {
+          await tx.parentChild.createMany({
+            data: studentIds.map((studentId) => ({ parentId: id, studentId })),
+            skipDuplicates: true,
+          });
+        }
+      }
+
+      return tx.user.findUnique({ where: { id }, select: PUBLIC_SELECT });
+    });
+
     res.json(toUserResponse(req, user));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Account not found" });
@@ -218,17 +311,33 @@ export async function uploadMyProfilePhoto(req, res, next) {
 // tokenVersion (matching the forgot-password flow's convention) so every
 // *other* session is signed out, but issues a fresh token in the response
 // so the session making this request isn't abruptly logged out mid-flow.
+export async function requestPasswordChangeOtp(req, res, next) {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { id: true, email: true },
+    });
+    if (!user) return res.status(404).json({ message: "Account not found" });
+    await issueAccountOtp(user.id, user.email, ACTIONS.PASSWORD_CHANGE);
+    res.json({ message: "Verification code sent to your email" });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function changeMyPassword(req, res, next) {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword, otpCode } = req.body;
     if (typeof currentPassword !== "string" || !currentPassword) {
       return res.status(400).json({ message: "Current password is required" });
     }
     requirePassword(newPassword, "new password");
+    if (!(await verifyAccountOtp(req.user.id, ACTIONS.PASSWORD_CHANGE, otpCode))) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     if (!user) return res.status(404).json({ message: "Account not found" });
-
     const valid = await bcrypt.compare(currentPassword, user.passwordHash);
     if (!valid) return res.status(401).json({ message: "Current password is incorrect" });
 
@@ -237,9 +346,7 @@ export async function changeMyPassword(req, res, next) {
       where: { id: req.user.id },
       data: { passwordHash, tokenVersion: { increment: 1 } },
     });
-
-    const token = signToken(updated);
-    res.json({ message: "Password updated", token });
+    res.json({ message: "Password updated", token: signToken(updated) });
   } catch (err) {
     next(err);
   }
@@ -249,35 +356,44 @@ export async function changeMyPassword(req, res, next) {
 // authenticated role (unlike deleteUser above, which is the admin-managing-
 // other-accounts flow). Requires re-entering the current password as
 // confirmation for a destructive, irreversible action.
+export async function requestAccountDeletionOtp(req, res, next) {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { id: true, email: true },
+    });
+    if (!user) return res.status(404).json({ message: "Account not found" });
+    await issueAccountOtp(user.id, user.email, ACTIONS.ACCOUNT_DELETE);
+    res.json({ message: "Verification code sent to your email" });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function deleteMyAccount(req, res, next) {
   try {
-    const { password } = req.body;
+    const { password, otpCode } = req.body;
     if (typeof password !== "string" || !password) {
       return res.status(400).json({ message: "Password is required to confirm deletion" });
+    }
+    if (!(await verifyAccountOtp(req.user.id, ACTIONS.ACCOUNT_DELETE, otpCode))) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     if (!user) return res.status(404).json({ message: "Account not found" });
+    if (!(await bcrypt.compare(password, user.passwordHash))) {
+      return res.status(401).json({ message: "Incorrect password" });
+    }
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) return res.status(401).json({ message: "Incorrect password" });
-
-    // Don't allow the last remaining Admin to delete themselves — that
-    // would lock the whole organization out of account management with no
-    // way back in.
     if (user.role === "Admin") {
-      const adminCount = await prisma.user.count({
-        where: { role: "Admin", isActive: true },
-      });
+      const adminCount = await prisma.user.count({ where: { role: "Admin", isActive: true } });
       if (adminCount <= 1) {
-        return res.status(400).json({
-          message:
-            "You're the only Admin account. Promote another account to Admin before deleting this one.",
-        });
+        return res.status(400).json({ message: "Promote another account to Admin before deleting this one." });
       }
     }
 
-    await prisma.user.delete({ where: { id: user.id } }); // cascades to parent_children/notifications
+    await prisma.user.delete({ where: { id: user.id } });
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Account not found" });

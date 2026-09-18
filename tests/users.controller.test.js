@@ -13,6 +13,23 @@ vi.mock("../src/lib/prisma.js", () => ({
       delete: vi.fn(),
       count: vi.fn(),
     },
+    parentChild: {
+      createMany: vi.fn(),
+    },
+    accountActionOtp: {
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    // registerUser/updateUser run inside prisma.$transaction((tx) => ...).
+    // `prisma` (declared right below) is the very object this factory
+    // returns, so passing it as `tx` keeps every existing
+    // prisma.user.*/parentChild.* mock and assertion working unchanged.
+    // The reference is only read once $transaction is actually called
+    // (well after `prisma` is assigned below), so this is safe despite
+    // looking circular.
+    $transaction: vi.fn((callback) => callback(prisma)),
   },
 }));
 
@@ -34,6 +51,21 @@ function mockRes() {
   res.json = vi.fn().mockReturnValue(res);
   res.send = vi.fn().mockReturnValue(res);
   return res;
+}
+
+const VALID_OTP = "123456";
+
+// changeMyPassword/deleteMyAccount now require a verified OTP before doing
+// anything else; stub a matching, unexpired, unused-attempt record so
+// tests written before that requirement can still exercise the rest of
+// each function's behavior.
+function mockValidOtp() {
+  prisma.accountActionOtp.findFirst.mockResolvedValue({
+    id: 1,
+    otpCode: VALID_OTP,
+    expiresAt: new Date(Date.now() + 60_000),
+    attempts: 0,
+  });
 }
 
 beforeEach(() => {
@@ -76,6 +108,7 @@ describe("registerUser", () => {
 
   it("creates an account with a hashed password and composed name", async () => {
     prisma.user.create.mockResolvedValue({ id: 2, ...baseBody, email: "grace@example.com" });
+    prisma.user.findUnique.mockResolvedValue({ id: 2, ...baseBody, email: "grace@example.com", children: [] });
 
     const req = { body: { ...baseBody }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
@@ -118,6 +151,7 @@ describe("registerUser", () => {
 
   it("allows an Admin to grant the Admin role", async () => {
     prisma.user.create.mockResolvedValue({ id: 3, ...baseBody, role: "Admin" });
+    prisma.user.findUnique.mockResolvedValue({ id: 3, ...baseBody, role: "Admin", children: [] });
 
     const req = {
       body: { ...baseBody, role: "Admin" },
@@ -130,6 +164,7 @@ describe("registerUser", () => {
 
     expect(prisma.user.create).toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(201);
+    expect(next).not.toHaveBeenCalled();
   });
 
   it("rejects a weak password", async () => {
@@ -281,8 +316,9 @@ describe("deleteMyAccount", () => {
   it("rejects an incorrect password", async () => {
     const passwordHash = await bcrypt.hash("correct-horse-1", 10);
     prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Parent", passwordHash });
+    mockValidOtp();
 
-    const req = { body: { password: "wrong-password" }, user: { id: 1, role: "Parent" } };
+    const req = { body: { password: "wrong-password", otpCode: VALID_OTP }, user: { id: 1, role: "Parent" } };
     const res = mockRes();
     const next = vi.fn();
 
@@ -296,8 +332,9 @@ describe("deleteMyAccount", () => {
     const passwordHash = await bcrypt.hash("correct-horse-1", 10);
     prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Parent", passwordHash });
     prisma.user.delete.mockResolvedValue({});
+    mockValidOtp();
 
-    const req = { body: { password: "correct-horse-1" }, user: { id: 1, role: "Parent" } };
+    const req = { body: { password: "correct-horse-1", otpCode: VALID_OTP }, user: { id: 1, role: "Parent" } };
     const res = mockRes();
     const next = vi.fn();
 
@@ -311,8 +348,9 @@ describe("deleteMyAccount", () => {
     const passwordHash = await bcrypt.hash("correct-horse-1", 10);
     prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Admin", passwordHash });
     prisma.user.count.mockResolvedValue(1);
+    mockValidOtp();
 
-    const req = { body: { password: "correct-horse-1" }, user: { id: 1, role: "Admin" } };
+    const req = { body: { password: "correct-horse-1", otpCode: VALID_OTP }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
     const next = vi.fn();
 
@@ -327,8 +365,9 @@ describe("deleteMyAccount", () => {
     prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Admin", passwordHash });
     prisma.user.count.mockResolvedValue(2);
     prisma.user.delete.mockResolvedValue({});
+    mockValidOtp();
 
-    const req = { body: { password: "correct-horse-1" }, user: { id: 1, role: "Admin" } };
+    const req = { body: { password: "correct-horse-1", otpCode: VALID_OTP }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
     const next = vi.fn();
 
@@ -389,9 +428,10 @@ describe("changeMyPassword", () => {
   it("rejects an incorrect current password", async () => {
     const passwordHash = await bcrypt.hash("correct-horse-1", 10);
     prisma.user.findUnique.mockResolvedValue({ id: 1, passwordHash, tokenVersion: 0 });
+    mockValidOtp();
 
     const req = {
-      body: { currentPassword: "wrong-password", newPassword: "brand-new-pass-1" },
+      body: { currentPassword: "wrong-password", newPassword: "brand-new-pass-1", otpCode: VALID_OTP },
       user: { id: 1, role: "Parent" },
     };
     const res = mockRes();
@@ -418,9 +458,10 @@ describe("changeMyPassword", () => {
       role: "Parent",
       tokenVersion: 1,
     });
+    mockValidOtp();
 
     const req = {
-      body: { currentPassword: "correct-horse-1", newPassword: "brand-new-pass-1" },
+      body: { currentPassword: "correct-horse-1", newPassword: "brand-new-pass-1", otpCode: VALID_OTP },
       user: { id: 1, role: "Parent" },
     };
     const res = mockRes();
