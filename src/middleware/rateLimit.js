@@ -37,10 +37,21 @@ if (!env.redisUrl) {
   );
 }
 
+// Live-attendance paths poll every couple of seconds while a session runs, which
+// is far above the general limit below (300 / 15 min ~ one request per 3 s per
+// IP) — and a whole school shares one IP. They are exempted here and instead
+// covered by sessionIpLimiter + sessionUserLimiter, which are sized for polling.
+// Matched on req.path, which is relative to the /api or /api/v1 mount.
+const LIVE_ATTENDANCE_PREFIXES = ["/attendance/session"];
+export function isLiveAttendancePath(path) {
+  return LIVE_ATTENDANCE_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
+}
+
 // General API traffic
 export const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 min
   limit: 300,
+  skip: (req) => isLiveAttendancePath(req.path),
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many requests, please try again later" },
@@ -124,4 +135,26 @@ export const profileUpdateLimiter = perUserLimiter(
   "rl:profile:",
   20,
   "Too many profile updates, please try again later"
+);
+
+// Live attendance (session start/stop/status, and later the signal/frame
+// endpoints). Two layers, because apiLimiter no longer covers these paths:
+//  - per-IP, mounted BEFORE auth: a generous ceiling so unauthenticated
+//    floods can't run unlimited. Sized for a whole school behind one IP.
+//  - per-user, mounted AFTER auth: ~1000 / 15 min allows status polling every
+//    1 s, while one runaway tab or stolen token can't hammer the API.
+export const sessionIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later" },
+  store: getStore("rl:session-ip:"),
+  passOnStoreError: true,
+});
+
+export const sessionUserLimiter = perUserLimiter(
+  "rl:session-user:",
+  1000,
+  "Too many requests, please try again later"
 );

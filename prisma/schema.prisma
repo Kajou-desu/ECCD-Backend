@@ -40,6 +40,7 @@ model User {
   children     ParentChild[]
   notifications Notification[]
   accountActionOtps AccountActionOtp[]
+  attendanceSessions AttendanceSession[]
 
   @@map("users")
 }
@@ -176,6 +177,30 @@ model Attendance {
   @@index([date])
   @@index([status])
   @@map("attendance")
+}
+
+enum AttendanceSessionStatus {
+  active
+  closed
+}
+
+// A teacher-started live attendance run (Start/Stop Attendance in the header).
+// At most ONE session can be active at a time — enforced by a partial unique
+// index in the migration (Prisma can't express partial indexes in the schema).
+model AttendanceSession {
+  id          Int                     @id @default(autoincrement())
+  date        DateTime                @db.Date // school-timezone day, computed server-side
+  status      AttendanceSessionStatus @default(active)
+  startedAt   DateTime                @default(now())
+  endedAt     DateTime?
+  // Nullable + SetNull: deleting a teacher account must not be blocked by, or
+  // erase, the history of sessions they ran.
+  startedById Int?
+
+  startedBy   User? @relation(fields: [startedById], references: [id], onDelete: SetNull)
+
+  @@index([date])
+  @@map("attendance_sessions")
 }
 
 model Album {

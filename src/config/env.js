@@ -37,6 +37,17 @@ if (!isProduction && !smtpConfigured) {
   );
 }
 
+// The school's local timezone. Attendance "today" must be computed in it, not
+// in the server's timezone: the server runs in UTC, and a 7:30 AM Manila
+// arrival is still "yesterday" in UTC. Fails closed on an invalid zone name.
+const schoolTimezone = process.env.SCHOOL_TIMEZONE || "Asia/Manila";
+try {
+  new Intl.DateTimeFormat("en-CA", { timeZone: schoolTimezone });
+} catch {
+  console.error(`SCHOOL_TIMEZONE is not a valid IANA timezone: "${schoolTimezone}"`);
+  process.exit(1);
+}
+
 const clientOrigins = (process.env.CLIENT_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -48,6 +59,7 @@ export const env = {
   nodeEnv,
   isProduction,
   redisUrl: process.env.REDIS_URL || null,
+  schoolTimezone,
   smtp: {
     configured: smtpConfigured,
     host: process.env.SMTP_HOST,
