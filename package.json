@@ -11,7 +11,8 @@
     "test": "vitest run",
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "gateway:create": "node scripts/create-gateway.js"
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",

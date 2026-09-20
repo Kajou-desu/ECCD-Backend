@@ -40,9 +40,9 @@ if (!env.redisUrl) {
 // Live-attendance paths poll every couple of seconds while a session runs, which
 // is far above the general limit below (300 / 15 min ~ one request per 3 s per
 // IP) — and a whole school shares one IP. They are exempted here and instead
-// covered by sessionIpLimiter + sessionUserLimiter, which are sized for polling.
+// covered by their own limiters below, which are sized for polling.
 // Matched on req.path, which is relative to the /api or /api/v1 mount.
-const LIVE_ATTENDANCE_PREFIXES = ["/attendance/session"];
+const LIVE_ATTENDANCE_PREFIXES = ["/attendance/session", "/attendance/gateway"];
 export function isLiveAttendancePath(path) {
   return LIVE_ATTENDANCE_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }
@@ -158,3 +158,27 @@ export const sessionUserLimiter = perUserLimiter(
   1000,
   "Too many requests, please try again later"
 );
+
+// ESP32 BLE gateway: posts a batch every few seconds while a session runs.
+// Same two layers as above — IP ceiling before auth, then per authenticated
+// device (a gateway with a leaked key can't flood beyond its own budget).
+export const gatewayIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later" },
+  store: getStore("rl:gateway-ip:"),
+  passOnStoreError: true,
+});
+
+export const gatewayDeviceLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 1500,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later" },
+  store: getStore("rl:gateway-device:"),
+  passOnStoreError: true,
+  keyGenerator: (req) => (req.gateway?.id != null ? `gateway:${req.gateway.id}` : "gateway:unknown"),
+});

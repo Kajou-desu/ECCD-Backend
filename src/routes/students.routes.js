@@ -12,6 +12,12 @@ import {
 import { uploadStudentDocuments, deleteStudentDocument } from "../controllers/studentDocuments.controller.js";
 import { getSubmissions } from "../controllers/submissions.controller.js";
 import { getChildAttendance } from "../controllers/attendance.controller.js";
+import {
+  listBleDevices,
+  addBleDevice,
+  setBleDeviceEnabled,
+  removeBleDevice,
+} from "../controllers/bleDevices.controller.js";
 import { getChildProgress } from "../controllers/parent.controller.js";
 
 const router = Router();
@@ -31,6 +37,11 @@ router.post(
   uploadStudentDocuments
 );
 router.delete("/:id/documents/:documentId", requireRole("Teacher", "Admin"), deleteStudentDocument);
+
+router.get("/:id/ble-devices", requireRole("Teacher", "Admin"), listBleDevices);
+router.post("/:id/ble-devices", requireRole("Teacher", "Admin"), addBleDevice);
+router.patch("/:id/ble-devices/:deviceId", requireRole("Teacher", "Admin"), setBleDeviceEnabled);
+router.delete("/:id/ble-devices/:deviceId", requireRole("Teacher", "Admin"), removeBleDevice);
 
 router.get("/:childId/submissions", getSubmissions);
 router.get("/:childId/attendance", getChildAttendance);

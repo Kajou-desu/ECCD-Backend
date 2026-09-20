@@ -132,6 +132,7 @@ model Student {
   attendance  Attendance[]
   submissions Submission[]
   documents   StudentDocument[]
+  bleDevices  StudentBleDevice[]
 
   @@index([status])
   @@index([session])
@@ -201,6 +202,35 @@ model AttendanceSession {
 
   @@index([date])
   @@map("attendance_sessions")
+}
+
+// A BLE tag/beacon carried by a student. Deliberately its own table (not
+// columns on Student): a student can have several tags, tags get replaced or
+// disabled, and a tag identifies exactly ONE student (globally unique).
+model StudentBleDevice {
+  id               Int      @id @default(autoincrement())
+  studentId        Int
+  deviceIdentifier String   @unique // normalized upper-case MAC, e.g. D7:40:47:15:14:90
+  enabled          Boolean  @default(true)
+  registeredAt     DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId])
+  @@map("student_ble_devices")
+}
+
+// An ESP32 BLE gateway. Authenticates with a random key that is shown once at
+// creation (scripts/create-gateway.js); only its SHA-256 hash is stored.
+model BleGateway {
+  id         Int       @id @default(autoincrement())
+  name       String
+  keyHash    String
+  enabled    Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime?
+
+  @@map("ble_gateways")
 }
 
 model Album {

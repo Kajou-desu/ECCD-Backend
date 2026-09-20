@@ -3,6 +3,7 @@ import authRoutes from "./auth.routes.js";
 import studentRoutes from "./students.routes.js";
 import attendanceRoutes from "./attendance.routes.js";
 import attendanceSessionRoutes from "./attendanceSession.routes.js";
+import attendanceGatewayRoutes from "./attendanceGateway.routes.js";
 import albumRoutes from "./albums.routes.js";
 import materialRoutes from "./materials.routes.js";
 import submissionRoutes from "./submissions.routes.js";
@@ -23,6 +24,7 @@ router.use("/students", studentRoutes); // /api/students/*
 // Must be mounted BEFORE /attendance: that router has its own router.use(requireAuth)
 // and a PUT /:studentId, and the session routes need their own limiters first.
 router.use("/attendance/session", attendanceSessionRoutes); // /api/attendance/session/*
+router.use("/attendance/gateway", attendanceGatewayRoutes); // /api/attendance/gateway/* (ESP32, device-key auth)
 router.use("/attendance", attendanceRoutes); // /api/attendance/*
 router.use("/albums", albumRoutes); // /api/albums
 router.use("/materials", materialRoutes); // /api/materials/*

@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
+import { findActiveSession } from "../lib/activeSession.js";
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 
 // Teacher/admin only (enforced at route level). None of these read anything
@@ -21,9 +22,7 @@ function toResponse(session) {
   };
 }
 
-function findActive() {
-  return prisma.attendanceSession.findFirst({ where: { status: "active" }, select: SELECT });
-}
+const findActive = () => findActiveSession(SELECT);
 
 // GET /attendance/session/current -> { session: {...} | null }
 export async function getCurrentSession(_req, res, next) {
