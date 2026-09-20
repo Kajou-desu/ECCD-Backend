@@ -2,6 +2,8 @@ import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { findActiveSession } from "../lib/activeSession.js";
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
+import { isSignalPresent } from "../services/attendanceVerification.service.js";
+import { isRecognitionConfigured } from "../services/recognitionClient.js";
 
 // Teacher/admin only (enforced at route level). None of these read anything
 // from the request body: the session's date comes from the server clock in the
@@ -86,6 +88,84 @@ export async function stopSession(req, res, next) {
       logger.info({ userId: req.user.id, count }, "Attendance session stopped");
     }
     res.json({ session: null });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// A gateway that has been heard from this recently counts as online.
+const GATEWAY_ONLINE_MS = 30_000;
+
+// GET /attendance/session/monitor — everything the live monitor screen needs in
+// one call: who is verified, who has only one of the two signals so far, and
+// whether the hardware side is alive. Students appear once they have at least
+// one CURRENT signal; a signal that has gone stale simply drops off.
+export async function getMonitor(_req, res, next) {
+  try {
+    const session = await findActive();
+    if (!session) return res.json({ session: null });
+
+    const now = new Date();
+    const [signals, verifications, gateway] = await Promise.all([
+      prisma.attendanceSignal.findMany({
+        where: { sessionId: session.id },
+        select: {
+          studentId: true,
+          kind: true,
+          score: true,
+          hits: true,
+          lastSeenAt: true,
+          student: { select: { name: true } },
+        },
+      }),
+      prisma.attendanceVerification.findMany({
+        where: { sessionId: session.id },
+        select: {
+          verifiedAt: true,
+          attendance: { select: { studentId: true, student: { select: { name: true } } } },
+        },
+      }),
+      prisma.bleGateway.findFirst({
+        where: { enabled: true, lastSeenAt: { gt: new Date(now.getTime() - GATEWAY_ONLINE_MS) } },
+        select: { id: true },
+      }),
+    ]);
+
+    const byStudent = new Map();
+    const entry = (studentId, name) => {
+      if (!byStudent.has(studentId)) {
+        byStudent.set(studentId, { studentId, name, face: false, ble: false, verifiedAt: null });
+      }
+      return byStudent.get(studentId);
+    };
+    for (const sig of signals) {
+      if (isSignalPresent(sig.kind, sig, now)) entry(sig.studentId, sig.student.name)[sig.kind] = true;
+    }
+    for (const v of verifications) {
+      entry(v.attendance.studentId, v.attendance.student.name).verifiedAt = v.verifiedAt;
+    }
+
+    const rank = { verified: 0, face_only: 1, ble_only: 2 };
+    const students = [...byStudent.values()]
+      .map(({ face, ble, ...rest }) => ({
+        ...rest,
+        status: rest.verifiedAt ? "verified" : face ? "face_only" : "ble_only",
+      }))
+      .sort(
+        (a, b) =>
+          rank[a.status] - rank[b.status] ||
+          (b.verifiedAt?.getTime() ?? 0) - (a.verifiedAt?.getTime() ?? 0) ||
+          a.name.localeCompare(b.name),
+      );
+
+    const count = (status) => students.filter((s) => s.status === status).length;
+    res.json({
+      session: toResponse(session),
+      gatewayOnline: Boolean(gateway),
+      recognitionAvailable: isRecognitionConfigured(),
+      counts: { verified: count("verified"), faceOnly: count("face_only"), bleOnly: count("ble_only") },
+      students,
+    });
   } catch (err) {
     next(err);
   }

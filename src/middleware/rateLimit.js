@@ -141,8 +141,9 @@ export const profileUpdateLimiter = perUserLimiter(
 // endpoints). Two layers, because apiLimiter no longer covers these paths:
 //  - per-IP, mounted BEFORE auth: a generous ceiling so unauthenticated
 //    floods can't run unlimited. Sized for a whole school behind one IP.
-//  - per-user, mounted AFTER auth: ~1000 / 15 min allows status polling every
-//    1 s, while one runaway tab or stolen token can't hammer the API.
+//  - per-user, mounted AFTER auth: 2000 / 15 min covers the header polling
+//    every 3 s plus the live monitor every 2 s (~750 together) with room for a
+//    second open tab, while one runaway tab or stolen token can't hammer the API.
 export const sessionIpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 3000,
@@ -155,7 +156,7 @@ export const sessionIpLimiter = rateLimit({
 
 export const sessionUserLimiter = perUserLimiter(
   "rl:session-user:",
-  1000,
+  2000,
   "Too many requests, please try again later"
 );
 

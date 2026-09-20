@@ -9,6 +9,7 @@ import {
 } from "../middleware/rateLimit.js";
 import {
   getCurrentSession,
+  getMonitor,
   startSession,
   stopSession,
 } from "../controllers/attendanceSession.controller.js";
@@ -41,6 +42,7 @@ router.post(
 router.use(sessionIpLimiter, requireAuth, requireRole("Teacher", "Admin"), sessionUserLimiter);
 
 router.get("/current", getCurrentSession);
+router.get("/monitor", getMonitor);
 router.post("/start", startSession);
 router.post("/stop", stopSession);
 

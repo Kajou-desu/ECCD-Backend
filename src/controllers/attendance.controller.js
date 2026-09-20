@@ -40,6 +40,7 @@ export async function getAttendance(req, res, next) {
     // page, not the whole roster.
     const records = await prisma.attendance.findMany({
       where: { date: dateObj, studentId: { in: students.map((s) => s.id) } },
+      include: { verification: { select: { id: true } } },
     });
     const attendanceByStudentId = new Map(records.map((r) => [r.studentId, r]));
 
@@ -50,6 +51,11 @@ export async function getAttendance(req, res, next) {
       photo: signFileUrl(req, s.photo),
       status: attendanceByStudentId.get(s.id)?.status ?? null,
       arrivedAt: attendanceByStudentId.get(s.id)?.arrivedAt ?? null,
+      // true only for a "present" the system recorded itself (face + BLE); a
+      // record a teacher entered or changed by hand is never "verified".
+      verified:
+        attendanceByStudentId.get(s.id)?.status === "present" &&
+        Boolean(attendanceByStudentId.get(s.id)?.verification),
     }));
 
     if (pagination) res.set("X-Total-Count", String(total));
@@ -79,6 +85,8 @@ export async function updateAttendance(req, res, next) {
         arrivedAt: status === "present" ? new Date() : null,
       },
     });
+    // A manual edit supersedes any automatic evidence for this record.
+    await prisma.attendanceVerification.deleteMany({ where: { attendanceId: record.id } });
     res.json(record);
   } catch (err) {
     next(err);
@@ -119,6 +127,10 @@ export async function recordAttendance(req, res, next) {
         })
       )
     );
+    // A manual edit supersedes any automatic evidence for these records.
+    await prisma.attendanceVerification.deleteMany({
+      where: { attendanceId: { in: results.map((r) => r.id) } },
+    });
     res.status(201).json(results);
   } catch (err) {
     next(err);

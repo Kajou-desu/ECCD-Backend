@@ -34,6 +34,7 @@ describe("attendance session routes — access control (default deny)", () => {
     ["get", "/api/attendance/session/current"],
     ["post", "/api/attendance/session/start"],
     ["post", "/api/attendance/session/stop"],
+    ["get", "/api/attendance/session/monitor"],
   ])("%s %s: 401 without a token, and never touches the session table", async (method, url) => {
     const res = await request(app)[method](url);
     expect(res.status).toBe(401);
@@ -48,6 +49,7 @@ describe("attendance session routes — access control (default deny)", () => {
       ["get", "/api/attendance/session/current"],
       ["post", "/api/attendance/session/start"],
       ["post", "/api/attendance/session/stop"],
+      ["get", "/api/attendance/session/monitor"],
     ]) {
       const res = await request(app)[method](url).set("Authorization", auth);
       expect(res.status).toBe(403);
