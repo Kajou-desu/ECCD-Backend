@@ -182,3 +182,23 @@ export const gatewayDeviceLimiter = rateLimit({
   passOnStoreError: true,
   keyGenerator: (req) => (req.gateway?.id != null ? `gateway:${req.gateway.id}` : "gateway:unknown"),
 });
+
+// Camera frames (POST /attendance/session/frame): the teacher's device sends
+// roughly one every 0.7 s while streaming (~1300 / 15 min), so these need more
+// headroom than the polling limiter and are kept separate from it — a stream
+// must never exhaust the budget for Start/Stop or status polling, or vice versa.
+export const frameIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 6000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later" },
+  store: getStore("rl:frame-ip:"),
+  passOnStoreError: true,
+});
+
+export const frameUserLimiter = perUserLimiter(
+  "rl:frame-user:",
+  2000,
+  "Too many requests, please try again later"
+);

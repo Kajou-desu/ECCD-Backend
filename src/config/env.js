@@ -77,6 +77,40 @@ const verification = {
   minHits: numberEnv("VERIFY_MIN_HITS", 2, 1, 10),
 };
 
+// Optional face-recognition microservice (face-recognition-service/). When
+// unset, the frame endpoint answers 503 and the rest of the app is unaffected.
+// When set it must be complete and safe: a real http(s) URL, plain http only for
+// loopback in production (frames contain children's faces), and a strong key.
+function recognitionConfig() {
+  const rawUrl = process.env.RECOGNITION_SERVICE_URL;
+  const key = process.env.RECOGNITION_SERVICE_KEY;
+  if (!rawUrl && !key) return null;
+
+  let url;
+  try {
+    url = new URL(rawUrl || "");
+  } catch {
+    console.error("RECOGNITION_SERVICE_URL must be a valid URL.");
+    process.exit(1);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    console.error("RECOGNITION_SERVICE_URL must be http(s).");
+    process.exit(1);
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (isProduction && url.protocol !== "https:" && !loopback) {
+    console.error("In production RECOGNITION_SERVICE_URL must use https unless it is localhost.");
+    process.exit(1);
+  }
+  if (!key || key.length < 32) {
+    console.error("RECOGNITION_SERVICE_KEY is required (32+ random characters) when RECOGNITION_SERVICE_URL is set.");
+    process.exit(1);
+  }
+  return { baseUrl: url.origin, key };
+}
+
+const recognition = recognitionConfig();
+
 const clientOrigins = (process.env.CLIENT_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -90,6 +124,7 @@ export const env = {
   redisUrl: process.env.REDIS_URL || null,
   schoolTimezone,
   verification,
+  recognition,
   smtp: {
     configured: smtpConfigured,
     host: process.env.SMTP_HOST,
