@@ -48,6 +48,35 @@ try {
   process.exit(1);
 }
 
+// Face + BLE verification thresholds — tunable without a code change. They must
+// be CALIBRATED on the real hardware and classroom (see docs/SMART_ATTENDANCE.md);
+// the defaults are only a starting point. Out-of-range or non-numeric values
+// fail closed at startup rather than silently loosening verification.
+function numberEnv(name, fallback, min, max) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    console.error(`${name} must be a number between ${min} and ${max} (got "${raw}").`);
+    process.exit(1);
+  }
+  return value;
+}
+
+const verification = {
+  // Face: best-match distance must be at or below this (lower = stricter).
+  faceMaxDistance: numberEnv("FACE_MAX_DISTANCE", 0.5, 0.1, 0.9),
+  // Face: the runner-up (a different student) must be at least this much
+  // farther than the best match, so look-alikes and siblings come back unknown.
+  faceMinMargin: numberEnv("FACE_MIN_MARGIN", 0.05, 0, 0.5),
+  // BLE: smoothed RSSI (dBm) must be at or above this (higher = must be nearer).
+  bleMinRssi: numberEnv("BLE_MIN_RSSI", -70, -100, -20),
+  // Both signals must have been seen within this many seconds of each other/now.
+  windowMs: numberEnv("VERIFY_WINDOW_SEC", 30, 5, 300) * 1000,
+  // Each signal needs this many sightings in a row (guards against one stray reading).
+  minHits: numberEnv("VERIFY_MIN_HITS", 2, 1, 10),
+};
+
 const clientOrigins = (process.env.CLIENT_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -60,6 +89,7 @@ export const env = {
   isProduction,
   redisUrl: process.env.REDIS_URL || null,
   schoolTimezone,
+  verification,
   smtp: {
     configured: smtpConfigured,
     host: process.env.SMTP_HOST,

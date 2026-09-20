@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { findActiveSession } from "../lib/activeSession.js";
+import { recordSignal } from "../services/attendanceVerification.service.js";
 
 // Gateway-key authenticated (see routes/attendanceGateway.routes.js). These
 // handlers never read who the student is from the request: the gateway only
@@ -21,7 +22,8 @@ export async function getRegistry(_req, res, next) {
   }
 }
 
-// Resolves sightings to students for the active session. `req.body` has already
+// Resolves sightings to students for the active session and feeds each one
+// into the verification service. `req.body` has already
 // been validated/normalised by gatewayEventsSchema. The response tells the
 // gateway whether a session is running so it can idle when nothing is.
 export async function postEvents(req, res, next) {
@@ -46,7 +48,21 @@ export async function postEvents(req, res, next) {
     });
     const studentByDevice = new Map(devices.map((d) => [d.deviceIdentifier, d.studentId]));
 
-    const accepted = events.filter((e) => studentByDevice.has(e.deviceIdentifier)).length;
+    // Sequential on purpose: each sighting smooths into the previous one, so
+    // two readings for the same student must not race each other.
+    let accepted = 0;
+    for (const event of events) {
+      const studentId = studentByDevice.get(event.deviceIdentifier);
+      if (studentId === undefined) continue; // not a registered tag: ignore
+      await recordSignal({
+        sessionId: session.id,
+        sessionDate: session.date,
+        studentId,
+        kind: "ble",
+        value: event.rssi,
+      });
+      accepted += 1;
+    }
     res.json({ sessionActive: true, accepted });
   } catch (err) {
     next(err);

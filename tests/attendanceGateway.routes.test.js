@@ -15,7 +15,12 @@ vi.mock("../src/lib/prisma.js", () => ({
   },
 }));
 
+vi.mock("../src/services/attendanceVerification.service.js", () => ({
+  recordSignal: vi.fn().mockResolvedValue({ state: "pending" }),
+}));
+
 const { prisma } = await import("../src/lib/prisma.js");
+const { recordSignal } = await import("../src/services/attendanceVerification.service.js");
 const { signToken } = await import("../src/utils/jwt.js");
 const { generateSecret, hashSecret, formatDeviceKey } = await import("../src/utils/deviceKey.js");
 const { app } = await import("../src/app.js");
@@ -96,10 +101,12 @@ describe("gateway endpoints — behaviour", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ sessionActive: false, accepted: 0 });
     expect(prisma.studentBleDevice.findMany).not.toHaveBeenCalled();
+    expect(recordSignal).not.toHaveBeenCalled();
   });
 
   it("POST /events during a session counts only registered tags; heartbeat works", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValue({ id: 3, date: new Date() });
+    const sessionDate = new Date("2026-09-20T00:00:00.000Z");
+    prisma.attendanceSession.findFirst.mockResolvedValue({ id: 3, date: sessionDate });
     prisma.studentBleDevice.findMany.mockResolvedValue([{ deviceIdentifier: "D7:40:47:15:14:90", studentId: 5 }]);
 
     const res = await request(app)
@@ -111,8 +118,17 @@ describe("gateway endpoints — behaviour", () => {
       ] });
     expect(res.body).toEqual({ sessionActive: true, accepted: 1 });
 
+    // Only the registered tag reaches verification, as a BLE signal for the
+    // student the SERVER's registry maps it to (the gateway never names one).
+    expect(recordSignal).toHaveBeenCalledTimes(1);
+    expect(recordSignal).toHaveBeenCalledWith({
+      sessionId: 3, sessionDate, studentId: 5, kind: "ble", value: -50,
+    });
+
+    vi.mocked(recordSignal).mockClear();
     const beat = await request(app).post("/api/attendance/gateway/events").set("X-Device-Key", KEY).send({ events: [] });
     expect(beat.body).toEqual({ sessionActive: true, accepted: 0 });
+    expect(recordSignal).not.toHaveBeenCalled(); // a heartbeat records nothing
   });
 
   it.each([

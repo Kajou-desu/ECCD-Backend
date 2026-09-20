@@ -133,6 +133,7 @@ model Student {
   submissions Submission[]
   documents   StudentDocument[]
   bleDevices  StudentBleDevice[]
+  attendanceSignals AttendanceSignal[]
 
   @@index([status])
   @@index([session])
@@ -173,6 +174,7 @@ model Attendance {
   updatedAt DateTime         @updatedAt
 
   student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  verification AttendanceVerification?
 
   @@unique([studentId, date])
   @@index([date])
@@ -199,9 +201,60 @@ model AttendanceSession {
   startedById Int?
 
   startedBy   User? @relation(fields: [startedById], references: [id], onDelete: SetNull)
+  signals       AttendanceSignal[]
+  verifications AttendanceVerification[]
 
   @@index([date])
   @@map("attendance_sessions")
+}
+
+enum SignalKind {
+  face
+  ble
+}
+
+// The latest sighting of a student by one signal source during a session: one
+// row per (session, student, kind), updated in place. Face and BLE arrive
+// independently and asynchronously; the verification service marks a student
+// present only when BOTH are fresh and stable. Not an audit trail (that is
+// AttendanceVerification) — just working state.
+model AttendanceSignal {
+  id         Int        @id @default(autoincrement())
+  sessionId  Int
+  studentId  Int
+  kind       SignalKind
+  // Smoothed value. face: match distance (lower = closer match).
+  // ble: RSSI in dBm (higher = stronger, i.e. nearer).
+  score      Float
+  // Sightings in the current unbroken run; resets after a gap longer than the
+  // verification window. Guards against a single stray reading counting.
+  hits       Int        @default(1)
+  lastSeenAt DateTime
+
+  session AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  student Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, studentId, kind])
+  @@index([sessionId])
+  @@map("attendance_signals")
+}
+
+// Audit trail for AUTOMATIC attendance: the evidence behind a "present" that
+// the system (not a teacher) recorded. A record with no row here was marked by
+// hand through the roster.
+model AttendanceVerification {
+  id           Int      @id @default(autoincrement())
+  attendanceId Int      @unique
+  sessionId    Int?
+  faceDistance Float?
+  bleRssi      Float?
+  verifiedAt   DateTime @default(now())
+
+  attendance Attendance         @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  session    AttendanceSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@map("attendance_verifications")
 }
 
 // A BLE tag/beacon carried by a student. Deliberately its own table (not
