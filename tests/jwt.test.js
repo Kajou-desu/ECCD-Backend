@@ -49,4 +49,22 @@ describe("signToken / verifyToken", () => {
     );
     expect(() => verifyToken(expired)).toThrow();
   });
+
+  it("rejects a token signed with a different HMAC algorithm, even with the right secret", () => {
+    const hs512 = jwt.sign({ id: 1, role: "Admin", tokenVersion: 0 }, process.env.JWT_SECRET, {
+      algorithm: "HS512",
+    });
+    expect(() => verifyToken(hs512)).toThrow();
+  });
+
+  it("rejects an unsigned (alg: none) token", () => {
+    const b64 = (obj) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+    const unsigned = `${b64({ alg: "none", typ: "JWT" })}.${b64({ id: 1, role: "Admin", tokenVersion: 0 })}.`;
+    expect(() => verifyToken(unsigned)).toThrow();
+  });
+
+  it("signs with HS256", () => {
+    const { header } = jwt.decode(signToken(user), { complete: true });
+    expect(header.alg).toBe("HS256");
+  });
 });

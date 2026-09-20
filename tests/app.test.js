@@ -63,14 +63,23 @@ describe("app wiring", () => {
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
-  it("pins CORS to the configured origin (never a wildcard)", async () => {
+  it("echoes the configured origin for an allowed client (never a wildcard)", async () => {
+    const res = await request(app)
+      .get("/health")
+      .set("Origin", "http://localhost:5173");
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
+  });
+
+  it("rejects a disallowed origin with a clean 403 and no CORS headers", async () => {
+    // CORS was changed from a single fixed origin to an allow-list (multiple
+    // client origins). A stranger's origin is refused outright — previously
+    // this surfaced as a 500 and an error-level log line.
     const res = await request(app)
       .get("/health")
       .set("Origin", "https://evil.example.com");
-    // A fixed ACAO string is intentional here: the browser — not the
-    // server — enforces the match against the *requesting page's* origin,
-    // so a non-'*' fixed value is what prevents other origins from reading
-    // the response in an actual browser. Confirms it's never '*'.
-    expect(res.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ message: "Not allowed by CORS" });
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 });

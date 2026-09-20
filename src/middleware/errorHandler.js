@@ -18,7 +18,11 @@ export function notFoundHandler(_req, res) {
 
 export function errorHandler(err, req, res, _next) {
   // Full detail (stack, Prisma internals, etc.) goes to server logs only.
-  logger.error({ err, reqId: req.id, path: req.path, method: req.method }, err.message);
+  // Deliberate client-facing errors (AppError, e.g. a 403 for a disallowed
+  // CORS origin or a 400 for bad input) are expected traffic, so they log as
+  // warnings — otherwise probing the API pages whoever watches error logs.
+  const level = err.expose && (err.status || 400) < 500 ? "warn" : "error";
+  logger[level]({ err, reqId: req.id, path: req.path, method: req.method }, err.message);
 
   if (err.expose) {
     return res.status(err.status || 400).json({ message: err.message });

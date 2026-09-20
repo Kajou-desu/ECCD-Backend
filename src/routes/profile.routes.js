@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
-import { authLimiter } from "../middleware/rateLimit.js";
+import { authLimiter, profileUpdateLimiter } from "../middleware/rateLimit.js";
 import {
   updateUser,
   updateMyProfile,
@@ -21,8 +21,8 @@ router.put("/update", requireAuth, requireRole("Teacher", "Admin"), updateUser);
 
 // Self-service — any authenticated role, scoped to the caller's own
 // account only (req.user.id, never a client-supplied id).
-router.put("/me", requireAuth, updateMyProfile);
-router.post("/me/photo", requireAuth, upload.single("photo"), uploadMyProfilePhoto);
+router.put("/me", requireAuth, profileUpdateLimiter, updateMyProfile);
+router.post("/me/photo", requireAuth, upload.single("photo", { imagesOnly: true }), uploadMyProfilePhoto);
 router.post("/me/password/request-otp", requireAuth, authLimiter, requestPasswordChangeOtp);
 router.put("/me/password", requireAuth, authLimiter, changeMyPassword);
 router.post("/me/delete/request-otp", requireAuth, authLimiter, requestAccountDeletionOtp);

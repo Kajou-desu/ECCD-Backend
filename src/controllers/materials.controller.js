@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { parseId, parsePagination, requireNonEmptyString, optionalString } from "../utils/validate.js";
+import { removeStoredFiles } from "../lib/fileStorage.js";
 
 function toMaterialResponse(req, material) {
   return { ...material, fileUrl: signFileUrl(req, material.fileUrl) };
@@ -54,6 +55,11 @@ export async function updateMaterial(req, res, next) {
     const id = parseId(req.params.id, "id");
     const { title, category, description } = req.body;
 
+    // Only needed when a replacement file arrives: the old one becomes an orphan.
+    const previous = req.file
+      ? await prisma.material.findUnique({ where: { id }, select: { fileUrl: true } })
+      : null;
+
     const material = await prisma.material.update({
       where: { id },
       data: {
@@ -63,6 +69,7 @@ export async function updateMaterial(req, res, next) {
         ...(req.file && { fileUrl: fileUrl(req, req.file.filename) }),
       },
     });
+    if (previous?.fileUrl) await removeStoredFiles(previous.fileUrl);
     res.json(toMaterialResponse(req, material));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Material not found" });
@@ -73,7 +80,16 @@ export async function updateMaterial(req, res, next) {
 export async function deleteMaterial(req, res, next) {
   try {
     const id = parseId(req.params.id, "id");
-    await prisma.material.delete({ where: { id } });
+
+    // Deleting a material cascades to the students' submitted work; collect
+    // those files first so nothing is left on disk once the rows are gone.
+    const submissions = await prisma.submission.findMany({
+      where: { materialId: id },
+      select: { fileUrl: true },
+    });
+
+    const deleted = await prisma.material.delete({ where: { id } });
+    await removeStoredFiles(deleted.fileUrl, submissions.map((s) => s.fileUrl));
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Material not found" });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resetPasswordSchema } from "../src/schemas/auth.schema.js";
+import { resetPasswordSchema, loginSchema } from "../src/schemas/auth.schema.js";
 import { emailRateLimitKey } from "../src/middleware/rateLimit.js";
 
 describe("resetPasswordSchema", () => {
@@ -23,6 +23,26 @@ describe("resetPasswordSchema", () => {
   it("rejects a digits-only password", () => {
     const result = resetPasswordSchema.safeParse({ ...base, newPassword: "1234567890" });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("length bounds", () => {
+  it("rejects a new password over bcrypt's 72-byte limit rather than silently truncating it", () => {
+    const result = resetPasswordSchema.safeParse({
+      email: "user@example.com",
+      otpCode: "123456",
+      newPassword: `a1${"x".repeat(71)}`,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an oversized email and an oversized login password", () => {
+    expect(loginSchema.safeParse({ email: `${"a".repeat(250)}@x.co`, password: "pw" }).success).toBe(false);
+    expect(loginSchema.safeParse({ email: "a@b.co", password: "x".repeat(129) }).success).toBe(false);
+  });
+
+  it("still accepts a normal login", () => {
+    expect(loginSchema.safeParse({ email: "a@b.co", password: "whatever-existing-password" }).success).toBe(true);
   });
 });
 

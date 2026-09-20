@@ -31,6 +31,8 @@ jobs:
           node-version: "20"
           cache: "npm"
       - run: npm ci
+      # Fails the build on known high/critical advisories in production dependencies.
+      - run: npm audit --omit=dev --audit-level=high
       - run: npx prisma migrate deploy
       - run: npx prisma generate
       - run: npm test

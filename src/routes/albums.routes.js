@@ -21,7 +21,7 @@ router.delete("/:albumId", requireRole("Teacher", "Admin"), deleteAlbum);
 router.post(
   "/:albumId/photos",
   requireRole("Teacher", "Admin"),
-  upload.array("photos", 20),
+  upload.array("photos", 20, { imagesOnly: true }),
   addAlbumPhotos
 );
 router.delete("/:albumId/photos/:photoId", requireRole("Teacher", "Admin"), deleteAlbumPhoto);

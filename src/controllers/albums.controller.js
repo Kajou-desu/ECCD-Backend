@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { parseId, parsePagination, requireNonEmptyString } from "../utils/validate.js";
+import { removeStoredFiles } from "../lib/fileStorage.js";
 
 // Frontend reads photo.url (not fileUrl) everywhere it renders a photo
 // (PhotoThumbnail, PhotoPreviewModal, AlbumCard cover image), so every
@@ -88,7 +89,10 @@ export async function updateAlbum(req, res, next) {
 export async function deleteAlbum(req, res, next) {
   try {
     const id = parseId(req.params.albumId, "albumId");
+
+    const photos = await prisma.photo.findMany({ where: { albumId: id }, select: { fileUrl: true } });
     await prisma.album.delete({ where: { id } }); // cascades to photos
+    await removeStoredFiles(photos.map((p) => p.fileUrl));
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Album not found" });
@@ -142,6 +146,7 @@ export async function deleteAlbumPhoto(req, res, next) {
     }
 
     await prisma.photo.delete({ where: { id: photoId } });
+    await removeStoredFiles(photo.fileUrl);
     res.status(204).send();
   } catch (err) {
     next(err);

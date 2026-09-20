@@ -34,7 +34,15 @@ export function getFile(req, res, next) {
       throw new AppError("Not found", 404);
     }
 
-    res.sendFile(filePath);
+    // Files hold children's records and are reachable by a URL that
+    // encodes the credential (the signature). Express's default
+    // "public, max-age=0" lets shared caches/CDNs store the response — and a
+    // cache that ignores the query string would then serve it without the
+    // signature check. "private" keeps it to the requester's own browser.
+    res.sendFile(filePath, {
+      cacheControl: false,
+      headers: { "Cache-Control": "private, max-age=300" },
+    });
   } catch (err) {
     next(err);
   }

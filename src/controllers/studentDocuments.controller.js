@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { parseId } from "../utils/validate.js";
 import { toDocumentResponse } from "../utils/studentDocumentResponse.js";
+import { removeStoredFiles } from "../lib/fileStorage.js";
 
 // POST /api/students/:id/documents (multipart, field "documents", up to 10 files)
 // Teacher/admin only (enforced at route level).
@@ -44,11 +45,16 @@ export async function deleteStudentDocument(req, res, next) {
     const studentId = parseId(req.params.id, "id");
     const documentId = parseId(req.params.documentId, "documentId");
 
-    const result = await prisma.studentDocument.deleteMany({
+    // Student documents hold personal records (IDs, certificates), so the
+    // stored file must go with the row — not linger on disk after a "delete".
+    const document = await prisma.studentDocument.findFirst({
       where: { id: documentId, studentId },
+      select: { fileUrl: true },
     });
+    if (!document) return res.status(404).json({ message: "Document not found" });
 
-    if (result.count === 0) return res.status(404).json({ message: "Document not found" });
+    await prisma.studentDocument.deleteMany({ where: { id: documentId, studentId } });
+    await removeStoredFiles(document.fileUrl);
     res.status(204).send();
   } catch (err) {
     next(err);

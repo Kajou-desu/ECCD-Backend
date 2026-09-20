@@ -49,6 +49,7 @@ model PasswordResetOtp {
   email     String
   otpCode   String
   isUsed    Boolean  @default(false)
+  attempts  Int      @default(0)
   expiresAt DateTime
   createdAt DateTime @default(now())
 

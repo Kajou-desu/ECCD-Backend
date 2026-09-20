@@ -379,11 +379,25 @@ describe("deleteMyAccount", () => {
 });
 
 describe("updateMyProfile", () => {
+  async function accountWithPassword(email = "old@example.com") {
+    prisma.user.findUnique.mockResolvedValue({
+      id: 3,
+      email,
+      passwordHash: await bcrypt.hash("current-pass-123", 10),
+    });
+  }
+
   it("updates only the caller's own account, never accepting a role change", async () => {
+    await accountWithPassword();
     prisma.user.update.mockResolvedValue({ id: 3, firstName: "New", email: "new@example.com" });
 
     const req = {
-      body: { firstName: "New", email: "New@Example.com", role: "Admin" },
+      body: {
+        firstName: "New",
+        email: "New@Example.com",
+        role: "Admin",
+        currentPassword: "current-pass-123",
+      },
       user: { id: 3, role: "Parent" },
     };
     const res = mockRes();
@@ -395,7 +409,59 @@ describe("updateMyProfile", () => {
     expect(call.where).toEqual({ id: 3 });
     expect(call.data.email).toBe("new@example.com");
     expect(call.data.role).toBeUndefined(); // role is never accepted here
+    expect(call.data.currentPassword).toBeUndefined(); // never written to the row
     expect(res.json).toHaveBeenCalled();
+  });
+
+  it("refuses an email change without the current password (session-hijack takeover)", async () => {
+    await accountWithPassword();
+
+    const req = { body: { email: "attacker@example.com" }, user: { id: 3, role: "Parent" } };
+    const res = mockRes();
+    await updateMyProfile(req, res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an email change with a wrong current password", async () => {
+    await accountWithPassword();
+
+    const req = {
+      body: { email: "attacker@example.com", currentPassword: "wrong-password-1" },
+      user: { id: 3, role: "Parent" },
+    };
+    const res = mockRes();
+    await updateMyProfile(req, res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it("does not ask for the password when the email is unchanged (the form always resends it)", async () => {
+    await accountWithPassword("same@example.com");
+    prisma.user.update.mockResolvedValue({ id: 3, email: "same@example.com", phone: "0917 000 0000" });
+
+    const req = {
+      body: { email: "Same@Example.com", phone: "0917 000 0000" },
+      user: { id: 3, role: "Parent" },
+    };
+    const res = mockRes();
+    await updateMyProfile(req, res, vi.fn());
+
+    expect(prisma.user.update).toHaveBeenCalledOnce();
+    expect(res.status).not.toHaveBeenCalledWith(400);
+  });
+
+  it("does not ask for the password when the email isn't part of the update", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 3, firstName: "A", lastName: "B", middleName: null });
+    prisma.user.update.mockResolvedValue({ id: 3, phone: "0917 000 0000" });
+
+    const req = { body: { phone: "0917 000 0000" }, user: { id: 3, role: "Parent" } };
+    const res = mockRes();
+    await updateMyProfile(req, res, vi.fn());
+
+    expect(prisma.user.update).toHaveBeenCalledOnce();
   });
 });
 

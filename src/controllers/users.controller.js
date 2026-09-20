@@ -15,6 +15,8 @@ import {
 } from "../utils/validate.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { sendOtpEmail } from "../lib/mailer.js";
+import { removeStoredFiles } from "../lib/fileStorage.js";
+import { otpMatches, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
 
 const ROLES = ["Teacher", "Parent", "Guardian", "Admin"];
 
@@ -38,22 +40,12 @@ async function issueAccountOtp(userId, email, action) {
   );
 }
 
-// Plain !== leaks timing info proportional to how many leading digits
-// match. Codes are always fixed-length so a length check first is safe;
-// timingSafeEqual then compares the rest in constant time.
-function otpMatches(candidate, expected) {
-  const candidateBuf = Buffer.from(String(candidate ?? ""));
-  const expectedBuf = Buffer.from(String(expected));
-  if (candidateBuf.length !== expectedBuf.length) return false;
-  return crypto.timingSafeEqual(candidateBuf, expectedBuf);
-}
-
 async function verifyAccountOtp(userId, action, otpCode) {
   const record = await prisma.accountActionOtp.findFirst({
     where: { userId, action, isUsed: false },
     orderBy: { createdAt: "desc" },
   });
-  if (!record || record.expiresAt < new Date() || record.attempts >= 5) return false;
+  if (!record || record.expiresAt < new Date() || record.attempts >= MAX_OTP_ATTEMPTS) return false;
   if (!otpMatches(otpCode, record.otpCode)) {
     await prisma.accountActionOtp.update({
       where: { id: record.id },
@@ -261,6 +253,29 @@ export async function updateMyProfile(req, res, next) {
     if (req.body.phone !== undefined) data.phone = optionalPhone(req.body.phone, "phone");
     if (req.body.address !== undefined) data.address = optionalString(req.body.address, 500);
 
+    // The email is where password-reset codes go, so changing it is as
+    // sensitive as changing the password. Without this check, anyone holding
+    // a stolen session token could point the account at their own mailbox,
+    // trigger "forgot password", and own the account permanently. Require the
+    // current password, exactly as the password-change flow already does.
+    if (data.email !== undefined) {
+      const account = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { email: true, passwordHash: true },
+      });
+      if (!account) return res.status(404).json({ message: "Account not found" });
+
+      if (data.email !== account.email) {
+        const { currentPassword } = req.body;
+        if (typeof currentPassword !== "string" || !currentPassword) {
+          return res.status(400).json({ message: "Current password is required to change your email" });
+        }
+        if (!(await bcrypt.compare(currentPassword, account.passwordHash))) {
+          return res.status(401).json({ message: "Current password is incorrect" });
+        }
+      }
+    }
+
     if (data.firstName !== undefined || data.middleName !== undefined || data.lastName !== undefined) {
       const existing = await prisma.user.findUnique({ where: { id: req.user.id } });
       if (!existing) return res.status(404).json({ message: "Account not found" });
@@ -294,12 +309,18 @@ export async function uploadMyProfilePhoto(req, res, next) {
       return res.status(400).json({ message: "No photo file was provided" });
     }
 
+    const previous = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { profilePicture: true },
+    });
+
     const user = await prisma.user.update({
       where: { id: req.user.id },
       data: { profilePicture: fileUrl(req, req.file.filename) },
       select: PUBLIC_SELECT,
     });
 
+    if (previous?.profilePicture) await removeStoredFiles(previous.profilePicture);
     res.json(toUserResponse(req, user));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Account not found" });
@@ -394,6 +415,7 @@ export async function deleteMyAccount(req, res, next) {
     }
 
     await prisma.user.delete({ where: { id: user.id } });
+    await removeStoredFiles(user.profilePicture);
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Account not found" });
@@ -418,6 +440,7 @@ export async function deleteUser(req, res, next) {
     }
 
     await prisma.user.delete({ where: { id } }); // cascades to parent_children/notifications
+    await removeStoredFiles(existing.profilePicture);
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Account not found" });

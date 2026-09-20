@@ -43,6 +43,15 @@ describe("GET /api/files/:filename", () => {
     expect(res.text).toBe("test file contents");
   });
 
+  it("marks served files private so shared caches/CDNs don't store them", async () => {
+    const signedUrl = signFileUrl(mockReq(), TEST_FILENAME);
+    const { pathname, search } = new URL(signedUrl);
+    const res = await request(app).get(`${pathname}${search}`);
+
+    expect(res.headers["cache-control"]).toMatch(/\bprivate\b/);
+    expect(res.headers["cache-control"]).not.toMatch(/\bpublic\b/);
+  });
+
   it("rejects a request with no signature at all", async () => {
     const res = await request(app).get(`/api/files/${TEST_FILENAME}`);
     expect(res.status).toBe(404);

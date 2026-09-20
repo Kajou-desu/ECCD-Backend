@@ -18,6 +18,7 @@ import { toDocumentResponse } from "../utils/studentDocumentResponse.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { logger } from "../lib/logger.js";
+import { removeStoredFiles } from "../lib/fileStorage.js";
 
 // Lean shape for roster/table/dashboard views (StudentTable, EventCard,
 // UploadStudentWork picker, useStudents search).
@@ -273,7 +274,20 @@ export async function updateStudent(req, res, next) {
 export async function deleteStudent(req, res, next) {
   try {
     const id = parseId(req.params.id, "id");
-    await prisma.student.delete({ where: { id } }); // cascades to documents/attendance/submissions
+
+    // The delete cascades to documents and submissions in the database; gather
+    // their files first so the student's records don't outlive the student.
+    const [documents, submissions] = await Promise.all([
+      prisma.studentDocument.findMany({ where: { studentId: id }, select: { fileUrl: true } }),
+      prisma.submission.findMany({ where: { studentId: id }, select: { fileUrl: true } }),
+    ]);
+
+    const deleted = await prisma.student.delete({ where: { id } }); // cascades to documents/attendance/submissions
+    await removeStoredFiles(
+      deleted.photo,
+      documents.map((d) => d.fileUrl),
+      submissions.map((s) => s.fileUrl),
+    );
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Student not found" });

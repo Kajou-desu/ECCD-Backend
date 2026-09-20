@@ -89,3 +89,39 @@ export const authEmailLimiter = rateLimit({
   passOnStoreError: true,
   keyGenerator: emailRateLimitKey,
 });
+
+// The limiters above are keyed by IP, which is the wrong bucket for
+// authenticated actions: a school's Wi-Fi puts many parents behind one IP
+// (so they'd throttle each other), while one compromised account could still
+// spread abuse across IPs. These key on the authenticated user instead, so
+// they must be mounted AFTER requireAuth. Falls back to a shared bucket if
+// req.user is somehow missing, never to "unlimited".
+function perUserLimiter(prefix, limit, message) {
+  return rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message },
+    store: getStore(prefix),
+    passOnStoreError: true,
+    keyGenerator: (req) => (req.user?.id != null ? `user:${req.user.id}` : "user:unknown"),
+  });
+}
+
+// Uploads write to disk before any business rule runs, so cap how many one
+// account can attempt — otherwise a single login can fill the disk.
+export const uploadLimiter = perUserLimiter(
+  "rl:upload:",
+  60,
+  "Too many uploads, please try again later"
+);
+
+// Self-service profile edits — the endpoint that can change an account's
+// recovery email also verifies the current password, so it must not be usable
+// as an unlimited password-guessing oracle by someone holding a stolen token.
+export const profileUpdateLimiter = perUserLimiter(
+  "rl:profile:",
+  20,
+  "Too many profile updates, please try again later"
+);

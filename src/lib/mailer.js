@@ -34,6 +34,9 @@ export async function sendOtpEmail(email, otpCode, purpose = "Password Reset") {
     from: env.smtp.from,
     to: email,
     subject: `ECCD SmartTrack — ${purpose} Code`,
-    text: `Your password reset code is: ${otpCode}\n\nThis code expires in 10 minutes. If you didn't request this, you can ignore this email.`,
+    // Named after what the code is actually for — this mailer also sends the
+    // password-change and account-deletion codes, which must not be described
+    // as a "password reset" code.
+    text: `Your ${purpose.toLowerCase()} code is: ${otpCode}\n\nThis code expires in 10 minutes. If you didn't request this, you can ignore this email.`,
   });
 }

@@ -1,12 +1,12 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import pinoHttp from "pino-http";
 import { env } from "./config/env.js";
 import { prisma } from "./lib/prisma.js";
 import { logger } from "./lib/logger.js";
+import { createHttpLogger } from "./lib/httpLogger.js";
 import apiRoutes from "./routes/index.js";
-import { notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
+import { AppError, notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
 import { apiLimiter, authLimiter, authEmailLimiter } from "./middleware/rateLimit.js";
 
 export const app = express();
@@ -21,12 +21,7 @@ app.use(helmet()); // HSTS, X-Content-Type-Options, etc.
 
 // Structured request logging with a request-id on every log line, so a
 // single request's logs can be correlated end to end.
-app.use(
-  pinoHttp({
-    logger,
-    autoLogging: { ignore: (req) => req.url === "/health" },
-  })
-);
+app.use(createHttpLogger(logger));
 
 if (!env.clientOrigins.length) {
   console.warn(
@@ -41,7 +36,9 @@ app.use(
         return callback(null, true);
       }
 
-      return callback(new Error("Not allowed by CORS"));
+      // A clean 403 (not a generic Error, which the error handler would turn
+      // into a logged-as-error 500 for what is just a disallowed origin).
+      return callback(new AppError("Not allowed by CORS", 403));
     },
     credentials: true,
   })
