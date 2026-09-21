@@ -1,0 +1,2 @@
+# Contains the Wi-Fi password and the gateway's device key. NEVER commit.
+secrets.h
