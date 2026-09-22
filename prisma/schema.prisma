@@ -40,6 +40,7 @@ model User {
   children     ParentChild[]
   notifications Notification[]
   accountActionOtps AccountActionOtp[]
+  attendanceSessions AttendanceSession[]
 
   @@map("users")
 }
@@ -131,6 +132,8 @@ model Student {
   attendance  Attendance[]
   submissions Submission[]
   documents   StudentDocument[]
+  bleDevices  StudentBleDevice[]
+  attendanceSignals AttendanceSignal[]
 
   @@index([status])
   @@index([session])
@@ -171,11 +174,116 @@ model Attendance {
   updatedAt DateTime         @updatedAt
 
   student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  verification AttendanceVerification?
 
   @@unique([studentId, date])
   @@index([date])
   @@index([status])
   @@map("attendance")
+}
+
+enum AttendanceSessionStatus {
+  active
+  closed
+}
+
+// A teacher-started live attendance run (Start/Stop Attendance in the header).
+// At most ONE session can be active at a time — enforced by a partial unique
+// index in the migration (Prisma can't express partial indexes in the schema).
+model AttendanceSession {
+  id          Int                     @id @default(autoincrement())
+  date        DateTime                @db.Date // school-timezone day, computed server-side
+  status      AttendanceSessionStatus @default(active)
+  startedAt   DateTime                @default(now())
+  endedAt     DateTime?
+  // Nullable + SetNull: deleting a teacher account must not be blocked by, or
+  // erase, the history of sessions they ran.
+  startedById Int?
+
+  startedBy   User? @relation(fields: [startedById], references: [id], onDelete: SetNull)
+  signals       AttendanceSignal[]
+  verifications AttendanceVerification[]
+
+  @@index([date])
+  @@map("attendance_sessions")
+}
+
+enum SignalKind {
+  face
+  ble
+}
+
+// The latest sighting of a student by one signal source during a session: one
+// row per (session, student, kind), updated in place. Face and BLE arrive
+// independently and asynchronously; the verification service marks a student
+// present only when BOTH are fresh and stable. Not an audit trail (that is
+// AttendanceVerification) — just working state.
+model AttendanceSignal {
+  id         Int        @id @default(autoincrement())
+  sessionId  Int
+  studentId  Int
+  kind       SignalKind
+  // Smoothed value. face: match distance (lower = closer match).
+  // ble: RSSI in dBm (higher = stronger, i.e. nearer).
+  score      Float
+  // Sightings in the current unbroken run; resets after a gap longer than the
+  // verification window. Guards against a single stray reading counting.
+  hits       Int        @default(1)
+  lastSeenAt DateTime
+
+  session AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  student Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, studentId, kind])
+  @@index([sessionId])
+  @@map("attendance_signals")
+}
+
+// Audit trail for AUTOMATIC attendance: the evidence behind a "present" that
+// the system (not a teacher) recorded. A record with no row here was marked by
+// hand through the roster.
+model AttendanceVerification {
+  id           Int      @id @default(autoincrement())
+  attendanceId Int      @unique
+  sessionId    Int?
+  faceDistance Float?
+  bleRssi      Float?
+  verifiedAt   DateTime @default(now())
+
+  attendance Attendance         @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  session    AttendanceSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@map("attendance_verifications")
+}
+
+// A BLE tag/beacon carried by a student. Deliberately its own table (not
+// columns on Student): a student can have several tags, tags get replaced or
+// disabled, and a tag identifies exactly ONE student (globally unique).
+model StudentBleDevice {
+  id               Int      @id @default(autoincrement())
+  studentId        Int
+  deviceIdentifier String   @unique // normalized upper-case MAC, e.g. D7:40:47:15:14:90
+  enabled          Boolean  @default(true)
+  registeredAt     DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId])
+  @@map("student_ble_devices")
+}
+
+// An ESP32 BLE gateway. Authenticates with a random key that is shown once at
+// creation (scripts/create-gateway.js); only its SHA-256 hash is stored.
+model BleGateway {
+  id         Int       @id @default(autoincrement())
+  name       String
+  keyHash    String
+  enabled    Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime?
+
+  @@map("ble_gateways")
 }
 
 model Album {

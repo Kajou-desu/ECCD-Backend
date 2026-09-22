@@ -3,12 +3,14 @@ import { app } from "./app.js";
 import { prisma } from "./lib/prisma.js";
 import { logger } from "./lib/logger.js";
 import { startOtpCleanupJob } from "./lib/otpCleanup.js";
+import { startSessionCleanupJob } from "./lib/sessionCleanup.js";
 
 const server = app.listen(env.port, () => {
   logger.info(`ECCD SmartTrack API running on port ${env.port}`);
 });
 
 const otpCleanupHandle = startOtpCleanupJob();
+const sessionCleanupHandle = startSessionCleanupJob();
 
 // Graceful shutdown: stop accepting new connections, let in-flight requests
 // finish, then close the DB connection — so a deploy/restart doesn't drop
@@ -16,6 +18,7 @@ const otpCleanupHandle = startOtpCleanupJob();
 async function shutdown(signal) {
   logger.info(`Received ${signal}, shutting down gracefully...`);
   clearInterval(otpCleanupHandle);
+  clearInterval(sessionCleanupHandle);
 
   server.close(async () => {
     await prisma.$disconnect();

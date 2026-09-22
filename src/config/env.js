@@ -37,6 +37,80 @@ if (!isProduction && !smtpConfigured) {
   );
 }
 
+// The school's local timezone. Attendance "today" must be computed in it, not
+// in the server's timezone: the server runs in UTC, and a 7:30 AM Manila
+// arrival is still "yesterday" in UTC. Fails closed on an invalid zone name.
+const schoolTimezone = process.env.SCHOOL_TIMEZONE || "Asia/Manila";
+try {
+  new Intl.DateTimeFormat("en-CA", { timeZone: schoolTimezone });
+} catch {
+  console.error(`SCHOOL_TIMEZONE is not a valid IANA timezone: "${schoolTimezone}"`);
+  process.exit(1);
+}
+
+// Face + BLE verification thresholds — tunable without a code change. They must
+// be CALIBRATED on the real hardware and classroom (see docs/SMART_ATTENDANCE.md);
+// the defaults are only a starting point. Out-of-range or non-numeric values
+// fail closed at startup rather than silently loosening verification.
+function numberEnv(name, fallback, min, max) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    console.error(`${name} must be a number between ${min} and ${max} (got "${raw}").`);
+    process.exit(1);
+  }
+  return value;
+}
+
+const verification = {
+  // Face: best-match distance must be at or below this (lower = stricter).
+  faceMaxDistance: numberEnv("FACE_MAX_DISTANCE", 0.5, 0.1, 0.9),
+  // Face: the runner-up (a different student) must be at least this much
+  // farther than the best match, so look-alikes and siblings come back unknown.
+  faceMinMargin: numberEnv("FACE_MIN_MARGIN", 0.05, 0, 0.5),
+  // BLE: smoothed RSSI (dBm) must be at or above this (higher = must be nearer).
+  bleMinRssi: numberEnv("BLE_MIN_RSSI", -70, -100, -20),
+  // Both signals must have been seen within this many seconds of each other/now.
+  windowMs: numberEnv("VERIFY_WINDOW_SEC", 30, 5, 300) * 1000,
+  // Each signal needs this many sightings in a row (guards against one stray reading).
+  minHits: numberEnv("VERIFY_MIN_HITS", 2, 1, 10),
+};
+
+// Optional face-recognition microservice (face-recognition-service/). When
+// unset, the frame endpoint answers 503 and the rest of the app is unaffected.
+// When set it must be complete and safe: a real http(s) URL, plain http only for
+// loopback in production (frames contain children's faces), and a strong key.
+function recognitionConfig() {
+  const rawUrl = process.env.RECOGNITION_SERVICE_URL;
+  const key = process.env.RECOGNITION_SERVICE_KEY;
+  if (!rawUrl && !key) return null;
+
+  let url;
+  try {
+    url = new URL(rawUrl || "");
+  } catch {
+    console.error("RECOGNITION_SERVICE_URL must be a valid URL.");
+    process.exit(1);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    console.error("RECOGNITION_SERVICE_URL must be http(s).");
+    process.exit(1);
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (isProduction && url.protocol !== "https:" && !loopback) {
+    console.error("In production RECOGNITION_SERVICE_URL must use https unless it is localhost.");
+    process.exit(1);
+  }
+  if (!key || key.length < 32) {
+    console.error("RECOGNITION_SERVICE_KEY is required (32+ random characters) when RECOGNITION_SERVICE_URL is set.");
+    process.exit(1);
+  }
+  return { baseUrl: url.origin, key };
+}
+
+const recognition = recognitionConfig();
+
 const clientOrigins = (process.env.CLIENT_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -48,6 +122,9 @@ export const env = {
   nodeEnv,
   isProduction,
   redisUrl: process.env.REDIS_URL || null,
+  schoolTimezone,
+  verification,
+  recognition,
   smtp: {
     configured: smtpConfigured,
     host: process.env.SMTP_HOST,

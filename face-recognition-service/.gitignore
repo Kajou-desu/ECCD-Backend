@@ -1,0 +1,6 @@
+# Enrolled photos of children are personal/biometric data. Never commit them.
+Images/
+.env
+.venv/
+__pycache__/
+.pytest_cache/
