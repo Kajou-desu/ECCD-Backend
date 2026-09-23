@@ -1,85 +1,100 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { UPLOAD_DIR, resolveStoredPath, removeStoredFiles, removeUploadedFiles } from "../src/lib/fileStorage.js";
+import { storageKeyFrom, removeStoredFiles, removeUploadedFiles } from "../src/lib/fileStorage.js";
+import { setStorageForTests } from "../src/storage/index.js";
+import { createLocalStorage } from "../src/storage/localDriver.js";
 
-const made = [];
-function makeFile(name) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  const full = path.join(UPLOAD_DIR, name);
-  fs.writeFileSync(full, "x");
-  made.push(full);
-  return full;
-}
-afterEach(() => {
-  while (made.length) fs.rmSync(made.pop(), { force: true });
-});
-
-describe("resolveStoredPath", () => {
-  it("maps a bare filename into the uploads directory", () => {
-    expect(resolveStoredPath("abc.png")).toBe(path.join(UPLOAD_DIR, "abc.png"));
+describe("storageKeyFrom", () => {
+  it("accepts a bare generated filename", () => {
+    expect(storageKeyFrom("1758400000000-9f2c4a7e1b3d5c60.jpg")).toBe("1758400000000-9f2c4a7e1b3d5c60.jpg");
   });
 
-  it("maps a full stored URL (with or without a signature query) to its file", () => {
-    expect(resolveStoredPath("https://api.example.com/api/files/abc.png")).toBe(
-      path.join(UPLOAD_DIR, "abc.png")
-    );
-    expect(resolveStoredPath("https://api.example.com/api/files/abc.png?exp=1&sig=z")).toBe(
-      path.join(UPLOAD_DIR, "abc.png")
-    );
+  it("extracts the key from a full stored URL, with or without a signature query", () => {
+    expect(storageKeyFrom("https://api.example.com/api/files/abc.png")).toBe("abc.png");
+    expect(storageKeyFrom("https://api.example.com/api/files/abc.png?exp=1&sig=z")).toBe("abc.png");
   });
 
-  it("can never resolve outside the uploads directory", () => {
-    for (const evil of ["../../etc/passwd", "/etc/passwd", "..", ".", "a/../../../etc/passwd"]) {
-      const resolved = resolveStoredPath(evil);
-      expect(resolved === null || resolved.startsWith(UPLOAD_DIR + path.sep)).toBe(true);
+  it("reduces any path to its final segment, so a key can never address a directory", () => {
+    expect(storageKeyFrom("../../etc/passwd")).toBe("passwd");
+    expect(storageKeyFrom("a/b/c.png")).toBe("c.png");
+    expect(storageKeyFrom("/abs/path/x.png")).toBe("x.png");
+  });
+
+  it("rejects dot names, hidden files, odd characters and non-strings", () => {
+    for (const bad of ["..", ".", ".env", "a b.png", "a;rm.png", "é.png", "", null, undefined, 42, {}]) {
+      expect(storageKeyFrom(bad)).toBeNull();
     }
-    expect(resolveStoredPath("..")).toBeNull();
-  });
-
-  it("returns null for empty / non-string values", () => {
-    for (const v of [null, undefined, "", 42, {}]) expect(resolveStoredPath(v)).toBeNull();
+    expect(storageKeyFrom("x".repeat(300) + ".png")).toBeNull();
   });
 });
 
-describe("removeStoredFiles", () => {
-  it("deletes the file, accepting a mix of values and nested arrays", async () => {
-    const a = makeFile("vitest-rm-a.png");
-    const b = makeFile("vitest-rm-b.pdf");
-
-    await removeStoredFiles("http://h/api/files/vitest-rm-a.png", ["vitest-rm-b.pdf", null]);
-
-    expect(fs.existsSync(a)).toBe(false);
-    expect(fs.existsSync(b)).toBe(false);
+describe("removing stored objects", () => {
+  let dir;
+  let storage;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "eccd-storage-test-"));
+    storage = createLocalStorage(dir);
+    setStorageForTests(storage);
+  });
+  afterEach(() => {
+    setStorageForTests(undefined);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("does not throw for a file that's already gone or a null value", async () => {
-    await expect(removeStoredFiles("does-not-exist.png", null, undefined)).resolves.toBeUndefined();
+  const seed = (name) => fs.writeFileSync(path.join(dir, name), "x");
+  const exists = (name) => fs.existsSync(path.join(dir, name));
+
+  it("removeStoredFiles deletes by key, accepting URLs, arrays, and junk values", async () => {
+    seed("a.png");
+    seed("b.pdf");
+
+    await removeStoredFiles("http://h/api/files/a.png", ["b.pdf", null, undefined]);
+
+    expect(exists("a.png")).toBe(false);
+    expect(exists("b.pdf")).toBe(false);
   });
 
-  it("does not delete anything outside the uploads directory", async () => {
-    const outside = path.resolve("vitest-outside-marker.txt");
+  it("does not throw for objects that are already gone", async () => {
+    await expect(removeStoredFiles("nope.png", null)).resolves.toBeUndefined();
+  });
+
+  it("never touches anything but the storage directory", async () => {
+    const outside = path.join(path.dirname(dir), "eccd-outside-marker.txt");
     fs.writeFileSync(outside, "keep me");
-    made.push(outside);
-
-    await removeStoredFiles("../vitest-outside-marker.txt");
-
-    expect(fs.existsSync(outside)).toBe(true); // basename maps it into uploads/, where it doesn't exist
-  });
-});
-
-describe("removeUploadedFiles", () => {
-  it("removes req.file and req.files by their on-disk path", async () => {
-    const one = makeFile("vitest-up-1.png");
-    const two = makeFile("vitest-up-2.png");
-
-    await removeUploadedFiles({ file: { path: one }, files: [{ path: two }] });
-
-    expect(fs.existsSync(one)).toBe(false);
-    expect(fs.existsSync(two)).toBe(false);
+    try {
+      await removeStoredFiles("../eccd-outside-marker.txt");
+      expect(fs.existsSync(outside)).toBe(true);
+    } finally {
+      fs.rmSync(outside, { force: true });
+    }
   });
 
-  it("is a no-op when the request has no uploads", async () => {
+  it("does not throw when the storage backend itself fails (the DB change already succeeded)", async () => {
+    setStorageForTests({ remove: async () => { throw new Error("bucket unreachable"); } });
+    await expect(removeStoredFiles("a.png")).resolves.toBeUndefined();
+  });
+
+  it("removeUploadedFiles removes temp files, and stored objects only for files that were stored", async () => {
+    const tmpFile = path.join(dir, "tmp-upload.bin");
+    fs.writeFileSync(tmpFile, "t");
+    seed("stored.png");
+    seed("unrelated.png"); // same directory here, but not part of this request
+
+    await removeUploadedFiles({
+      files: [
+        { path: tmpFile, filename: "never-stored.png" }, // still only a temp file
+        { path: path.join(dir, "gone.tmp"), filename: "stored.png", stored: true },
+      ],
+    });
+
+    expect(fs.existsSync(tmpFile)).toBe(false);
+    expect(exists("stored.png")).toBe(false);
+    expect(exists("unrelated.png")).toBe(true);
+  });
+
+  it("removeUploadedFiles is a no-op when the request has no uploads", async () => {
     await expect(removeUploadedFiles({})).resolves.toBeUndefined();
   });
 });

@@ -111,6 +111,55 @@ function recognitionConfig() {
 
 const recognition = recognitionConfig();
 
+// --- File storage -----------------------------------------------------------
+// "local" keeps files in ./uploads (development, or a single server without a
+// bucket). "s3" uses any S3-compatible bucket — Neon Object Storage or AWS S3;
+// see .env.example for the two configurations. Credentials are NOT read here:
+// the AWS SDK picks up AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or an IAM
+// role) from the environment itself, so they never pass through app code.
+const storageDriver = (process.env.STORAGE_DRIVER || "local").toLowerCase();
+
+if (!["local", "s3"].includes(storageDriver)) {
+  console.error(`STORAGE_DRIVER must be "local" or "s3" (got "${storageDriver}").`);
+  process.exit(1);
+}
+
+const s3Endpoint = process.env.AWS_ENDPOINT_URL_S3 || undefined;
+
+if (storageDriver === "s3") {
+  const missingS3 = ["S3_BUCKET", "AWS_REGION"].filter((key) => !process.env[key]);
+  if (missingS3.length > 0) {
+    // Fail closed: refuse to start rather than accept uploads we can't store.
+    console.error(`STORAGE_DRIVER=s3 requires: ${missingS3.join(", ")}`);
+    process.exit(1);
+  }
+
+  if (s3Endpoint) {
+    let parsed;
+    try {
+      parsed = new URL(s3Endpoint);
+    } catch {
+      console.error("AWS_ENDPOINT_URL_S3 is not a valid URL.");
+      process.exit(1);
+    }
+    // Files (children's records) must never travel to the bucket in cleartext.
+    if (isProduction && parsed.protocol !== "https:") {
+      console.error("AWS_ENDPOINT_URL_S3 must use https:// in production.");
+      process.exit(1);
+    }
+  }
+}
+
+if (isProduction && storageDriver === "local") {
+  // Not fatal — a single-instance deployment is legitimate — but on any
+  // load-balanced or ephemeral-disk host, local files are lost or invisible
+  // to other instances.
+  console.warn(
+    "STORAGE_DRIVER=local in production: uploads live on this server's disk only. " +
+      "Set STORAGE_DRIVER=s3 to use a bucket."
+  );
+}
+
 const clientOrigins = (process.env.CLIENT_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -125,6 +174,19 @@ export const env = {
   schoolTimezone,
   verification,
   recognition,
+  storage: {
+    driver: storageDriver,
+    s3: {
+      bucket: process.env.S3_BUCKET,
+      region: process.env.AWS_REGION,
+      endpoint: s3Endpoint,
+      // undefined = let the driver decide (custom endpoint => path-style).
+      forcePathStyle:
+        process.env.S3_FORCE_PATH_STYLE === undefined
+          ? undefined
+          : process.env.S3_FORCE_PATH_STYLE === "true",
+    },
+  },
   smtp: {
     configured: smtpConfigured,
     host: process.env.SMTP_HOST,
