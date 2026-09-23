@@ -1,38 +1,22 @@
 import multer from "multer";
-import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { AppError } from "./errorHandler.js";
 import { uploadLimiter } from "./rateLimit.js";
-import { UPLOAD_DIR, removeUploadedFiles } from "../lib/fileStorage.js";
+import { UPLOAD_TMP_DIR, removeUploadedFiles } from "../lib/fileStorage.js";
+import { getStorage } from "../storage/index.js";
+import { ALLOWED_MIME_TYPES, EXT_BY_MIME } from "../storage/mimeTypes.js";
 
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// Uploads are parked here (owner-only) while they're validated; only files
+// that pass are moved into real storage.
+fs.mkdirSync(UPLOAD_TMP_DIR, { recursive: true, mode: 0o700 });
 
-// Whitelist by MIME type — never trust the client-supplied filename/extension
-// alone. Covers the material/photo/submission use cases for this app.
-const ALLOWED_MIME_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
+// The whitelist of accepted MIME types lives in storage/mimeTypes.js — never
+// trust the client-supplied filename/extension alone.
 
 // Endpoints that only ever display pictures (album photos, profile photo)
 // accept images only — a PDF or Word file there is never legitimate.
 const IMAGE_MIME_TYPES = new Set([...ALLOWED_MIME_TYPES].filter((type) => type.startsWith("image/")));
-
-const EXT_BY_MIME = {
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/webp": ".webp",
-  "image/gif": ".gif",
-  "application/pdf": ".pdf",
-  "application/msword": ".doc",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-};
 
 // The MIME type in a multipart upload is whatever the client says it is, so
 // the whitelist above only filters honest clients. These check the file's
@@ -68,7 +52,7 @@ export async function fileMatchesDeclaredType(filePath, mimetype) {
 }
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  destination: (_req, _file, cb) => cb(null, UPLOAD_TMP_DIR),
   filename: (_req, file, cb) => {
     const unique = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
     // Extension is derived from the verified MIME type, not the client-supplied
@@ -123,10 +107,34 @@ async function verifyFileContents(req, _res, next) {
   }
 }
 
+// Runs after the content check: moves each accepted file from the temp
+// directory into storage (the local folder, Neon, or S3 — whichever is
+// configured), under its generated filename, which is the storage key the
+// controllers then record. Files are flagged once stored so the failure
+// cleanup below knows to delete the stored object as well as the temp file.
+async function persistUploads(req, _res, next) {
+  const files = [
+    ...(req.file ? [req.file] : []),
+    ...(Array.isArray(req.files) ? req.files : []),
+  ];
+  try {
+    const storage = getStorage();
+    for (const file of files) {
+      await storage.put(file.filename, file.path, file.mimetype);
+      file.stored = true;
+      await fs.promises.unlink(file.path).catch(() => {});
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
 // multer writes to disk *before* any controller check runs (ownership,
 // "student exists", validation...). Without this, every rejected request
 // would leave its upload behind as an orphan. Any 4xx/5xx response deletes
-// the files this request stored; successful requests keep them.
+// what this request stored (temp files and stored objects); successful
+// requests keep them.
 function discardUploadsOnFailure(req, res, next) {
   res.on("finish", () => {
     if (res.statusCode >= 400) void removeUploadedFiles(req);
@@ -145,12 +153,14 @@ export const upload = {
     discardUploadsOnFailure,
     (imagesOnly ? imageUpload : anyUpload).single(field),
     verifyFileContents,
+    persistUploads,
   ],
   array: (field, maxCount, { imagesOnly = false } = {}) => [
     uploadLimiter,
     discardUploadsOnFailure,
     (imagesOnly ? imageUpload : anyUpload).array(field, maxCount),
     verifyFileContents,
+    persistUploads,
   ],
 };
 

@@ -1,49 +1,50 @@
-import path from "node:path";
-import fs from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { AppError } from "../middleware/errorHandler.js";
 import { verifyFileSignature } from "../lib/signedFileUrl.js";
-
-const UPLOAD_DIR = path.resolve("uploads");
+import { storageKeyFrom } from "../lib/fileStorage.js";
+import { getStorage } from "../storage/index.js";
+import { mimeFromKey } from "../storage/mimeTypes.js";
 
 // Serves a previously uploaded file. Requires a valid ?exp=&sig= (see
 // src/lib/signedFileUrl.js) generated fresh every time an entity is
 // returned from the API — a copied/leaked link stops working once it
-// expires, instead of granting permanent access. Filename is restricted to
-// the basename to prevent path traversal (e.g. "../../etc/passwd"); we
-// never join raw, unvalidated client input into a filesystem path.
-export function getFile(req, res, next) {
+// expires, instead of granting permanent access.
+//
+// The bucket itself stays private: the object is fetched server-side and
+// streamed through, so this signature check is the only way in, whichever
+// storage provider is configured. The key is restricted to a plain filename
+// (storageKeyFrom) so client input can never address another object or path.
+export async function getFile(req, res, next) {
   try {
-    const requested = path.basename(req.params.filename);
+    const key = storageKeyFrom(req.params.filename);
 
-    if (!verifyFileSignature(requested, req.query.exp, req.query.sig)) {
-      // Same generic "Not found" as a missing file — an invalid vs.
-      // expired vs. missing signature isn't distinguished, so this
-      // response doesn't confirm to an attacker whether a given filename
-      // ever existed.
+    // Same generic "Not found" for a bad key, a bad/expired signature, or a
+    // missing object — the response doesn't confirm to an attacker whether a
+    // given filename ever existed.
+    if (!key || !verifyFileSignature(key, req.query.exp, req.query.sig)) {
       throw new AppError("Not found", 404);
     }
 
-    const filePath = path.join(UPLOAD_DIR, requested);
+    const object = await getStorage().get(key);
+    if (!object) throw new AppError("Not found", 404);
 
-    // Defense in depth: confirm the resolved path is still inside UPLOAD_DIR.
-    if (!filePath.startsWith(UPLOAD_DIR + path.sep)) {
-      throw new AppError("Not found", 404);
-    }
-
-    if (!fs.existsSync(filePath)) {
-      throw new AppError("Not found", 404);
-    }
-
-    // Files hold children's records and are reachable by a URL that
-    // encodes the credential (the signature). Express's default
-    // "public, max-age=0" lets shared caches/CDNs store the response — and a
-    // cache that ignores the query string would then serve it without the
-    // signature check. "private" keeps it to the requester's own browser.
-    res.sendFile(filePath, {
-      cacheControl: false,
-      headers: { "Cache-Control": "private, max-age=300" },
+    // Content-Type comes from the key's extension, which upload derived from
+    // the verified file type — not from metadata stored with the object.
+    //
+    // Files hold children's records and are reachable by a URL that encodes
+    // the credential (the signature). "private" keeps shared caches/CDNs
+    // from storing the response and later serving it without the check.
+    res.set({
+      "Content-Type": mimeFromKey(key),
+      "Cache-Control": "private, max-age=300",
     });
+    if (object.contentLength != null) res.set("Content-Length", String(object.contentLength));
+
+    await pipeline(object.body, res);
   } catch (err) {
+    // Once bytes are flowing a JSON error can't be sent; just drop the
+    // connection (also what happens when the client goes away mid-download).
+    if (res.headersSent) return void res.destroy();
     next(err);
   }
 }

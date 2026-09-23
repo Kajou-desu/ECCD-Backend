@@ -1,52 +1,69 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { logger } from "./logger.js";
+import { getStorage } from "../storage/index.js";
 
-// Same directory middleware/upload.js writes to and controllers/files.controller.js
-// reads from (all resolve relative to the process working directory).
-export const UPLOAD_DIR = path.resolve("uploads");
+// Where multer parks an upload while it is being validated. Deliberately not
+// the storage location: nothing lands in real storage until it has passed
+// the content check (see middleware/upload.js).
+export const UPLOAD_TMP_DIR = path.join(os.tmpdir(), "eccd-uploads");
+
+// Storage keys are the generated upload filenames. This accepts one only if
+// it is a plain filename: no separators, no leading dot, no odd characters.
+const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
 // Maps a stored value — a bare filename, or the full URL older rows hold,
-// optionally with a ?exp=&sig= query — to an absolute path *inside*
-// UPLOAD_DIR, or null if it can't be mapped safely. Only the basename is ever
-// used, so a stored value can never point outside the uploads directory.
-export function resolveStoredPath(storedValue) {
+// optionally with a ?exp=&sig= query — to a storage key, or null if it can't
+// be one. Only the basename is used, so a stored value can never address
+// anything but a top-level object.
+export function storageKeyFrom(storedValue) {
   if (typeof storedValue !== "string" || !storedValue) return null;
-
   const name = path.basename(storedValue.split("?")[0]);
-  if (!name || name === "." || name === "..") return null;
-
-  const fullPath = path.join(UPLOAD_DIR, name);
-  return fullPath.startsWith(UPLOAD_DIR + path.sep) ? fullPath : null;
+  return KEY_PATTERN.test(name) ? name : null;
 }
 
-// Best-effort delete of files that were stored for rows that no longer exist
-// (or are being replaced). Never throws: the database change has already
-// succeeded by the time this runs, and a leftover file must not turn a
-// successful request into an error. Failures other than "already gone" are
-// logged so they're visible.
+// Best-effort delete of stored objects whose rows no longer exist (or are
+// being replaced). Never throws: the database change has already succeeded by
+// the time this runs, and a leftover object must not turn a successful
+// request into an error. Failures other than "already gone" are logged.
 export async function removeStoredFiles(...storedValues) {
+  const storage = getStorage();
   await Promise.all(
     storedValues.flat().map(async (storedValue) => {
-      const filePath = resolveStoredPath(storedValue);
-      if (!filePath) return;
+      const key = storageKeyFrom(storedValue);
+      if (!key) return;
       try {
-        await fs.unlink(filePath);
+        await storage.remove(key);
       } catch (err) {
-        if (err.code !== "ENOENT") {
-          logger.warn({ err, file: path.basename(filePath) }, "Failed to delete stored file");
-        }
+        logger.warn({ err, key }, "Failed to delete stored object");
       }
     })
   );
 }
 
-// Deletes whatever multer wrote to disk for this request (req.file / req.files).
-// Used when a request is rejected after multer has already stored its upload.
+async function removeTempFile(filePath) {
+  if (!filePath) return;
+  try {
+    await fs.unlink(filePath);
+  } catch (err) {
+    if (err.code !== "ENOENT") logger.warn({ err }, "Failed to delete temporary upload");
+  }
+}
+
+// Cleans up everything multer/our pipeline produced for this request
+// (req.file / req.files): the temporary file, and — if it had already been
+// moved into storage — the stored object. Used when a request is rejected
+// after its upload was accepted. Never throws.
 export async function removeUploadedFiles(req) {
   const files = [
     ...(req.file ? [req.file] : []),
     ...(Array.isArray(req.files) ? req.files : []),
   ];
-  await removeStoredFiles(files.map((file) => file.path));
+  await Promise.all(
+    files.map(async (file) => {
+      await removeTempFile(file.path);
+      if (file.stored) await removeStoredFiles(file.filename);
+    })
+  );
 }
