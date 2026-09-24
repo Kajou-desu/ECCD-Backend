@@ -34,9 +34,16 @@ export async function getFile(req, res, next) {
     // Files hold children's records and are reachable by a URL that encodes
     // the credential (the signature). "private" keeps shared caches/CDNs
     // from storing the response and later serving it without the check.
+    //
+    // helmet() defaults every response to Cross-Origin-Resource-Policy:
+    // same-origin, which makes browsers refuse to render these files in an
+    // <img>/<iframe> on the frontend (a different origin than this API).
+    // Relaxed for this route only: access is already gated by the signed,
+    // expiring URL, and every other endpoint keeps helmet's stricter default.
     res.set({
       "Content-Type": mimeFromKey(key),
       "Cache-Control": "private, max-age=300",
+      "Cross-Origin-Resource-Policy": "cross-origin",
     });
     if (object.contentLength != null) res.set("Content-Length", String(object.contentLength));
 

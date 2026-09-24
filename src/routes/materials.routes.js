@@ -7,12 +7,14 @@ import {
   updateMaterial,
   deleteMaterial,
 } from "../controllers/materials.controller.js";
+import { getMaterialSubmissions } from "../controllers/submissions.controller.js";
 
 const router = Router();
 
 router.use(requireAuth);
 
 router.get("/", getMaterials);
+router.get("/:id/submissions", requireRole("Teacher", "Admin"), getMaterialSubmissions);
 router.post("/", requireRole("Teacher", "Admin"), upload.single("file"), createMaterial);
 router.put("/:id", requireRole("Teacher", "Admin"), upload.single("file"), updateMaterial);
 router.delete("/:id", requireRole("Teacher", "Admin"), deleteMaterial);

@@ -61,6 +61,14 @@ describe.each(["local", "s3"])("GET /api/files/:filename (%s storage)", (kind) =
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
+  it("allows the cross-origin frontend to embed the file, while other routes stay same-origin", async () => {
+    const file = await request(app).get(urlFor(KEY));
+    expect(file.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+
+    const health = await request(app).get("/health");
+    expect(health.headers["cross-origin-resource-policy"]).toBe("same-origin");
+  });
+
   it("marks served files private so shared caches/CDNs don't store them", async () => {
     const res = await request(app).get(urlFor(KEY));
     expect(res.headers["cache-control"]).toMatch(/\bprivate\b/);

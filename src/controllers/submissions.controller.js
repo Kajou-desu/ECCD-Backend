@@ -25,6 +25,52 @@ export async function getSubmissions(req, res, next) {
   }
 }
 
+// GET /api/materials/:id/submissions
+// Everything the "student works" page needs in one round trip: the material
+// (so an unknown id is a clean 404) and every student's uploaded work for it.
+// Staff only — the route enforces Teacher/Admin, because this lists ALL
+// students' work, which a Parent/Guardian must never see.
+// `select` keeps the response to what the page renders; nothing else about
+// the student leaves the server.
+export async function getMaterialSubmissions(req, res, next) {
+  try {
+    const id = parseId(req.params.id, "id");
+
+    const material = await prisma.material.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        title: true,
+        category: true,
+        submissions: {
+          orderBy: { submittedAt: "desc" },
+          select: {
+            id: true,
+            studentId: true,
+            fileName: true,
+            fileUrl: true,
+            submittedAt: true,
+            student: { select: { name: true } },
+          },
+        },
+      },
+    });
+    if (!material) return res.status(404).json({ message: "Material not found" });
+
+    const { submissions, ...materialInfo } = material;
+    res.json({
+      material: materialInfo,
+      submissions: submissions.map(({ student, ...submission }) => ({
+        ...submission,
+        studentName: student.name,
+        fileUrl: signFileUrl(req, submission.fileUrl),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // POST /api/submissions (multipart: materialId, studentId, file)
 // studentId is client-supplied but must be verified against the caller's
 // own children before we trust it (prevents submitting work as another child).
