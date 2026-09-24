@@ -8,7 +8,6 @@ import {
   requireNonEmptyString,
   optionalString,
   optionalEmail,
-  requirePhone,
   optionalPhone,
   requireSession,
   requireStudentStatus,
@@ -19,6 +18,7 @@ import { signFileUrl } from "../lib/signedFileUrl.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { logger } from "../lib/logger.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
+import { fileUrl } from "../middleware/upload.js";
 
 // Lean shape for roster/table/dashboard views (StudentTable, EventCard,
 // UploadStudentWork picker, useStudents search).
@@ -95,8 +95,15 @@ function buildCreateData(body) {
   const session = requireSession(body.session);
   const status = requireStudentStatus(body.status);
 
-  const guardianName = requireNonEmptyString(body.guardianName, "guardianName", 200);
-  const guardianPhone = requirePhone(body.guardianPhone, "guardianPhone");
+  const motherName = optionalString(body.motherName, 200);
+  const fatherName = optionalString(body.fatherName, 200);
+  const guardianName = optionalString(body.guardianName, 200);
+  // A guardian isn't required on its own, but the record needs at least one
+  // contact — mirrors the frontend's studentSchema.superRefine.
+  if (!motherName && !fatherName && !guardianName) {
+    throw new AppError("At least one parent or guardian name is required", 400);
+  }
+  const guardianPhone = optionalPhone(body.guardianPhone, "guardianPhone");
 
   return {
     firstName,
@@ -108,11 +115,11 @@ function buildCreateData(body) {
     address,
     session,
     status,
-    motherName: optionalString(body.motherName, 200),
+    motherName,
     motherAddress: optionalString(body.motherAddress, 500),
     motherPhone: optionalPhone(body.motherPhone, "motherPhone"),
     motherEmail: optionalEmail(body.motherEmail),
-    fatherName: optionalString(body.fatherName, 200),
+    fatherName,
     fatherAddress: optionalString(body.fatherAddress, 500),
     fatherPhone: optionalPhone(body.fatherPhone, "fatherPhone"),
     fatherEmail: optionalEmail(body.fatherEmail),
@@ -236,13 +243,31 @@ export async function updateStudent(req, res, next) {
     if (body.fatherAddress !== undefined) data.fatherAddress = optionalString(body.fatherAddress, 500);
     if (body.fatherPhone !== undefined) data.fatherPhone = optionalPhone(body.fatherPhone, "fatherPhone");
     if (body.fatherEmail !== undefined) data.fatherEmail = optionalEmail(body.fatherEmail);
-    if (body.guardianName !== undefined) data.guardianName = requireNonEmptyString(body.guardianName, "guardianName", 200);
+    if (body.guardianName !== undefined) data.guardianName = optionalString(body.guardianName, 200);
     if (body.guardianAddress !== undefined) data.guardianAddress = optionalString(body.guardianAddress, 500);
-    if (body.guardianPhone !== undefined) data.guardianPhone = requirePhone(body.guardianPhone, "guardianPhone");
+    if (body.guardianPhone !== undefined) data.guardianPhone = optionalPhone(body.guardianPhone, "guardianPhone");
     if (body.guardianEmail !== undefined) data.guardianEmail = optionalEmail(body.guardianEmail);
     if (body.allergies !== undefined) data.allergies = optionalString(body.allergies, 1000);
     if (body.dietary !== undefined) data.dietary = optionalString(body.dietary, 1000);
     if (body.specialNotes !== undefined) data.specialNotes = optionalString(body.specialNotes, 2000);
+
+    // Name parts changing needs the pre-update row to recompute the
+    // denormalized `name`; motherName/fatherName/guardianName changing needs
+    // it to check the "at least one parent/guardian name" invariant against
+    // whichever of the three this request isn't touching.
+    let existing = null;
+    if (
+      data.firstName !== undefined ||
+      data.middleName !== undefined ||
+      data.lastName !== undefined ||
+      data.suffix !== undefined ||
+      data.motherName !== undefined ||
+      data.fatherName !== undefined ||
+      data.guardianName !== undefined
+    ) {
+      existing = await prisma.student.findUnique({ where: { id } });
+      if (!existing) return res.status(404).json({ message: "Student not found" });
+    }
 
     // Keep the denormalized `name` field in sync whenever any name part changes.
     if (
@@ -251,9 +276,6 @@ export async function updateStudent(req, res, next) {
       data.lastName !== undefined ||
       data.suffix !== undefined
     ) {
-      const existing = await prisma.student.findUnique({ where: { id } });
-      if (!existing) return res.status(404).json({ message: "Student not found" });
-
       data.name = composeStudentName({
         firstName: data.firstName ?? existing.firstName,
         middleName: data.middleName !== undefined ? data.middleName : existing.middleName,
@@ -262,7 +284,45 @@ export async function updateStudent(req, res, next) {
       });
     }
 
+    if (data.motherName !== undefined || data.fatherName !== undefined || data.guardianName !== undefined) {
+      const motherName = data.motherName !== undefined ? data.motherName : existing.motherName;
+      const fatherName = data.fatherName !== undefined ? data.fatherName : existing.fatherName;
+      const guardianName = data.guardianName !== undefined ? data.guardianName : existing.guardianName;
+      if (!motherName && !fatherName && !guardianName) {
+        throw new AppError("At least one parent or guardian name is required", 400);
+      }
+    }
+
     const student = await prisma.student.update({ where: { id }, data, include: DETAIL_INCLUDE });
+    res.json(toStudentDetailResponse(req, student));
+  } catch (err) {
+    if (err.code === "P2025") return res.status(404).json({ message: "Student not found" });
+    next(err);
+  }
+}
+
+// Teacher/admin only (enforced at route level).
+// POST /api/students/:id/photo — multipart, field "photo", single file.
+// Mirrors uploadMyProfilePhoto in users.controller.js: store the storage
+// key via fileUrl(), re-sign it at read time, and clean up the previous
+// stored file once the new one is safely recorded.
+export async function uploadStudentPhoto(req, res, next) {
+  try {
+    const id = parseId(req.params.id, "id");
+    if (!req.file) {
+      return res.status(400).json({ message: "No photo file was provided" });
+    }
+
+    const previous = await prisma.student.findUnique({ where: { id }, select: { photo: true } });
+    if (!previous) return res.status(404).json({ message: "Student not found" });
+
+    const student = await prisma.student.update({
+      where: { id },
+      data: { photo: fileUrl(req, req.file.filename) },
+      include: DETAIL_INCLUDE,
+    });
+
+    if (previous.photo) await removeStoredFiles(previous.photo);
     res.json(toStudentDetailResponse(req, student));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Student not found" });

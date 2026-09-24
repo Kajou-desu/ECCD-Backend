@@ -8,6 +8,7 @@ import {
   updateStudent,
   deleteStudent,
   importStudents,
+  uploadStudentPhoto,
 } from "../controllers/students.controller.js";
 import { uploadStudentDocuments, deleteStudentDocument } from "../controllers/studentDocuments.controller.js";
 import { getSubmissions } from "../controllers/submissions.controller.js";
@@ -30,6 +31,12 @@ router.post("/", requireRole("Teacher", "Admin"), createStudent);
 router.post("/import", requireRole("Teacher", "Admin"), importStudents);
 router.put("/:id", requireRole("Teacher", "Admin"), updateStudent);
 router.delete("/:id", requireRole("Teacher", "Admin"), deleteStudent);
+router.post(
+  "/:id/photo",
+  requireRole("Teacher", "Admin"),
+  upload.single("photo", { imagesOnly: true }),
+  uploadStudentPhoto
+);
 router.post(
   "/:id/documents",
   requireRole("Teacher", "Admin"),

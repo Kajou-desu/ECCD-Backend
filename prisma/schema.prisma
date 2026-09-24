@@ -116,9 +116,9 @@ model Student {
   fatherPhone   String?
   fatherEmail   String?
 
-  guardianName    String
+  guardianName    String?
   guardianAddress String?
-  guardianPhone   String
+  guardianPhone   String?
   guardianEmail   String?
 
   allergies    String?
