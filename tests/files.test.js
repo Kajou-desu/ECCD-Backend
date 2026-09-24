@@ -85,7 +85,7 @@ describe.each(["local", "s3"])("GET /api/files/:filename (%s storage)", (kind) =
     const real = harness.storage;
     setStorageForTests({ ...real, get: async (...a) => { storageReads += 1; return real.get(...a); } });
     try {
-      const res = await request(app).get(urlFor(KEY).replace(/sig=./, "sig=0"));
+      const res = await request(app).get(urlFor(KEY).replace(/sig=(.)/, (_m, c) => `sig=${c === "0" ? "1" : "0"}`));
       expect(res.status).toBe(404);
       expect(storageReads).toBe(0);
     } finally {
