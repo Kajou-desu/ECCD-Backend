@@ -97,6 +97,7 @@ export async function listUsers(req, res, next) {
   try {
     const users = await prisma.user.findMany({
       select: PUBLIC_SELECT,
+      where: req.user.role === "Admin" ? undefined : { role: { not: "Admin" } },
       orderBy: { name: "asc" },
     });
     res.json(users.map((u) => toUserResponse(req, u)));
@@ -177,6 +178,14 @@ export async function updateUser(req, res, next) {
 
     const existing = await prisma.user.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ message: "Account not found" });
+
+    if (
+      req.user.role === "Teacher" &&
+      id !== req.user.id &&
+      !["Parent", "Guardian"].includes(existing.role)
+    ) {
+      return res.status(403).json({ message: "Teachers can only modify their own or parent/guardian accounts" });
+    }
 
     // Only an Admin may modify an existing Admin account, or promote any
     // account to Admin — defense in depth for the same rule the frontend's
@@ -434,6 +443,10 @@ export async function deleteUser(req, res, next) {
 
     const existing = await prisma.user.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ message: "Account not found" });
+
+    if (req.user.role === "Teacher" && !["Parent", "Guardian"].includes(existing.role)) {
+      return res.status(403).json({ message: "Teachers can only delete parent/guardian accounts" });
+    }
 
     if (existing.role === "Admin" && req.user.role !== "Admin") {
       return res.status(403).json({ message: "Only an Admin can delete an Admin account" });

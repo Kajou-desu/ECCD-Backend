@@ -94,6 +94,21 @@ describe("listUsers", () => {
     );
     expect(next).not.toHaveBeenCalled();
   });
+
+  it("excludes Admin accounts for Teachers", async () => {
+    prisma.user.findMany.mockResolvedValue([]);
+
+    const req = { user: { id: 9, role: "Teacher" } };
+    const res = mockRes();
+    const next = vi.fn();
+
+    await listUsers(req, res, next);
+
+    expect(prisma.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { role: { not: "Admin" } } }),
+    );
+    expect(next).not.toHaveBeenCalled();
+  });
 });
 
 describe("registerUser", () => {
@@ -220,7 +235,7 @@ describe("updateUser", () => {
     expect(res.status).toHaveBeenCalledWith(403);
   });
 
-  it("allows a Teacher to edit a non-Admin account", async () => {
+  it("allows a Teacher to edit a parent/guardian account", async () => {
     prisma.user.findUnique.mockResolvedValue({
       id: 5,
       role: "Parent",
@@ -246,6 +261,19 @@ describe("updateUser", () => {
       }),
     );
     expect(res.json).toHaveBeenCalled();
+  });
+
+  it("blocks a Teacher from editing another Teacher account", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Teacher" });
+
+    const req = { body: { userId: 5, firstName: "Changed" }, user: { id: 1, role: "Teacher" } };
+    const res = mockRes();
+    const next = vi.fn();
+
+    await updateUser(req, res, next);
+
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
   });
 
   it("returns 404 for a missing account", async () => {
@@ -286,7 +314,7 @@ describe("deleteUser", () => {
     expect(res.status).toHaveBeenCalledWith(403);
   });
 
-  it("deletes a non-Admin account", async () => {
+  it("deletes a parent/guardian account", async () => {
     prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Parent" });
     prisma.user.delete.mockResolvedValue({});
 
@@ -298,6 +326,19 @@ describe("deleteUser", () => {
 
     expect(prisma.user.delete).toHaveBeenCalledWith({ where: { id: 5 } });
     expect(res.status).toHaveBeenCalledWith(204);
+  });
+
+  it("blocks a Teacher from deleting another Teacher account", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Teacher" });
+
+    const req = { params: { id: "5" }, user: { id: 1, role: "Teacher" } };
+    const res = mockRes();
+    const next = vi.fn();
+
+    await deleteUser(req, res, next);
+
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
   });
 });
 
