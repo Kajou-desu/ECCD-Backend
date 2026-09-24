@@ -102,6 +102,7 @@ model Student {
 
   photo     String?
   birthday  DateTime      @db.Date
+  gender    String?
   address   String
   session   Session       @default(morning)
   status    StudentStatus @default(active)

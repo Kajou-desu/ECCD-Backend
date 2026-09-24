@@ -12,6 +12,7 @@ import {
   requireSession,
   requireStudentStatus,
   requireBirthday,
+  requireGender,
 } from "../utils/validate.js";
 import { toDocumentResponse } from "../utils/studentDocumentResponse.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
@@ -91,6 +92,7 @@ function buildCreateData(body) {
   const middleName = optionalString(body.middleName, 100);
   const suffix = optionalString(body.suffix, 20);
   const birthday = requireBirthday(body.birthday);
+  const gender = requireGender(body.gender);
   const address = requireNonEmptyString(body.address, "address", 500);
   const session = requireSession(body.session);
   const status = requireStudentStatus(body.status);
@@ -112,6 +114,7 @@ function buildCreateData(body) {
     suffix,
     name: composeStudentName({ firstName, middleName, lastName, suffix }),
     birthday,
+    gender,
     address,
     session,
     status,
@@ -232,6 +235,7 @@ export async function updateStudent(req, res, next) {
     if (body.middleName !== undefined) data.middleName = optionalString(body.middleName, 100);
     if (body.suffix !== undefined) data.suffix = optionalString(body.suffix, 20);
     if (body.birthday !== undefined) data.birthday = requireBirthday(body.birthday);
+    if (body.gender !== undefined) data.gender = requireGender(body.gender);
     if (body.address !== undefined) data.address = requireNonEmptyString(body.address, "address", 500);
     if (body.session !== undefined) data.session = requireSession(body.session);
     if (body.status !== undefined) data.status = requireStudentStatus(body.status);

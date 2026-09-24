@@ -7,6 +7,7 @@ const PHONE_RE = /^[0-9+\-\s()]{7,20}$/;
 export const ATTENDANCE_STATUSES = ["present", "absent", "excused"];
 export const SESSIONS = ["morning", "afternoon"];
 export const STUDENT_STATUSES = ["active", "inactive"];
+export const GENDERS = ["male", "female", "other", "prefer_not_to_say"];
 
 export function parseId(raw, label = "id") {
   const id = Number(raw);
@@ -136,4 +137,11 @@ export function requireBirthday(value) {
     throw new AppError("Invalid birthday", 400);
   }
   return parsed;
+}
+
+export function requireGender(value) {
+  if (typeof value !== "string" || !GENDERS.includes(value)) {
+    throw new AppError("Invalid gender", 400);
+  }
+  return value;
 }
