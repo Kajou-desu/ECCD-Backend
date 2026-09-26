@@ -309,6 +309,34 @@ describe("updateStudent parent/guardian linking", () => {
     expect(prisma.parentChild.createMany).not.toHaveBeenCalled();
   });
 
+  it("persists the selected primary guardian type", async () => {
+    stubStudentWrites();
+    prisma.student.findUnique.mockResolvedValue(before);
+
+    await updateStudent(
+      { params: { id: "10" }, body: { primaryGuardianType: "Father" }, user: staff },
+      mockRes(),
+      vi.fn(),
+    );
+
+    expect(prisma.student.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { primaryGuardianType: "Father" } }),
+    );
+  });
+
+  it("rejects unsupported primary guardian types before writing", async () => {
+    const next = vi.fn();
+
+    await updateStudent(
+      { params: { id: "10" }, body: { primaryGuardianType: "Sibling" }, user: staff },
+      mockRes(),
+      next,
+    );
+
+    expect(next).toHaveBeenCalled();
+    expect(prisma.student.update).not.toHaveBeenCalled();
+  });
+
   it("never removes existing links when an email is cleared or changed", async () => {
     stubStudentWrites();
     prisma.student.findUnique.mockResolvedValue(before);

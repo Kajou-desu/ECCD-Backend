@@ -121,6 +121,7 @@ model Student {
   guardianAddress String?
   guardianPhone   String?
   guardianEmail   String?
+  primaryGuardianType String?
 
   allergies    String?
   dietary      String?

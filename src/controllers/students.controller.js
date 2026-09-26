@@ -29,9 +29,14 @@ const LIST_SELECT = {
   name: true,
   photo: true,
   birthday: true,
+  gender: true,
   address: true,
   session: true,
   status: true,
+  motherName: true,
+  motherPhone: true,
+  fatherName: true,
+  fatherPhone: true,
   guardianName: true,
   guardianPhone: true,
 };
@@ -69,6 +74,15 @@ function finalStudentCode(studentId) {
 }
 
 const EMAIL_FIELDS = ["motherEmail", "fatherEmail", "guardianEmail"];
+const PRIMARY_GUARDIAN_TYPES = new Set(["Mother", "Father", "Legal Guardian"]);
+
+function parsePrimaryGuardianType(value) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string" || !PRIMARY_GUARDIAN_TYPES.has(value)) {
+    throw new AppError("primaryGuardianType must be Mother, Father, or Legal Guardian", 400);
+  }
+  return value;
+}
 
 // Links existing Parent/Guardian accounts whose email matches any of `emails`.
 // Emails are lowercased on every write path (requireEmail/optionalEmail), so an
@@ -135,6 +149,7 @@ function buildCreateData(body) {
     guardianAddress: optionalString(body.guardianAddress, 500),
     guardianPhone,
     guardianEmail: optionalEmail(body.guardianEmail),
+    primaryGuardianType: parsePrimaryGuardianType(body.primaryGuardianType),
     allergies: optionalString(body.allergies, 1000),
     dietary: optionalString(body.dietary, 1000),
     specialNotes: optionalString(body.specialNotes, 2000),
@@ -251,6 +266,9 @@ export async function updateStudent(req, res, next) {
     if (body.guardianAddress !== undefined) data.guardianAddress = optionalString(body.guardianAddress, 500);
     if (body.guardianPhone !== undefined) data.guardianPhone = optionalPhone(body.guardianPhone, "guardianPhone");
     if (body.guardianEmail !== undefined) data.guardianEmail = optionalEmail(body.guardianEmail);
+    if (body.primaryGuardianType !== undefined) {
+      data.primaryGuardianType = parsePrimaryGuardianType(body.primaryGuardianType);
+    }
     if (body.allergies !== undefined) data.allergies = optionalString(body.allergies, 1000);
     if (body.dietary !== undefined) data.dietary = optionalString(body.dietary, 1000);
     if (body.specialNotes !== undefined) data.specialNotes = optionalString(body.specialNotes, 2000);
