@@ -67,6 +67,22 @@ describe("requireDateString / requireMonthString", () => {
       expect(() => requireDateString(value)).toThrow(AppError);
     }
   );
+
+  it("rejects a well-formed but non-existent calendar date instead of rolling it over", () => {
+    // Date.UTC would otherwise silently normalize 2026-02-30 to 2026-03-02.
+    expect(() => requireDateString("2026-02-30")).toThrow(AppError);
+    expect(() => requireDateString("2026-04-31")).toThrow(AppError);
+    expect(() => requireDateString("2023-02-29")).toThrow(AppError); // not a leap year
+  });
+
+  it("accepts a real leap-day date", () => {
+    expect(requireDateString("2024-02-29")).toBe("2024-02-29");
+  });
+
+  it("rejects a month string with an out-of-range month", () => {
+    expect(() => requireMonthString("2026-13")).toThrow(AppError);
+    expect(() => requireMonthString("2026-00")).toThrow(AppError);
+  });
 });
 
 describe("requireAttendanceStatus", () => {
@@ -125,6 +141,10 @@ describe("requireBirthday", () => {
 
   it("rejects malformed birthdays", () => {
     expect(() => requireBirthday("15-06-2020")).toThrow(AppError);
+  });
+
+  it("rejects a non-existent calendar date", () => {
+    expect(() => requireBirthday("2026-02-30")).toThrow(AppError);
   });
 });
 

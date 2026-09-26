@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
+import { schoolMinutesOfDay } from "../utils/schoolDate.js";
 import {
   parseId,
   parsePagination,
@@ -8,6 +9,12 @@ import {
   requireMonthString,
   requireAttendanceStatus,
 } from "../utils/validate.js";
+
+// A student is "late" if they arrive after their session's start-of-day
+// cutoff, in the school's own timezone (not the server's/UTC's) — see
+// schoolMinutesOfDay. Morning session: after 8:00 AM. Afternoon session:
+// after 1:00 PM (13:00). Keyed by the Session enum values in validate.js.
+const LATE_CUTOFF_MINUTES = { morning: 8 * 60, afternoon: 13 * 60 };
 
 function toDate(dateString) {
   return new Date(`${dateString}T00:00:00.000Z`);
@@ -152,6 +159,16 @@ export async function getChildAttendance(req, res, next) {
 
     await assertCanAccessStudent(req.user, childId);
 
+    // Which cutoff applies depends on the student's own session (morning vs
+    // afternoon), not the server's clock or a fixed cutoff for everyone.
+    // Falls back to the "morning" cutoff for a student row that somehow has
+    // no session set, matching the Session enum's own default.
+    const student = await prisma.student.findUnique({
+      where: { id: childId },
+      select: { session: true },
+    });
+    const lateCutoffMinutes = LATE_CUTOFF_MINUTES[student?.session] ?? LATE_CUTOFF_MINUTES.morning;
+
     const [year, mon] = month.split("-").map(Number);
     const start = new Date(Date.UTC(year, mon - 1, 1));
     const end = new Date(Date.UTC(year, mon, 1));
@@ -165,13 +182,20 @@ export async function getChildAttendance(req, res, next) {
     let presentDays = 0;
     let absentDays = 0;
     let excusedDays = 0;
+    let lateArrivals = 0;
 
     const logs = records.map((r) => {
       const day = r.date.getUTCDate();
       daily[day] = r.status;
 
-      if (r.status === "present") presentDays += 1;
-      else if (r.status === "absent") absentDays += 1;
+      if (r.status === "present") {
+        presentDays += 1;
+        // A manually-marked "present" with no arrivedAt (e.g. bulk entry)
+        // has no arrival time to judge, so it's never counted as late.
+        if (r.arrivedAt && schoolMinutesOfDay(r.arrivedAt) > lateCutoffMinutes) {
+          lateArrivals += 1;
+        }
+      } else if (r.status === "absent") absentDays += 1;
       else if (r.status === "excused") excusedDays += 1;
 
       return {
@@ -196,7 +220,7 @@ export async function getChildAttendance(req, res, next) {
         presentDays,
         absentDays,
         excusedDays,
-        lateArrivals: 0, // not tracked — no source of truth for this yet
+        lateArrivals,
       },
       daily,
       logs,

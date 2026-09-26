@@ -30,6 +30,7 @@ export async function getChildren(req, res, next) {
 // API anywhere (frontend or backend) to author curriculum goals for a
 // child. Returning [] here rather than fabricating placeholder goals —
 // building that out for real is a separate feature, not a wiring fix.
+// See docs/WEEKLY_GOALS_PROPOSAL.md for a proposed data model/API for this.
 export async function getChildProgress(req, res, next) {
   try {
     const studentId = parseId(req.params.childId, "childId");

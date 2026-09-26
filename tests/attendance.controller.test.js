@@ -2,16 +2,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
-    student: { findMany: vi.fn(), count: vi.fn() },
+    student: { findMany: vi.fn(), count: vi.fn(), findUnique: vi.fn() },
     attendance: { findMany: vi.fn(), upsert: vi.fn() },
     attendanceVerification: { deleteMany: vi.fn() },
     $transaction: vi.fn(),
   },
 }));
 vi.mock("../src/lib/signedFileUrl.js", () => ({ signFileUrl: vi.fn(() => null) }));
+vi.mock("../src/utils/ownership.js", () => ({ assertCanAccessStudent: vi.fn() }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { getAttendance, updateAttendance, recordAttendance } = await import(
+const { getAttendance, updateAttendance, recordAttendance, getChildAttendance } = await import(
   "../src/controllers/attendance.controller.js"
 );
 
@@ -79,5 +80,61 @@ describe("manual edits supersede automatic evidence", () => {
     await updateAttendance({ params: { studentId: "5" }, body: { date: "not-a-date", status: "present" } }, mockRes(), next);
     expect(next).toHaveBeenCalled();
     expect(prisma.attendanceVerification.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("getChildAttendance — lateArrivals", () => {
+  // Default SCHOOL_TIMEZONE is Asia/Manila (UTC+8), so local 8:00 AM is
+  // 00:00 UTC and local 1:00 PM is 05:00 UTC on the same school day.
+  const record = (day, arrivedAtUtc) => ({
+    date: new Date(Date.UTC(2026, 8, day)), // September (0-indexed month 8)
+    status: "present",
+    arrivedAt: arrivedAtUtc ? new Date(arrivedAtUtc) : null,
+  });
+  const req = () => ({
+    params: { childId: "7" },
+    query: { month: "2026-09" },
+    user: { id: 1, role: "Teacher" },
+  });
+
+  it("counts a morning-session arrival after 8:00 AM local time as late", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    prisma.attendance.findMany.mockResolvedValue([
+      record(1, "2026-08-31T23:59:00.000Z"), // 07:59 AM local — on time
+      record(2, "2026-09-01T00:00:00.000Z"), // exactly 08:00 AM local — on time
+      record(3, "2026-09-01T00:01:00.000Z"), // 08:01 AM local — late
+    ]);
+    const res = mockRes();
+    await getChildAttendance(req(), res, vi.fn());
+    expect(res.json.mock.calls[0][0].stats.lateArrivals).toBe(1);
+  });
+
+  it("counts an afternoon-session arrival after 1:00 PM local time as late", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "afternoon" });
+    prisma.attendance.findMany.mockResolvedValue([
+      record(1, "2026-09-01T04:59:00.000Z"), // 12:59 PM local — on time
+      record(2, "2026-09-01T05:01:00.000Z"), // 01:01 PM local — late
+    ]);
+    const res = mockRes();
+    await getChildAttendance(req(), res, vi.fn());
+    expect(res.json.mock.calls[0][0].stats.lateArrivals).toBe(1);
+  });
+
+  it("never counts a present record with no arrivedAt as late", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    prisma.attendance.findMany.mockResolvedValue([record(1, null)]);
+    const res = mockRes();
+    await getChildAttendance(req(), res, vi.fn());
+    expect(res.json.mock.calls[0][0].stats.lateArrivals).toBe(0);
+  });
+
+  it("falls back to the morning cutoff when the student has no session on file", async () => {
+    prisma.student.findUnique.mockResolvedValue(null);
+    prisma.attendance.findMany.mockResolvedValue([
+      record(1, "2026-09-01T00:01:00.000Z"), // 08:01 AM local — late under the morning cutoff
+    ]);
+    const res = mockRes();
+    await getChildAttendance(req(), res, vi.fn());
+    expect(res.json.mock.calls[0][0].stats.lateArrivals).toBe(1);
   });
 });

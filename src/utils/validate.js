@@ -4,6 +4,22 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_RE = /^\d{4}-\d{2}$/;
 const PHONE_RE = /^[0-9+\-\s()]{7,20}$/;
+
+// DATE_RE/MONTH_RE only check the string's SHAPE (4 digits - 2 digits [-
+// 2 digits]), not that it names a real calendar date. Date.UTC silently
+// rolls an out-of-range value over into a different, valid date instead of
+// failing (e.g. 2026-02-30 becomes 2026-03-02; a 2026-13-01 month becomes
+// January 2027) — so a typo would previously be saved as a different, wrong
+// date rather than rejected. This rebuilds the string from the parsed parts
+// and requires an exact match, which only round-trips for a real date.
+function isRealCalendarDate(year, month, day) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
 export const ATTENDANCE_STATUSES = ["present", "absent", "excused"];
 export const SESSIONS = ["morning", "afternoon"];
 export const STUDENT_STATUSES = ["active", "inactive"];
@@ -45,11 +61,19 @@ export function requireDateString(value, label = "date") {
   if (typeof value !== "string" || !DATE_RE.test(value)) {
     throw new AppError(`Invalid ${label}, expected YYYY-MM-DD`, 400);
   }
+  const [year, month, day] = value.split("-").map(Number);
+  if (!isRealCalendarDate(year, month, day)) {
+    throw new AppError(`Invalid ${label}, expected YYYY-MM-DD`, 400);
+  }
   return value;
 }
 
 export function requireMonthString(value) {
   if (typeof value !== "string" || !MONTH_RE.test(value)) {
+    throw new AppError("Invalid month, expected YYYY-MM", 400);
+  }
+  const [, month] = value.split("-").map(Number);
+  if (month < 1 || month > 12) {
     throw new AppError("Invalid month, expected YYYY-MM", 400);
   }
   return value;
@@ -132,11 +156,11 @@ export function requireBirthday(value) {
   if (typeof value !== "string" || !DATE_RE.test(value)) {
     throw new AppError("Invalid birthday, expected YYYY-MM-DD", 400);
   }
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new AppError("Invalid birthday", 400);
+  const [year, month, day] = value.split("-").map(Number);
+  if (!isRealCalendarDate(year, month, day)) {
+    throw new AppError("Invalid birthday, expected YYYY-MM-DD", 400);
   }
-  return parsed;
+  return new Date(`${value}T00:00:00.000Z`);
 }
 
 export function requireGender(value) {
