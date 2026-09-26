@@ -169,3 +169,25 @@ export function requireGender(value) {
   }
   return value;
 }
+
+// 0-100 inclusive integer, as sent from a progress slider/input.
+export function requireProgress(value) {
+  const progress = Number(value);
+  if (!Number.isInteger(progress) || progress < 0 || progress > 100) {
+    throw new AppError("Invalid progress, expected an integer from 0 to 100", 400);
+  }
+  return progress;
+}
+
+// Array of short strings (DailyTheme.objectives, teacher-entered lesson
+// checklist items). Empty array is valid — "no objectives set" is a normal
+// state, not an error.
+export function requireStringArray(value, label, { maxItems = 20, maxLength = 300 } = {}) {
+  if (!Array.isArray(value)) {
+    throw new AppError(`Invalid ${label}, expected an array of strings`, 400);
+  }
+  if (value.length > maxItems) {
+    throw new AppError(`${label} must have at most ${maxItems} items`, 400);
+  }
+  return value.map((item, idx) => requireNonEmptyString(item, `${label}[${idx}]`, maxLength));
+}

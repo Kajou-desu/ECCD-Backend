@@ -10,6 +10,7 @@ import submissionRoutes from "./submissions.routes.js";
 import parentRoutes from "./parent.routes.js";
 import eventRoutes from "./events.routes.js";
 import dashboardRoutes from "./dashboard.routes.js";
+import weeklyGoalsRoutes from "./weeklyGoals.routes.js";
 import fileRoutes from "./files.routes.js";
 import userRoutes from "./users.routes.js";
 import profileRoutes from "./profile.routes.js";
@@ -32,6 +33,7 @@ router.use("/submissions", submissionRoutes); // /api/submissions
 router.use("/parent", parentRoutes); // /api/parent/children
 router.use("/events", eventRoutes); // /api/events
 router.use("/dashboard", dashboardRoutes); // /api/dashboard/*
+router.use("/weekly-goals", weeklyGoalsRoutes); // /api/weekly-goals/*
 router.use("/files", fileRoutes); // /api/files/:filename (public - see files.routes.js)
 router.use("/users", userRoutes); // /api/users/all, /api/users/register, /api/users/delete/:id
 router.use("/profile", profileRoutes); // /api/profile/update

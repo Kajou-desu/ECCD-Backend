@@ -41,6 +41,7 @@ model User {
   notifications Notification[]
   accountActionOtps AccountActionOtp[]
   attendanceSessions AttendanceSession[]
+  weeklyGoalsCreated WeeklyGoal[]
 
   @@map("users")
 }
@@ -136,6 +137,7 @@ model Student {
   documents   StudentDocument[]
   bleDevices  StudentBleDevice[]
   attendanceSignals AttendanceSignal[]
+  goalProgress StudentGoalProgress[]
 
   @@index([status])
   @@index([session])
@@ -371,8 +373,47 @@ model DailyTheme {
   description String?
   objectives  String[]
   createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@map("daily_themes")
+}
+
+// One row per (weekStart, session) — mirrors DailyTheme's one-row-per-day
+// pattern. See docs/WEEKLY_GOALS_PROPOSAL.md for the design rationale.
+model WeeklyGoal {
+  id          Int      @id @default(autoincrement())
+  weekStart   DateTime @db.Date // Monday of the week, school-timezone
+  session     Session
+  title       String
+  description String?
+  category    String? // e.g. "Motor Skills", "Numeracy" — free text, like Material.category
+  createdById Int?
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  progress    StudentGoalProgress[]
+
+  @@unique([weekStart, session, title])
+  @@index([weekStart, session])
+  @@map("weekly_goals")
+}
+
+// Per-student progress against a goal. Absence of a row = 0%/not started,
+// so a goal doesn't need a row per student up front.
+model StudentGoalProgress {
+  id         Int        @id @default(autoincrement())
+  goalId     Int
+  studentId  Int
+  progress   Int        @default(0) // 0-100, teacher-set
+  status     String     @default("Not started") // short free-text shown under the bar
+  updatedAt  DateTime   @updatedAt
+
+  goal       WeeklyGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, studentId])
+  @@map("student_goal_progress")
 }
 
 model Notification {

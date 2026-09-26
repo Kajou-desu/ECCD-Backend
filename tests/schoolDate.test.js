@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { schoolDateString, schoolDateAsUtcMidnight } from "../src/utils/schoolDate.js";
+import { schoolDateString, schoolDateAsUtcMidnight, schoolWeekStart } from "../src/utils/schoolDate.js";
 
 describe("schoolDateString", () => {
   it("uses the school's day, not UTC's, for early-morning arrivals", () => {
@@ -28,5 +28,21 @@ describe("schoolDateAsUtcMidnight", () => {
   it("returns the school day as a UTC-midnight Date, matching attendance.controller's toDate()", () => {
     const d = schoolDateAsUtcMidnight(new Date("2026-09-19T23:30:00.000Z"), "Asia/Manila");
     expect(d.toISOString()).toBe("2026-09-20T00:00:00.000Z");
+  });
+});
+
+describe("schoolWeekStart", () => {
+  it("returns the same Monday for any day in that week", () => {
+    // 2026-09-21 is a Monday, 2026-09-25 (Friday) is in the same week.
+    const monday = schoolWeekStart(new Date("2026-09-21T02:00:00.000Z"), "Asia/Manila");
+    const friday = schoolWeekStart(new Date("2026-09-25T10:00:00.000Z"), "Asia/Manila");
+    expect(monday.toISOString()).toBe("2026-09-21T00:00:00.000Z");
+    expect(friday.toISOString()).toBe("2026-09-21T00:00:00.000Z");
+  });
+
+  it("rolls a Sunday back to the previous Monday, not forward", () => {
+    // 2026-09-27 is a Sunday; its week started 2026-09-21.
+    const sunday = schoolWeekStart(new Date("2026-09-27T05:00:00.000Z"), "Asia/Manila");
+    expect(sunday.toISOString()).toBe("2026-09-21T00:00:00.000Z");
   });
 });

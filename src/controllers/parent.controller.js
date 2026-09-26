@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { parseId } from "../utils/validate.js";
+import { schoolWeekStart } from "../utils/schoolDate.js";
 
 // GET /api/parent/children — identity derived from JWT (req.user.id), never
 // from client input.
@@ -26,17 +27,21 @@ export async function getChildren(req, res, next) {
 // RecentActivitiesCard), not the {materialsCompleted, materialsTotal,
 // attendance: {...}} shape this originally guessed.
 //
-// `weeklyGoals` has no real data source: there is no teacher-facing UI or
-// API anywhere (frontend or backend) to author curriculum goals for a
-// child. Returning [] here rather than fabricating placeholder goals —
-// building that out for real is a separate feature, not a wiring fix.
-// See docs/WEEKLY_GOALS_PROPOSAL.md for a proposed data model/API for this.
+// weeklyGoals: real data, per docs/WEEKLY_GOALS_PROPOSAL.md — this week's
+// classroom goals for the child's session, with the child's own progress
+// row (defaulting to 0%/"Not started" when the teacher hasn't graded yet).
 export async function getChildProgress(req, res, next) {
   try {
     const studentId = parseId(req.params.childId, "childId");
     await assertCanAccessStudent(req.user, studentId);
 
-    const [attendanceRecords, submissions] = await Promise.all([
+    const student = await prisma.student.findUnique({
+      where: { id: studentId },
+      select: { session: true },
+    });
+    if (!student) return res.status(404).json({ message: "Student not found" });
+
+    const [attendanceRecords, submissions, goals] = await Promise.all([
       prisma.attendance.findMany({ where: { studentId } }),
       prisma.submission.findMany({
         where: { studentId },
@@ -44,7 +49,19 @@ export async function getChildProgress(req, res, next) {
         orderBy: { submittedAt: "desc" },
         take: 10,
       }),
+      prisma.weeklyGoal.findMany({
+        where: { weekStart: schoolWeekStart(), session: student.session },
+        include: { progress: { where: { studentId } } },
+        orderBy: { createdAt: "asc" },
+      }),
     ]);
+
+    const weeklyGoals = goals.map((g) => ({
+      id: g.id,
+      title: g.title,
+      progress: g.progress[0]?.progress ?? 0,
+      status: g.progress[0]?.status ?? "Not started",
+    }));
 
     const totalDays = attendanceRecords.length;
     const presentDays = attendanceRecords.filter((a) => a.status === "present").length;
@@ -64,7 +81,7 @@ export async function getChildProgress(req, res, next) {
       attendance: `${attendancePct}%`,
       schoolDays: totalDays,
       activityCount: submissions.length,
-      weeklyGoals: [],
+      weeklyGoals,
       recentActivities,
     });
   } catch (err) {

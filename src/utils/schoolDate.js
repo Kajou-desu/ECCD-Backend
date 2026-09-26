@@ -18,6 +18,21 @@ export function schoolDateAsUtcMidnight(now = new Date(), timeZone = env.schoolT
   return new Date(`${schoolDateString(now, timeZone)}T00:00:00.000Z`);
 }
 
+// UTC-midnight Date for the Monday of the school-local week containing
+// `now` (ISO week: Monday-start). Mirrors schoolDateAsUtcMidnight's
+// "today" logic — "this week" is ambiguous across timezones for the same
+// reason "today" is, so this reuses the same school-local day first, then
+// walks back to that day's Monday using UTC weekday math (safe because the
+// UTC-midnight Date has no time-of-day component left to misinterpret).
+export function schoolWeekStart(now = new Date(), timeZone = env.schoolTimezone) {
+  const todayUtcMidnight = schoolDateAsUtcMidnight(now, timeZone);
+  const dayOfWeek = todayUtcMidnight.getUTCDay(); // 0=Sun..6=Sat
+  const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const monday = new Date(todayUtcMidnight);
+  monday.setUTCDate(monday.getUTCDate() - daysSinceMonday);
+  return monday;
+}
+
 // Minutes since local midnight, in the school's timezone, for the given
 // instant. Used to decide whether an arrival is "late" against a wall-clock
 // cutoff (e.g. 8:00 AM) without hardcoding an offset from UTC — the server
