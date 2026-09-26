@@ -92,6 +92,24 @@ function requireRoleValue(value) {
   return value;
 }
 
+const LINKABLE_ROLES = ["Parent", "Guardian"];
+
+// Reverse of the student-side linking: connects a Parent/Guardian account to
+// students whose registration lists its email. Only called from the admin
+// flows (register/update), never from self-service email changes, which are
+// not verified. Adds links only; existing ones are kept.
+async function linkStudentsByEmail(tx, userId, email) {
+  const students = await tx.student.findMany({
+    where: { OR: [{ motherEmail: email }, { fatherEmail: email }, { guardianEmail: email }] },
+    select: { id: true },
+  });
+  if (!students.length) return;
+  await tx.parentChild.createMany({
+    data: students.map((student) => ({ parentId: userId, studentId: student.id })),
+    skipDuplicates: true,
+  });
+}
+
 // GET /api/users/all — Teacher/Admin only (enforced at route level).
 export async function listUsers(req, res, next) {
   try {
@@ -156,6 +174,7 @@ export async function registerUser(req, res, next) {
           skipDuplicates: true,
         });
       }
+      if (LINKABLE_ROLES.includes(role)) await linkStudentsByEmail(tx, created.id, email);
 
       return tx.user.findUnique({ where: { id: created.id }, select: PUBLIC_SELECT });
     });
@@ -164,6 +183,9 @@ export async function registerUser(req, res, next) {
   } catch (err) {
     if (err.code === "P2002") {
       return res.status(409).json({ message: "An account with this email already exists" });
+    }
+    if (err.code === "P2003") {
+      return res.status(400).json({ message: "One or more selected students do not exist" });
     }
     next(err);
   }
@@ -234,6 +256,17 @@ export async function updateUser(req, res, next) {
             skipDuplicates: true,
           });
         }
+      } else if (LINKABLE_ROLES.includes(existing.role) && !LINKABLE_ROLES.includes(requestedRole)) {
+        // Leaving Parent/Guardian: drop links so a Teacher/Admin never keeps
+        // student access through ParentChild.
+        await tx.parentChild.deleteMany({ where: { parentId: id } });
+      }
+
+      // Match by email only when the email or role change could create a
+      // new match; a plain edit must not restore links removed on purpose.
+      const becameLinkable = !LINKABLE_ROLES.includes(existing.role) && LINKABLE_ROLES.includes(requestedRole);
+      if (LINKABLE_ROLES.includes(requestedRole) && (becameLinkable || (data.email && data.email !== existing.email))) {
+        await linkStudentsByEmail(tx, id, data.email ?? existing.email);
       }
 
       return tx.user.findUnique({ where: { id }, select: PUBLIC_SELECT });
@@ -244,6 +277,9 @@ export async function updateUser(req, res, next) {
     if (err.code === "P2025") return res.status(404).json({ message: "Account not found" });
     if (err.code === "P2002") {
       return res.status(409).json({ message: "An account with this email already exists" });
+    }
+    if (err.code === "P2003") {
+      return res.status(400).json({ message: "One or more selected students do not exist" });
     }
     next(err);
   }

@@ -15,6 +15,10 @@ vi.mock("../src/lib/prisma.js", () => ({
     },
     parentChild: {
       createMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    student: {
+      findMany: vi.fn(),
     },
     accountActionOtp: {
       findFirst: vi.fn(),
@@ -244,6 +248,8 @@ describe("updateUser", () => {
       lastName: "Name",
     });
     prisma.user.update.mockResolvedValue({ id: 5, firstName: "New", lastName: "Name", role: "Parent" });
+    // The email change makes updateUser look for students listing that email.
+    prisma.student.findMany.mockResolvedValue([]);
 
     const req = {
       body: { userId: 5, firstName: "New", lastName: "Name", email: "new@example.com" },
@@ -626,5 +632,173 @@ describe("uploadMyProfilePhoto", () => {
         profilePicture: expect.stringContaining("https://host/api/files/abc123.jpg"),
       }),
     );
+  });
+});
+
+describe("parent/guardian <-> student linking", () => {
+  const linkBody = {
+    firstName: "Maria",
+    lastName: "Dela Cruz",
+    email: "Maria@Example.com",
+    password: "correct-horse-1",
+    role: "Parent",
+  };
+  const admin = { id: 1, role: "Admin" };
+
+  function stubRegister() {
+    prisma.user.create.mockResolvedValue({ id: 9 });
+    prisma.user.findUnique.mockResolvedValue({ id: 9, children: [] });
+  }
+
+  it("links a new Parent account to students that already list its email", async () => {
+    stubRegister();
+    prisma.student.findMany.mockResolvedValue([{ id: 3 }, { id: 4 }]);
+
+    await registerUser({ body: { ...linkBody }, user: admin }, mockRes(), vi.fn());
+
+    expect(prisma.student.findMany).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { motherEmail: "maria@example.com" },
+          { fatherEmail: "maria@example.com" },
+          { guardianEmail: "maria@example.com" },
+        ],
+      },
+      select: { id: true },
+    });
+    expect(prisma.parentChild.createMany).toHaveBeenCalledWith({
+      data: [
+        { parentId: 9, studentId: 3 },
+        { parentId: 9, studentId: 4 },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it("does not look up students for a Teacher account", async () => {
+    stubRegister();
+
+    await registerUser({ body: { ...linkBody, role: "Teacher" }, user: admin }, mockRes(), vi.fn());
+
+    expect(prisma.student.findMany).not.toHaveBeenCalled();
+    expect(prisma.parentChild.createMany).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when a selected student does not exist", async () => {
+    prisma.user.create.mockResolvedValue({ id: 9 });
+    prisma.student.findMany.mockResolvedValue([]);
+    prisma.parentChild.createMany.mockRejectedValue(Object.assign(new Error("fk"), { code: "P2003" }));
+
+    const res = mockRes();
+    const next = vi.fn();
+    await registerUser({ body: { ...linkBody, studentIds: [999] }, user: admin }, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("keeps several selected students when an account is saved (replace semantics)", async () => {
+    prisma.user.findUnique
+      .mockResolvedValueOnce({ id: 5, role: "Parent", email: "maria@example.com" })
+      .mockResolvedValue({ id: 5, children: [] });
+    prisma.user.update.mockResolvedValue({ id: 5 });
+
+    await updateUser(
+      { body: { userId: 5, studentIds: [1, "2", 3, 3] }, user: admin },
+      mockRes(),
+      vi.fn(),
+    );
+
+    expect(prisma.parentChild.deleteMany).toHaveBeenCalledWith({ where: { parentId: 5 } });
+    expect(prisma.parentChild.createMany).toHaveBeenCalledWith({
+      data: [
+        { parentId: 5, studentId: 1 },
+        { parentId: 5, studentId: 2 },
+        { parentId: 5, studentId: 3 },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it("does not re-match students on an edit that leaves email and role alone", async () => {
+    prisma.user.findUnique
+      .mockResolvedValueOnce({ id: 5, role: "Parent", email: "maria@example.com" })
+      .mockResolvedValue({ id: 5, children: [] });
+    prisma.user.update.mockResolvedValue({ id: 5 });
+
+    await updateUser(
+      { body: { userId: 5, phone: "09171234567", email: "maria@example.com" }, user: admin },
+      mockRes(),
+      vi.fn(),
+    );
+
+    expect(prisma.student.findMany).not.toHaveBeenCalled();
+  });
+
+  it("matches students when a Parent's email changes", async () => {
+    prisma.user.findUnique
+      .mockResolvedValueOnce({ id: 5, role: "Parent", email: "old@example.com" })
+      .mockResolvedValue({ id: 5, children: [] });
+    prisma.user.update.mockResolvedValue({ id: 5 });
+    prisma.student.findMany.mockResolvedValue([{ id: 3 }]);
+
+    await updateUser(
+      { body: { userId: 5, email: "New@Example.com" }, user: admin },
+      mockRes(),
+      vi.fn(),
+    );
+
+    expect(prisma.student.findMany.mock.calls[0][0].where.OR[0]).toEqual({ motherEmail: "new@example.com" });
+    expect(prisma.parentChild.createMany).toHaveBeenCalledWith({
+      data: [{ parentId: 5, studentId: 3 }],
+      skipDuplicates: true,
+    });
+  });
+
+  it("matches students when an account becomes a Guardian", async () => {
+    prisma.user.findUnique
+      .mockResolvedValueOnce({ id: 5, role: "Teacher", email: "g@example.com" })
+      .mockResolvedValue({ id: 5, children: [] });
+    prisma.user.update.mockResolvedValue({ id: 5 });
+    prisma.student.findMany.mockResolvedValue([{ id: 3 }]);
+
+    await updateUser({ body: { userId: 5, role: "Guardian" }, user: admin }, mockRes(), vi.fn());
+
+    expect(prisma.parentChild.createMany).toHaveBeenCalled();
+  });
+
+  it("removes student links when a Parent is changed to Teacher", async () => {
+    prisma.user.findUnique
+      .mockResolvedValueOnce({ id: 5, role: "Parent", email: "maria@example.com" })
+      .mockResolvedValue({ id: 5, children: [] });
+    prisma.user.update.mockResolvedValue({ id: 5 });
+
+    await updateUser({ body: { userId: 5, role: "Teacher" }, user: admin }, mockRes(), vi.fn());
+
+    expect(prisma.parentChild.deleteMany).toHaveBeenCalledWith({ where: { parentId: 5 } });
+    expect(prisma.student.findMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses to connect students to a non-Parent/Guardian role", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Teacher", email: "t@example.com" });
+
+    const res = mockRes();
+    await updateUser({ body: { userId: 5, studentIds: [1] }, user: admin }, res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(prisma.parentChild.createMany).not.toHaveBeenCalled();
+  });
+
+  it("never matches students from a self-service email change", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 5, email: "old@example.com", passwordHash: "x" });
+    prisma.user.update.mockResolvedValue({ id: 5 });
+
+    await updateMyProfile(
+      { body: { phone: "09171234567" }, user: { id: 5, role: "Parent" } },
+      mockRes(),
+      vi.fn(),
+    );
+
+    expect(prisma.student.findMany).not.toHaveBeenCalled();
   });
 });

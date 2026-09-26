@@ -68,22 +68,27 @@ function finalStudentCode(studentId) {
   return `ECCD-2026-${studentId}`;
 }
 
-// Takes the already-validated/normalized `data` object from
-// buildCreateData (not the raw request body) so the email lookup below
-// matches the same lowercased/trimmed form every account's email is
-// stored in — the raw body's email may differ only in case, which would
-// silently fail to find an existing account.
-function getPrimaryParent(data) {
-  if (data.motherName && data.motherEmail) {
-    return { name: data.motherName, email: data.motherEmail, phone: data.motherPhone, address: data.motherAddress, role: "Parent" };
-  }
-  if (data.fatherName && data.fatherEmail) {
-    return { name: data.fatherName, email: data.fatherEmail, phone: data.fatherPhone, address: data.fatherAddress, role: "Parent" };
-  }
-  if (data.guardianName && data.guardianEmail) {
-    return { name: data.guardianName, email: data.guardianEmail, phone: data.guardianPhone, address: data.guardianAddress, role: "Guardian" };
-  }
-  return null;
+const EMAIL_FIELDS = ["motherEmail", "fatherEmail", "guardianEmail"];
+
+// Links existing Parent/Guardian accounts whose email matches any of `emails`.
+// Emails are lowercased on every write path (requireEmail/optionalEmail), so an
+// exact match is correct. Never creates accounts, only adds links, and logs
+// ids only, never emails.
+async function linkAccountsByEmail(tx, studentId, emails, actorId) {
+  const unique = [...new Set(emails.filter(Boolean))];
+  if (!unique.length) return;
+
+  const accounts = await tx.user.findMany({
+    where: { role: { in: ["Parent", "Guardian"] }, email: { in: unique } },
+    select: { id: true },
+  });
+  if (!accounts.length) return;
+
+  const { count } = await tx.parentChild.createMany({
+    data: accounts.map((account) => ({ parentId: account.id, studentId })),
+    skipDuplicates: true,
+  });
+  if (count) logger.info({ actorId, studentId, count }, "Linked parent accounts to student");
 }
 
 function buildCreateData(body) {
@@ -203,17 +208,12 @@ export async function createStudent(req, res, next) {
         include: DETAIL_INCLUDE,
       });
 
-      const primary = getPrimaryParent(data);
-      if (primary) {
-        const account = await tx.user.findUnique({ where: { email: primary.email } });
-        if (account && ["Parent", "Guardian"].includes(account.role)) {
-          await tx.parentChild.upsert({
-            where: { parentId_studentId: { parentId: account.id, studentId: created.id } },
-            update: {},
-            create: { parentId: account.id, studentId: created.id },
-          });
-        }
-      }
+      await linkAccountsByEmail(
+        tx,
+        created.id,
+        EMAIL_FIELDS.map((f) => data[f]),
+        req.user?.id
+      );
       return finalized;
     });
     res.status(201).json(toStudentDetailResponse(req, student));
@@ -297,7 +297,19 @@ export async function updateStudent(req, res, next) {
       }
     }
 
-    const student = await prisma.student.update({ where: { id }, data, include: DETAIL_INCLUDE });
+    // The edit form resends every field, so link only emails that actually
+    // changed; otherwise any unrelated edit would restore links an admin
+    // removed on purpose in Account Management.
+    const student = await prisma.$transaction(async (tx) => {
+      const before = await tx.student.findUnique({
+        where: { id },
+        select: { motherEmail: true, fatherEmail: true, guardianEmail: true },
+      });
+      const updated = await tx.student.update({ where: { id }, data, include: DETAIL_INCLUDE });
+      const changed = EMAIL_FIELDS.filter((f) => data[f] !== undefined && data[f] !== before?.[f]);
+      await linkAccountsByEmail(tx, id, changed.map((f) => data[f]), req.user?.id);
+      return updated;
+    });
     res.json(toStudentDetailResponse(req, student));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Student not found" });
@@ -376,11 +388,13 @@ export async function importStudents(req, res, next) {
             data: { ...data, studentCode: temporaryStudentCode() },
             include: DETAIL_INCLUDE,
           });
-          return tx.student.update({
+          const finalized = await tx.student.update({
             where: { id: created.id },
             data: { studentCode: finalStudentCode(created.id) },
             include: DETAIL_INCLUDE,
           });
+          await linkAccountsByEmail(tx, created.id, EMAIL_FIELDS.map((f) => data[f]), req.user?.id);
+          return finalized;
         });
         created.push(toStudentDetailResponse(req, student));
       } catch (err) {
