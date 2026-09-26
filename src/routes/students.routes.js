@@ -1,6 +1,8 @@
 import { Router } from "express";
+import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
+import { enrollmentUserLimiter } from "../middleware/rateLimit.js";
 import {
   getStudents,
   getStudent,
@@ -11,6 +13,7 @@ import {
   uploadStudentPhoto,
 } from "../controllers/students.controller.js";
 import { uploadStudentDocuments, deleteStudentDocument } from "../controllers/studentDocuments.controller.js";
+import { uploadEnrollmentPhotos, MAX_ENROLLMENT_PHOTOS } from "../controllers/enrollmentPhotos.controller.js";
 import { getSubmissions } from "../controllers/submissions.controller.js";
 import { getChildAttendance } from "../controllers/attendance.controller.js";
 import {
@@ -44,6 +47,28 @@ router.post(
   uploadStudentDocuments
 );
 router.delete("/:id/documents/:documentId", requireRole("Teacher", "Admin"), deleteStudentDocument);
+
+// Enrollment photos (face recognition): biometric data of a child, so these
+// stay in memory and go straight to the recognition service — never through
+// the shared upload.js pipeline, which persists into the app's own storage.
+const enrollmentPhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB per photo
+    files: MAX_ENROLLMENT_PHOTOS,
+    fields: 0,
+    parts: MAX_ENROLLMENT_PHOTOS + 1,
+  },
+  fileFilter: (_req, file, cb) => cb(null, file.mimetype === "image/jpeg" || file.mimetype === "image/png"),
+}).array("photos", MAX_ENROLLMENT_PHOTOS);
+
+router.post(
+  "/:id/enrollment-photos",
+  requireRole("Teacher", "Admin"),
+  enrollmentUserLimiter,
+  enrollmentPhotoUpload,
+  uploadEnrollmentPhotos
+);
 
 router.get("/:id/ble-devices", requireRole("Teacher", "Admin"), listBleDevices);
 router.post("/:id/ble-devices", requireRole("Teacher", "Admin"), addBleDevice);

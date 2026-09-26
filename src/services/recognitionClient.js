@@ -7,7 +7,14 @@ import { env } from "../config/env.js";
 // decided by the backend's own thresholds (env.verification).
 
 const TIMEOUT_MS = 3000;
+const ENROLL_TIMEOUT_MS = 15_000; // several full-size photos, not one downscaled frame
 const MAX_FACES = 20;
+
+const enrollResponseSchema = z.object({
+  studentId: z.number().int().positive(),
+  photosReceived: z.number().int().min(0),
+  enrolled: z.boolean(),
+});
 
 // Validated on the way IN: a misbehaving or compromised service must not be able
 // to inject arbitrary shapes or huge arrays into the pipeline.
@@ -66,6 +73,47 @@ export async function recognizeFrame(frame) {
     throw new RecognitionUnavailableError("Recognition service returned invalid JSON");
   }
   const parsed = responseSchema.safeParse(body);
+  if (!parsed.success) throw new RecognitionUnavailableError("Recognition service returned an unexpected shape");
+  return parsed.data;
+}
+
+// `files` are multer memory-storage entries ({ buffer, mimetype }), already
+// validated by the caller (JPEG/PNG signature, size, count). This REPLACES the
+// student's whole enrollment photo set on the recognition service — it is not
+// additive. Resolves to { studentId, photosReceived, enrolled }.
+export async function enrollStudentPhotos(studentId, files) {
+  if (!env.recognition) throw new RecognitionUnavailableError("Recognition service is not configured");
+
+  const form = new FormData();
+  for (const [index, file] of files.entries()) {
+    const ext = file.mimetype === "image/png" ? "png" : "jpg";
+    form.append("photos", new Blob([file.buffer], { type: file.mimetype }), `photo-${index}.${ext}`);
+  }
+
+  let response;
+  try {
+    response = await fetch(`${env.recognition.baseUrl}/enroll/${studentId}`, {
+      method: "POST",
+      headers: { "X-Service-Key": env.recognition.key },
+      body: form,
+      redirect: "error",
+      signal: AbortSignal.timeout(ENROLL_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new RecognitionUnavailableError(`Enrollment request failed: ${cause?.name ?? "error"}`);
+  }
+
+  if (!response.ok) {
+    throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
+  }
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new RecognitionUnavailableError("Recognition service returned invalid JSON");
+  }
+  const parsed = enrollResponseSchema.safeParse(body);
   if (!parsed.success) throw new RecognitionUnavailableError("Recognition service returned an unexpected shape");
   return parsed.data;
 }

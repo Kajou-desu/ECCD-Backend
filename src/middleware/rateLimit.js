@@ -203,3 +203,12 @@ export const frameUserLimiter = perUserLimiter(
   2000,
   "Too many requests, please try again later"
 );
+
+// Enrollment photo uploads (POST /students/:id/enrollment-photos): a rare,
+// deliberate admin action (not polling), so it stays on a tight per-user
+// budget like profileUpdateLimiter rather than the high ceilings above.
+export const enrollmentUserLimiter = perUserLimiter(
+  "rl:enrollment-user:",
+  30,
+  "Too many enrollment photo uploads, please try again later"
+);
