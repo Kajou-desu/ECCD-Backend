@@ -1,0 +1,1 @@
+ALTER TYPE "EventCategory" ADD VALUE 'Event';

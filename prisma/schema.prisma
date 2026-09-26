@@ -343,6 +343,7 @@ model Submission {
 enum EventCategory {
   Holiday
   Birthday
+  Event
   Others
 }
 
