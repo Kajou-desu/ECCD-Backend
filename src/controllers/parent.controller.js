@@ -13,10 +13,13 @@ export async function getChildren(req, res, next) {
       include: { student: { include: { teacher: { select: { name: true } } } } },
     });
     res.json(
-      links.map((l) => {
-        const { teacher, ...student } = l.student;
-        return { ...student, teacher: teacher?.name ?? null, photo: signFileUrl(req, student.photo) };
-      })
+      links
+        .map((l) => {
+          if (!l.student) return null;
+          const { teacher, ...student } = l.student;
+          return { ...student, teacher: teacher?.name ?? null, photo: signFileUrl(req, student.photo) };
+        })
+        .filter(Boolean)
     );
   } catch (err) {
     next(err);

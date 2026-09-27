@@ -6,12 +6,12 @@ vi.mock("../src/lib/prisma.js", () => ({
     attendance: { findMany: vi.fn() },
     submission: { findMany: vi.fn() },
     weeklyGoal: { findMany: vi.fn() },
-    parentChild: { findUnique: vi.fn() },
+    parentChild: { findMany: vi.fn(), findUnique: vi.fn() },
   },
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { getChildProgress } = await import("../src/controllers/parent.controller.js");
+const { getChildren, getChildProgress } = await import("../src/controllers/parent.controller.js");
 
 function mockRes() {
   const res = {};
@@ -22,6 +22,41 @@ function mockRes() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("getChildren", () => {
+  it("skips orphaned parent-child links without crashing", async () => {
+    prisma.parentChild.findMany.mockResolvedValue([
+      { student: null },
+      {
+        student: {
+          id: 7,
+          name: "Maria Santos",
+          photo: "uploads/child-7.jpg",
+          teacher: { name: "Ms. Reyes" },
+        },
+      },
+    ]);
+
+    const req = {
+      user: { id: 12 },
+      protocol: "https",
+      get: vi.fn().mockReturnValue("eccd-backend-production.up.railway.app"),
+    };
+    const res = mockRes();
+    const next = vi.fn();
+
+    await getChildren(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: 7,
+        name: "Maria Santos",
+        teacher: "Ms. Reyes",
+      }),
+    ]);
+    expect(next).not.toHaveBeenCalled();
+  });
 });
 
 describe("getChildProgress", () => {
