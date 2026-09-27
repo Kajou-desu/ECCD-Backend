@@ -32,7 +32,10 @@ function auth(role = "Teacher") {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  prisma.student.findUnique.mockResolvedValue({ id: 5 });
+  // teacherId: 9 matches auth()'s default Teacher user id, so the ownership
+  // check (a Teacher may only manage their own connected students) allows
+  // the Teacher-authenticated requests below.
+  prisma.student.findUnique.mockResolvedValue({ id: 5, teacherId: 9 });
   enrollStudentPhotos.mockResolvedValue({ studentId: 5, photosReceived: 1, enrolled: true });
 });
 
@@ -63,7 +66,11 @@ describe("POST /students/:id/enrollment-photos", () => {
 
   it("404 when the student doesn't exist", async () => {
     prisma.student.findUnique.mockResolvedValue(null);
-    const res = await request(app).post(URL).set("Authorization", auth())
+    // Admin: bypasses the ownership check, so this actually reaches (and
+    // tests) the controller's own "student not found" 404. A Teacher would
+    // get 403 from the ownership check instead, without revealing whether
+    // the id exists at all.
+    const res = await request(app).post(URL).set("Authorization", auth("Admin"))
       .attach("photos", JPEG, { filename: "a.jpg", contentType: "image/jpeg" });
     expect(res.status).toBe(404);
     expect(enrollStudentPhotos).not.toHaveBeenCalled();

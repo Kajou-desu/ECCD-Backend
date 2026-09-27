@@ -42,8 +42,8 @@ const LIST_SELECT = {
 };
 
 // Full shape for the edit form (StudentForm.jsx prefill) — every flat field
-// plus embedded documents.
-const DETAIL_INCLUDE = { documents: true };
+// plus embedded documents and the connected teacher.
+const DETAIL_INCLUDE = { documents: true, teacher: { select: { id: true, name: true } } };
 
 // Prisma DateTime -> plain YYYY-MM-DD. Needed because StudentForm.jsx feeds
 // student.birthday straight into <input type="date" value={...}>, which
@@ -56,9 +56,15 @@ function toDateOnly(date) {
 
 // FileUploadField.jsx reads file.name for existing documents, not fileName —
 // same aliasing pattern used for photo.url in albums.controller.js.
+// `teacher` is flattened from the included relation object down to a plain
+// display name string — StudentProfileHeader.jsx renders it directly as
+// `student.teacher`; `teacherId` (already a scalar column on the row) is
+// kept as-is for the admin edit form's teacher picker.
 function toStudentDetailResponse(req, student) {
+  const { teacher, ...rest } = student;
   return {
-    ...student,
+    ...rest,
+    teacher: teacher?.name ?? null,
     photo: signFileUrl(req, student.photo),
     birthday: toDateOnly(student.birthday),
     documents: (student.documents || []).map((doc) => toDocumentResponse(req, doc)),
@@ -156,7 +162,10 @@ function buildCreateData(body) {
   };
 }
 
-// Teacher/admin only (enforced at route level) — full roster.
+// Teacher/admin only (enforced at route level).
+// Admin sees the full roster; a Teacher sees only students connected to
+// them (Student.teacherId), so a teacher's "Student Info" list matches who
+// they actually manage.
 // ?page & ?pageSize are optional; omitting both returns the full roster
 // exactly as before (see parsePagination), so existing callers are
 // unaffected. When paginated, total roster size is sent via X-Total-Count
@@ -164,14 +173,16 @@ function buildCreateData(body) {
 export async function getStudents(req, res, next) {
   try {
     const pagination = parsePagination(req.query);
+    const where = req.user.role === "Teacher" ? { teacherId: req.user.id } : undefined;
 
     const [students, total] = await Promise.all([
       prisma.student.findMany({
         select: LIST_SELECT,
+        where,
         orderBy: { name: "asc" },
         ...(pagination && { skip: pagination.skip, take: pagination.take }),
       }),
-      pagination ? prisma.student.count() : Promise.resolve(null),
+      pagination ? prisma.student.count({ where }) : Promise.resolve(null),
     ]);
 
     if (pagination) res.set("X-Total-Count", String(total));
@@ -207,10 +218,31 @@ export async function getStudent(req, res, next) {
   }
 }
 
+// Resolves who a new/updated student is connected to. A Teacher creating or
+// already managing a student is always the assigned teacher — any
+// client-supplied teacherId is ignored so a teacher can't hand a student off
+// to (or claim one on behalf of) another teacher. An Admin must explicitly
+// choose an existing Teacher account; `null` explicitly unassigns.
+async function resolveTeacherId(actor, requestedTeacherId) {
+  if (actor.role === "Teacher") return actor.id;
+
+  if (requestedTeacherId === null) return null;
+  const teacherId = parseId(requestedTeacherId, "teacherId");
+  const teacher = await prisma.user.findUnique({ where: { id: teacherId }, select: { role: true } });
+  if (!teacher || teacher.role !== "Teacher") {
+    throw new AppError("Selected teacher account not found", 400);
+  }
+  return teacherId;
+}
+
 // Teacher/admin only (enforced at route level).
 export async function createStudent(req, res, next) {
   try {
     const data = buildCreateData(req.body);
+    // Admin must pick a teacher to connect the student to; a Teacher always
+    // self-assigns (resolveTeacherId ignores req.body.teacherId for them).
+    data.teacherId = await resolveTeacherId(req.user, req.body.teacherId);
+
     const student = await prisma.$transaction(async (tx) => {
       const created = await tx.student.create({
         data: { ...data, studentCode: temporaryStudentCode() },
@@ -242,8 +274,19 @@ export async function createStudent(req, res, next) {
 export async function updateStudent(req, res, next) {
   try {
     const id = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, id);
     const body = req.body;
     const data = {};
+
+    // Only an Admin may reassign a student's teacher; a Teacher is already
+    // restricted (via assertCanAccessStudent above) to editing their own
+    // assigned students, so they have no reason to change this field.
+    if (body.teacherId !== undefined) {
+      if (req.user.role !== "Admin") {
+        throw new AppError("Only an Admin can change a student's assigned teacher", 403);
+      }
+      data.teacherId = await resolveTeacherId(req.user, body.teacherId);
+    }
 
     if (body.firstName !== undefined) data.firstName = requireNonEmptyString(body.firstName, "firstName", 100);
     if (body.lastName !== undefined) data.lastName = requireNonEmptyString(body.lastName, "lastName", 100);
@@ -343,6 +386,7 @@ export async function updateStudent(req, res, next) {
 export async function uploadStudentPhoto(req, res, next) {
   try {
     const id = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, id);
     if (!req.file) {
       return res.status(400).json({ message: "No photo file was provided" });
     }
@@ -368,6 +412,7 @@ export async function uploadStudentPhoto(req, res, next) {
 export async function deleteStudent(req, res, next) {
   try {
     const id = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, id);
 
     // The delete cascades to documents and submissions in the database; gather
     // their files first so the student's records don't outlive the student.
@@ -402,6 +447,10 @@ export async function importStudents(req, res, next) {
       try {
         const student = await prisma.$transaction(async (tx) => {
           const data = buildCreateData(rows[index]);
+          // Bulk import has no per-row teacher picker: a Teacher importing
+          // self-assigns every row; an Admin's rows are left unassigned for
+          // a teacher to be connected later via edit.
+          data.teacherId = req.user.role === "Teacher" ? req.user.id : null;
           const created = await tx.student.create({
             data: { ...data, studentCode: temporaryStudentCode() },
             include: DETAIL_INCLUDE,

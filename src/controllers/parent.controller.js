@@ -10,9 +10,14 @@ export async function getChildren(req, res, next) {
   try {
     const links = await prisma.parentChild.findMany({
       where: { parentId: req.user.id },
-      include: { student: true },
+      include: { student: { include: { teacher: { select: { name: true } } } } },
     });
-    res.json(links.map((l) => ({ ...l.student, photo: signFileUrl(req, l.student.photo) })));
+    res.json(
+      links.map((l) => {
+        const { teacher, ...student } = l.student;
+        return { ...student, teacher: teacher?.name ?? null, photo: signFileUrl(req, student.photo) };
+      })
+    );
   } catch (err) {
     next(err);
   }

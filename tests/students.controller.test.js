@@ -103,10 +103,8 @@ describe("student gender handling", () => {
       documents: [],
     });
 
-    // No req.user here on purpose: this test predates parent/guardian
-    // linking and shouldn't need to know about it — the controller must
-    // tolerate a missing req.user (linkAccountsByEmail is a no-op anyway
-    // since no email is given below).
+    // req.user is required now: createStudent uses the actor's role to
+    // decide who the student is connected to (a Teacher self-assigns).
     await createStudent(
       {
         body: {
@@ -118,6 +116,7 @@ describe("student gender handling", () => {
           gender: "female",
           session: "morning",
         },
+        user: { id: 1, role: "Teacher" },
       },
       mockRes(),
       vi.fn(),
@@ -131,6 +130,9 @@ describe("student gender handling", () => {
   });
 
   it("updates a student's gender when provided", async () => {
+    // teacherId: 1 matches the Teacher actor below, so the ownership check
+    // (assertCanAccessStudent) allows the update.
+    prisma.student.findUnique.mockResolvedValue({ teacherId: 1 });
     prisma.student.update.mockResolvedValue({
       id: 7,
       firstName: "Kai",
@@ -144,6 +146,7 @@ describe("student gender handling", () => {
       {
         params: { id: "7" },
         body: { gender: "male" },
+        user: { id: 1, role: "Teacher" },
       },
       mockRes(),
       vi.fn(),
@@ -272,7 +275,9 @@ describe("createStudent parent/guardian linking", () => {
 });
 
 describe("updateStudent parent/guardian linking", () => {
-  const before = { motherEmail: "maria@example.com", fatherEmail: null, guardianEmail: null };
+  // teacherId: 1 matches `staff.id` so assertCanAccessStudent's ownership
+  // check (Teacher only manages their own connected students) allows these.
+  const before = { motherEmail: "maria@example.com", fatherEmail: null, guardianEmail: null, teacherId: 1 };
 
   it("links only emails that changed", async () => {
     stubStudentWrites();
@@ -357,7 +362,15 @@ describe("updateStudent parent/guardian linking", () => {
     prisma.student.update.mockRejectedValue(Object.assign(new Error("missing"), { code: "P2025" }));
 
     const res = mockRes();
-    await updateStudent({ params: { id: "999" }, body: { address: "x" }, user: staff }, res, vi.fn());
+    // Admin, not a Teacher: an Admin's ownership check is a no-op (full
+    // access), so this reaches prisma.student.update and hits the P2025
+    // path being tested. A Teacher would instead get 403 here — see
+    // "ownership" describe block below — without ever calling update.
+    await updateStudent(
+      { params: { id: "999" }, body: { address: "x" }, user: { id: 1, role: "Admin" } },
+      res,
+      vi.fn(),
+    );
 
     expect(res.status).toHaveBeenCalledWith(404);
   });

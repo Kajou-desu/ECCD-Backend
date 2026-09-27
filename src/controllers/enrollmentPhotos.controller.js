@@ -2,8 +2,10 @@ import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { parseId } from "../utils/validate.js";
 import { isRecognitionConfigured, enrollStudentPhotos } from "../services/recognitionClient.js";
+import { assertCanAccessStudent } from "../utils/ownership.js";
 
-// Teacher/admin only (enforced at route level).
+// Teacher/admin only (enforced at route level); a Teacher is further
+// restricted to their own connected students.
 export const MAX_ENROLLMENT_PHOTOS = 8;
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -37,6 +39,7 @@ export async function uploadEnrollmentPhotos(req, res, next) {
     }
 
     const id = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, id);
     const files = req.files ?? [];
     if (files.length === 0) {
       return res.status(400).json({ message: "At least one photo is required" });

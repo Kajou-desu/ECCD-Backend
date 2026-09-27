@@ -36,7 +36,7 @@ describe("deleteStudentDocument", () => {
     prisma.studentDocument.findFirst.mockResolvedValue({ fileUrl: "http://h/api/files/a.pdf" });
     prisma.studentDocument.deleteMany.mockResolvedValue({ count: 1 });
 
-    const req = { params: { id: "10", documentId: "42" } };
+    const req = { params: { id: "10", documentId: "42" }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
     const next = vi.fn();
 
@@ -55,7 +55,11 @@ describe("deleteStudentDocument", () => {
     prisma.studentDocument.findFirst.mockResolvedValue({ fileUrl: "http://h/api/files/a.pdf" });
     prisma.studentDocument.deleteMany.mockResolvedValue({ count: 1 });
 
-    await deleteStudentDocument({ params: { id: "10", documentId: "42" } }, mockRes(), vi.fn());
+    await deleteStudentDocument(
+      { params: { id: "10", documentId: "42" }, user: { id: 1, role: "Admin" } },
+      mockRes(),
+      vi.fn(),
+    );
 
     expect(removeStoredFiles).toHaveBeenCalledWith("http://h/api/files/a.pdf");
   });
@@ -63,7 +67,7 @@ describe("deleteStudentDocument", () => {
   it("404s when the document doesn't belong to that student", async () => {
     prisma.studentDocument.findFirst.mockResolvedValue(null);
 
-    const req = { params: { id: "10", documentId: "999" } };
+    const req = { params: { id: "10", documentId: "999" }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
     const next = vi.fn();
 

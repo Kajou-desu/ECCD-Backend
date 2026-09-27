@@ -2,8 +2,10 @@ import { prisma } from "../lib/prisma.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { parseId } from "../utils/validate.js";
 import { normalizeMac } from "../utils/macAddress.js";
+import { assertCanAccessStudent } from "../utils/ownership.js";
 
-// Teacher/admin only (enforced at route level).
+// Teacher/admin only (enforced at route level); a Teacher is further
+// restricted to their own connected students (assertCanAccessStudent).
 
 export const MAX_DEVICES_PER_STUDENT = 5;
 
@@ -25,6 +27,7 @@ async function assertStudentExists(studentId) {
 export async function listBleDevices(req, res, next) {
   try {
     const studentId = parseId(req.params.id, "student id");
+    await assertCanAccessStudent(req.user, studentId);
     await assertStudentExists(studentId);
     const devices = await prisma.studentBleDevice.findMany({
       where: { studentId },
@@ -43,6 +46,7 @@ export async function addBleDevice(req, res, next) {
     if (!deviceIdentifier) {
       throw new AppError("Invalid device identifier, expected a MAC like D7:40:47:15:14:90", 400);
     }
+    await assertCanAccessStudent(req.user, studentId);
     await assertStudentExists(studentId);
 
     const existing = await prisma.studentBleDevice.count({ where: { studentId } });
@@ -72,6 +76,7 @@ export async function setBleDeviceEnabled(req, res, next) {
     if (typeof req.body?.enabled !== "boolean") {
       throw new AppError("`enabled` must be true or false", 400);
     }
+    await assertCanAccessStudent(req.user, studentId);
 
     const { count } = await prisma.studentBleDevice.updateMany({
       where: { id: deviceId, studentId },
@@ -90,6 +95,7 @@ export async function removeBleDevice(req, res, next) {
   try {
     const studentId = parseId(req.params.id, "student id");
     const deviceId = parseId(req.params.deviceId, "device id");
+    await assertCanAccessStudent(req.user, studentId);
     const { count } = await prisma.studentBleDevice.deleteMany({ where: { id: deviceId, studentId } });
     if (count === 0) throw new AppError("Device not found", 404);
     res.status(204).end();

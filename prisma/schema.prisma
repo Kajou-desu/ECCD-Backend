@@ -31,6 +31,11 @@ model User {
   lastName     String?
   phone        String?
   address      String?
+  // Free-text center/branch name for a Teacher account (e.g. which ECCD
+  // center they're based at). Not meaningful for other roles, but kept as
+  // a plain nullable column rather than a separate table since there's no
+  // fixed list of centers to enforce.
+  centerLocation String?
   role         Role      @default(Parent)
   isActive     Boolean   @default(true)
   tokenVersion Int       @default(0)
@@ -42,6 +47,8 @@ model User {
   accountActionOtps AccountActionOtp[]
   attendanceSessions AttendanceSession[]
   weeklyGoalsCreated WeeklyGoal[]
+  // Students this Teacher is connected to (one teacher per student).
+  assignedStudents Student[] @relation("StudentTeacher")
 
   @@map("users")
 }
@@ -128,6 +135,13 @@ model Student {
   dietary      String?
   specialNotes String?
 
+  // One teacher per student. Auto-set to the creating Teacher when a
+  // Teacher adds a student; chosen explicitly by an Admin otherwise.
+  // SetNull (not Cascade/Restrict): deleting the teacher account must
+  // neither delete the student nor be blocked by it.
+  teacherId Int?
+  teacher   User? @relation("StudentTeacher", fields: [teacherId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -142,6 +156,7 @@ model Student {
   @@index([status])
   @@index([session])
   @@index([name])
+  @@index([teacherId])
   @@map("students")
 }
 

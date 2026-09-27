@@ -67,6 +67,7 @@ const PUBLIC_SELECT = {
   email: true,
   phone: true,
   address: true,
+  centerLocation: true,
   role: true,
   isActive: true,
   createdAt: true,
@@ -164,6 +165,9 @@ export async function registerUser(req, res, next) {
           role,
           phone: optionalPhone(req.body.phone, "phone"),
           address: optionalString(req.body.address, 500),
+          // Which ECCD center this account is based at; only meaningful
+          // for a Teacher, but stored as a plain optional field for any role.
+          centerLocation: optionalString(req.body.centerLocation, 200),
         },
         select: PUBLIC_SELECT,
       });
@@ -227,6 +231,7 @@ export async function updateUser(req, res, next) {
     if (req.body.email !== undefined) data.email = requireEmail(req.body.email);
     if (req.body.phone !== undefined) data.phone = optionalPhone(req.body.phone, "phone");
     if (req.body.address !== undefined) data.address = optionalString(req.body.address, 500);
+    if (req.body.centerLocation !== undefined) data.centerLocation = optionalString(req.body.centerLocation, 200);
     if (req.body.role !== undefined) data.role = requestedRole;
 
     if (data.firstName !== undefined || data.middleName !== undefined || data.lastName !== undefined) {

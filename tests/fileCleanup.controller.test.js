@@ -112,7 +112,13 @@ describe("files are removed together with their database rows", () => {
     prisma.submission.findMany.mockResolvedValue([{ fileUrl: "s1.png" }]);
     prisma.student.delete.mockResolvedValue({ id: 4, photo: "face.jpg" });
 
-    await deleteStudent(req({ params: { id: "4" } }), mockRes(), vi.fn());
+    // Admin: bypasses the ownership check (assertCanAccessStudent) so this
+    // test doesn't also need to mock a student.findUnique lookup.
+    await deleteStudent(
+      req({ params: { id: "4" }, user: { id: 1, role: "Admin" } }),
+      mockRes(),
+      vi.fn(),
+    );
 
     expect(removeStoredFiles).toHaveBeenCalledWith("face.jpg", ["d1.pdf"], ["s1.png"]);
   });

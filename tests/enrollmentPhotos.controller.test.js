@@ -24,7 +24,14 @@ function mockRes() {
 const run = async (over = {}) => {
   const res = mockRes();
   const next = vi.fn();
-  await uploadEnrollmentPhotos({ params: { id: "5" }, files: [jpegFile()], ...over }, res, next);
+  // Admin by default: bypasses the ownership check (assertCanAccessStudent)
+  // so these tests don't also need to mock a Teacher/student connection —
+  // they're testing upload gating/validation, not ownership.
+  await uploadEnrollmentPhotos(
+    { params: { id: "5" }, files: [jpegFile()], user: { id: 1, role: "Admin" }, ...over },
+    res,
+    next,
+  );
   return { res, next, body: res.json.mock.calls[0]?.[0] };
 };
 

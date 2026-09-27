@@ -160,7 +160,10 @@ describe("student BLE registry routes — access control", () => {
       expect((await request(app)[method](url).set("Authorization", parent)).status).toBe(403);
     }
 
-    prisma.student.findUnique.mockResolvedValue({ id: 5 });
+    // teacherId: 9 matches the Teacher JWT's user id (teacherAuth), so the
+    // ownership check (a Teacher may only manage their own connected
+    // students) allows this request.
+    prisma.student.findUnique.mockResolvedValue({ id: 5, teacherId: 9 });
     const ok = await request(app).get("/api/students/5/ble-devices").set("Authorization", teacherAuth("Teacher"));
     expect(ok.status).toBe(200);
   });

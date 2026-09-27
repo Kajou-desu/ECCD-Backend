@@ -34,7 +34,11 @@ describe("getChildProgress", () => {
       { id: 2, title: "Fine motor skills", progress: [] },
     ]);
 
-    const req = { params: { childId: "5" }, user: { id: 1, role: "Teacher" } };
+    // Admin here, not Teacher: an Admin's ownership check is a no-op, so
+    // the single student.findUnique mock above only needs to satisfy this
+    // controller's own {session} lookup, not also a Teacher ownership check
+    // sharing the same mocked call.
+    const req = { params: { childId: "5" }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
     const next = vi.fn();
 
@@ -53,7 +57,7 @@ describe("getChildProgress", () => {
   it("returns 404 when the child doesn't exist", async () => {
     prisma.student.findUnique.mockResolvedValue(null);
 
-    const req = { params: { childId: "999" }, user: { id: 1, role: "Teacher" } };
+    const req = { params: { childId: "999" }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
     const next = vi.fn();
 

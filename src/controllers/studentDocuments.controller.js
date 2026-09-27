@@ -3,12 +3,15 @@ import { fileUrl } from "../middleware/upload.js";
 import { parseId } from "../utils/validate.js";
 import { toDocumentResponse } from "../utils/studentDocumentResponse.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
+import { assertCanAccessStudent } from "../utils/ownership.js";
 
 // POST /api/students/:id/documents (multipart, field "documents", up to 10 files)
-// Teacher/admin only (enforced at route level).
+// Teacher/admin only (enforced at route level); a Teacher is further
+// restricted to their own connected students.
 export async function uploadStudentDocuments(req, res, next) {
   try {
     const studentId = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, studentId);
 
     const files = req.files || [];
     if (files.length === 0) {
@@ -44,6 +47,7 @@ export async function deleteStudentDocument(req, res, next) {
   try {
     const studentId = parseId(req.params.id, "id");
     const documentId = parseId(req.params.documentId, "documentId");
+    await assertCanAccessStudent(req.user, studentId);
 
     // Student documents hold personal records (IDs, certificates), so the
     // stored file must go with the row — not linger on disk after a "delete".
