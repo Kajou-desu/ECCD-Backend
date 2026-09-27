@@ -293,11 +293,14 @@ model BleGateway {
 model Album {
   id          Int      @id @default(autoincrement())
   title       String
-  category    String   @default("Uncategorized")
+  eventId     Int?
+  materialId  Int?
   description String?
   createdAt   DateTime @default(now())
 
   photos      Photo[]
+  event       Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  activity    Material? @relation(fields: [materialId], references: [id], onDelete: SetNull)
 
   @@map("albums")
 }
@@ -324,6 +327,7 @@ model Material {
   updatedAt   DateTime @updatedAt
 
   submissions Submission[]
+  albums      Album[]
 
   @@map("materials")
 }
@@ -357,6 +361,7 @@ model Event {
   date        DateTime      @db.Date
   category    EventCategory @default(Others)
   createdAt   DateTime      @default(now())
+  albums      Album[]
 
   @@index([date])
   @@index([category])

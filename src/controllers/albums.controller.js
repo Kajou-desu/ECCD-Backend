@@ -3,6 +3,7 @@ import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { parseId, parsePagination, requireNonEmptyString } from "../utils/validate.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
+import { AppError } from "../middleware/errorHandler.js";
 
 // Frontend reads photo.url (not fileUrl) everywhere it renders a photo
 // (PhotoThumbnail, PhotoPreviewModal, AlbumCard cover image), so every
@@ -15,7 +16,12 @@ function toAlbumResponse(req, album) {
   return {
     id: album.id,
     title: album.title,
-    category: album.category,
+    association: album.event
+      ? { type: "event", id: album.event.id, title: album.event.title }
+      : album.activity
+        ? { type: "activity", id: album.activity.id, title: album.activity.title }
+        : null,
+    associationName: album.event?.title ?? album.activity?.title ?? null,
     description: album.description,
     createdAt: album.createdAt,
     photos: (album.photos || []).map((photo) => toPhotoResponse(req, photo)),
@@ -39,7 +45,11 @@ export async function getAlbums(req, res, next) {
 
     const [albums, total] = await Promise.all([
       prisma.album.findMany({
-        include: { photos: true },
+        include: {
+          photos: true,
+          event: { select: { id: true, title: true } },
+          activity: { select: { id: true, title: true } },
+        },
         orderBy: { createdAt: "desc" },
         ...(pagination && { skip: pagination.skip, take: pagination.take }),
       }),
@@ -57,9 +67,28 @@ export async function getAlbums(req, res, next) {
 export async function createAlbum(req, res, next) {
   try {
     const title = requireNonEmptyString(req.body.title, "title", 200);
+    const { associationType } = req.body;
+    const associationId = parseId(req.body.associationId, "associationId");
+    if (associationType !== "event" && associationType !== "activity") {
+      throw new AppError("Choose an event or activity for this album.");
+    }
+
+    const target = associationType === "event"
+      ? await prisma.event.findUnique({ where: { id: associationId }, select: { id: true } })
+      : await prisma.material.findUnique({ where: { id: associationId }, select: { id: true } });
+    if (!target) throw new AppError(`Selected ${associationType} was not found.`, 404);
+
     const album = await prisma.album.create({
-      data: { title },
-      include: { photos: true },
+      data: {
+        title,
+        eventId: associationType === "event" ? associationId : null,
+        materialId: associationType === "activity" ? associationId : null,
+      },
+      include: {
+        photos: true,
+        event: { select: { id: true, title: true } },
+        activity: { select: { id: true, title: true } },
+      },
     });
     res.status(201).json(toAlbumResponse(req, album));
   } catch (err) {
@@ -72,11 +101,14 @@ export async function updateAlbum(req, res, next) {
   try {
     const id = parseId(req.params.albumId, "albumId");
     const title = requireNonEmptyString(req.body.title, "title", 200);
-    const category = requireNonEmptyString(req.body.category || "Uncategorized", "category", 100);
     const album = await prisma.album.update({
       where: { id },
-      data: { title, category },
-      include: { photos: true },
+      data: { title },
+      include: {
+        photos: true,
+        event: { select: { id: true, title: true } },
+        activity: { select: { id: true, title: true } },
+      },
     });
     res.json(toAlbumResponse(req, album));
   } catch (err) {

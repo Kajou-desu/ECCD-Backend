@@ -76,6 +76,20 @@ describe("getEvents", () => {
     );
   });
 
+  it("returns event options across all dates for album associations", async () => {
+    prisma.event.findMany.mockResolvedValue([
+      { id: 4, title: "Family Day", date: new Date(Date.UTC(2026, 8, 12)) },
+    ]);
+
+    const res = mockRes();
+    await getEvents({ query: { all: "true" } }, res, vi.fn());
+
+    expect(prisma.event.findMany).toHaveBeenCalledWith({ orderBy: { date: "desc" } });
+    expect(res.json).toHaveBeenCalledWith([
+      { id: 4, title: "Family Day", dateKey: "2026-09-12" },
+    ]);
+  });
+
   it("rejects a malformed month", async () => {
     const req = { query: { month: "not-a-month" } };
     const res = mockRes();

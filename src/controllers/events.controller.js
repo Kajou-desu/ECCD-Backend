@@ -26,6 +26,15 @@ function requireEventCategory(value) {
 //     normalizeEventLegend(), so any reasonably descriptive string works)
 export async function getEvents(req, res, next) {
   try {
+    if (req.query.all === "true") {
+      const events = await prisma.event.findMany({ orderBy: { date: "desc" } });
+      return res.json(events.map((event) => ({
+        id: event.id,
+        title: event.title,
+        dateKey: event.date.toISOString().slice(0, 10),
+      })));
+    }
+
     const month = requireMonthString(req.query.month);
     const [year, mon] = month.split("-").map(Number);
     const start = new Date(Date.UTC(year, mon - 1, 1));
