@@ -69,6 +69,15 @@ describe.each(["local", "s3"])("GET /api/files/:filename (%s storage)", (kind) =
     expect(health.headers["cross-origin-resource-policy"]).toBe("same-origin");
   });
 
+  it("lets only the configured frontend origin frame the file (PDF preview), other routes stay locked", async () => {
+    const file = await request(app).get(urlFor(KEY));
+    expect(file.headers["x-frame-options"]).toBeUndefined();
+    expect(file.headers["content-security-policy"]).toBe("frame-ancestors http://localhost:5173");
+
+    const health = await request(app).get("/health");
+    expect(health.headers["x-frame-options"]).toBe("SAMEORIGIN");
+  });
+
   it("marks served files private so shared caches/CDNs don't store them", async () => {
     const res = await request(app).get(urlFor(KEY));
     expect(res.headers["cache-control"]).toMatch(/\bprivate\b/);
