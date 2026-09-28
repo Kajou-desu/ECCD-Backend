@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
-    album: { findMany: vi.fn(), create: vi.fn(), count: vi.fn() },
+    album: { findMany: vi.fn(), create: vi.fn(), update: vi.fn(), count: vi.fn() },
     event: { findUnique: vi.fn() },
     material: { findUnique: vi.fn() },
   },
@@ -12,7 +12,7 @@ vi.mock("../src/lib/signedFileUrl.js", () => ({ signFileUrl: (_req, value) => va
 vi.mock("../src/lib/fileStorage.js", () => ({ removeStoredFiles: vi.fn() }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { createAlbum, getAlbums } = await import("../src/controllers/albums.controller.js");
+const { createAlbum, getAlbums, updateAlbum } = await import("../src/controllers/albums.controller.js");
 
 function mockRes() {
   const res = {};
@@ -69,5 +69,31 @@ describe("album associations", () => {
         associationName: "Counting to Ten",
       }),
     ]);
+  });
+
+  it("updates an album's association to an activity", async () => {
+    prisma.material.findUnique.mockResolvedValue({ id: 11 });
+    prisma.album.update.mockResolvedValue({
+      id: 4,
+      title: "Counting Activity Photos",
+      event: null,
+      activity: { id: 11, title: "Counting to Ten" },
+      photos: [],
+    });
+    const res = mockRes();
+
+    await updateAlbum(
+      { params: { albumId: "4" }, body: { title: "Counting Activity Photos", associationType: "activity", associationId: "11" } },
+      res,
+      vi.fn(),
+    );
+
+    expect(prisma.album.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 4 },
+      data: { title: "Counting Activity Photos", eventId: null, materialId: 11 },
+    }));
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      association: { type: "activity", id: 11, title: "Counting to Ten" },
+    }));
   });
 });

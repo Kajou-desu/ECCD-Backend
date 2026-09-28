@@ -41,7 +41,7 @@
 // ---- Tunables -------------------------------------------------------------
 const int SCAN_SECONDS = 2;
 // Coarse floor only, to skip noise. The backend applies the real threshold.
-const int MIN_REPORT_RSSI = -90;
+const int MIN_REPORT_RSSI = -15;
 const int MAX_TAGS = 50;                            // matches the server's per-request limit
 const unsigned long REGISTRY_REFRESH_MS = 5UL * 60UL * 1000UL;
 const unsigned long REGISTRY_RETRY_MS = 30UL * 1000UL;
@@ -214,11 +214,27 @@ bool connectWifi() {
 // negative HTTPClient error. `body` is null for GET. The response goes into `out`.
 int callBackend(const char* method, const char* path, const String* body, String& out) {
   HTTPClient http;
-  http.setReuse(true);  // keep the TLS connection open between posts (handshakes are slow)
+  http.setReuse(false);
   http.setTimeout(HTTP_TIMEOUT_MS);
+
   String url = String(API_BASE_URL) + path;
-  if (!http.begin(secureClient, url)) return -1;
+
+  Serial.println("----- HTTP REQUEST -----");
+  Serial.print("URL: ");
+  Serial.println(url);
+  Serial.print("Wi-Fi IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("RSSI: ");
+  Serial.println(WiFi.RSSI());
+
+  if (!http.begin(secureClient, url)) {
+    Serial.println("http.begin() FAILED");
+    Serial.println("Possible TLS/certificate/URL problem.");
+    return -1;
+  }
+
   http.addHeader("X-Device-Key", DEVICE_KEY);
+
   int status;
   if (body != nullptr) {
     http.addHeader("Content-Type", "application/json");
@@ -226,7 +242,19 @@ int callBackend(const char* method, const char* path, const String* body, String
   } else {
     status = http.GET();
   }
-  if (status > 0) out = http.getString();
+
+  Serial.print("HTTP status: ");
+  Serial.println(status);
+
+  if (status > 0) {
+    out = http.getString();
+    Serial.print("Response: ");
+    Serial.println(out);
+  } else {
+    Serial.print("HTTP error: ");
+    Serial.println(http.errorToString(status));
+  }
+
   http.end();
   return status;
 }

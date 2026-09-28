@@ -101,9 +101,27 @@ export async function updateAlbum(req, res, next) {
   try {
     const id = parseId(req.params.albumId, "albumId");
     const title = requireNonEmptyString(req.body.title, "title", 200);
+    const data = { title };
+
+    if (req.body.associationType !== undefined || req.body.associationId !== undefined) {
+      const { associationType } = req.body;
+      const associationId = parseId(req.body.associationId, "associationId");
+      if (associationType !== "event" && associationType !== "activity") {
+        throw new AppError("Choose an event or activity for this album.");
+      }
+
+      const target = associationType === "event"
+        ? await prisma.event.findUnique({ where: { id: associationId }, select: { id: true } })
+        : await prisma.material.findUnique({ where: { id: associationId }, select: { id: true } });
+      if (!target) throw new AppError(`Selected ${associationType} was not found.`, 404);
+
+      data.eventId = associationType === "event" ? associationId : null;
+      data.materialId = associationType === "activity" ? associationId : null;
+    }
+
     const album = await prisma.album.update({
       where: { id },
-      data: { title },
+      data,
       include: {
         photos: true,
         event: { select: { id: true, title: true } },
