@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { parseId } from "../utils/validate.js";
-import { isRecognitionConfigured, enrollStudentPhotos } from "../services/recognitionClient.js";
+import { isRecognitionConfigured, enrollStudentPhotos, RecognitionRejectedError } from "../services/recognitionClient.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 
 // Teacher/admin only (enforced at route level); a Teacher is further
@@ -57,6 +57,10 @@ export async function uploadEnrollmentPhotos(req, res, next) {
     try {
       result = await enrollStudentPhotos(id, files);
     } catch (err) {
+      if (err instanceof RecognitionRejectedError) {
+        // Nothing was replaced: the student's previous enrollment (if any) is intact.
+        return res.status(422).json({ message: "No photo contained exactly one clear face" });
+      }
       logger.error({ err }, "Enrollment photo upload failed");
       return res.status(502).json({ message: "Face recognition service unavailable" });
     }

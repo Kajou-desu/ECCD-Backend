@@ -173,18 +173,24 @@ class TestEnroll:
         assert r.json() == {"studentId": 5, "photosReceived": 1, "enrolled": True}
         assert (tmp_path / "5" / "0.jpg").exists()
 
-    def test_enrolled_false_when_no_photo_has_a_usable_face(self, client, tmp_path, monkeypatch):
+    def test_no_usable_face_is_rejected_and_keeps_the_existing_enrollment(self, client, tmp_path, monkeypatch):
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
         monkeypatch.setattr(recognizer.face_recognition, "face_encodings", lambda img: [])  # nobody detected
+        (tmp_path / "5").mkdir()
+        (tmp_path / "5" / "good.jpg").write_bytes(b"previous-good-photo")
+
         r = self.enroll(client, 5, [self.photo()])
-        assert r.status_code == 200
-        assert r.json() == {"studentId": 5, "photosReceived": 1, "enrolled": False}
-        assert (tmp_path / "5" / "0.jpg").exists()  # the photo is still stored; just not usable yet
+        assert r.status_code == 422
+        # A bad upload must never wipe out a working enrollment.
+        assert [p.name for p in (tmp_path / "5").iterdir()] == ["good.jpg"]
+        assert not (tmp_path / "5.tmp").exists()
 
     def test_accepts_png_alongside_jpeg(self, client, tmp_path, monkeypatch):
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
         monkeypatch.setattr(recognizer.face_recognition, "face_encodings", lambda img: [np.zeros(128)])
-        png = b"\x89PNG\r\n\x1a\n" + b"0" * 20
+        ok, buf = cv2.imencode(".png", np.full((48, 64, 3), 127, dtype=np.uint8))
+        assert ok
+        png = buf.tobytes()
         r = self.enroll(client, 5, [self.photo(), self.photo(name="b.png", content_type="image/png", data=png)])
         assert r.status_code == 200
         assert sorted(p.name for p in (tmp_path / "5").iterdir()) == ["0.jpg", "1.png"]
@@ -250,11 +256,9 @@ class TestEnroll:
 
         monkeypatch.setattr(recognizer.face_recognition, "face_encodings", lambda img: boom(img))
         r = self.enroll(client, 5, [self.photo()])
-        # face_encodings only runs inside load_known_faces's per-photo try/except,
-        # which swallows it and just skips that photo — so this is 200/enrolled: false,
-        # not a 500. This test documents that behaviour rather than a raw crash.
-        assert r.status_code == 200
-        assert r.json()["enrolled"] is False
+        # face_encodings runs inside the per-photo try/except, which swallows the
+        # error and skips that photo — so nothing is usable: 422, not a raw 500.
+        assert r.status_code == 422
         assert "secret" not in r.text and "/srv" not in r.text
 
 
@@ -265,3 +269,50 @@ def test_refuses_to_start_without_a_strong_key(monkeypatch):
         importlib.reload(service)
     monkeypatch.setenv("RECOGNITION_SERVICE_KEY", KEY)
     importlib.reload(service)
+
+
+class TestEnrollHardening:
+    enroll = TestEnroll.enroll
+    photo = TestEnroll.photo
+
+    def test_oversized_dimensions_are_rejected_before_anything_is_written(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        huge = jpeg(width=service.ENROLL_MAX_DIMENSION + 1, height=8)
+        r = self.enroll(client, 5, [self.photo(data=huge)])
+        assert r.status_code == 400
+        assert not (tmp_path / "5").exists() and not (tmp_path / "5.tmp").exists()
+
+    def test_enrolling_one_student_does_not_re_encode_everyone_else(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        monkeypatch.setattr(recognizer.face_recognition, "face_encodings", lambda img: [np.zeros(128)])
+        def no_full_reload(root):
+            raise AssertionError("full reload on enrol")
+        monkeypatch.setattr(recognizer, "load_known_faces", no_full_reload)
+        r = self.enroll(client, 5, [self.photo()])
+        assert r.status_code == 200 and r.json()["enrolled"] is True
+        assert 5 in service.app.state.known.ids
+
+    def test_delete_removes_photos_and_the_in_memory_encoding(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        monkeypatch.setattr(recognizer.face_recognition, "face_encodings", lambda img: [np.zeros(128)])
+        self.enroll(client, 5, [self.photo()])
+        assert 5 in service.app.state.known.ids
+
+        r = client.delete("/enroll/5", headers=AUTH)
+        assert r.status_code == 200 and r.json() == {"studentId": 5, "removed": True}
+        assert not (tmp_path / "5").exists()
+        assert 5 not in service.app.state.known.ids
+
+    def test_delete_is_idempotent(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        r = client.delete("/enroll/9", headers=AUTH)
+        assert r.status_code == 200 and r.json() == {"studentId": 9, "removed": False}
+
+    def test_delete_requires_the_key(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        assert client.delete("/enroll/5").status_code == 401
+
+    @pytest.mark.parametrize("bad_id", ["abc", "-5", "1.5", "0000000001x"])
+    def test_delete_rejects_a_non_numeric_student_id(self, client, tmp_path, monkeypatch, bad_id):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        assert client.delete(f"/enroll/{bad_id}", headers=AUTH).status_code in (400, 404)

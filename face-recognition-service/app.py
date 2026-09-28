@@ -15,7 +15,9 @@ Security posture:
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
+import io
 import logging
 import os
 import shutil
@@ -25,6 +27,7 @@ import numpy as np
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from PIL import Image
 
 import recognizer
 
@@ -44,9 +47,16 @@ MAX_IMAGE_DIMENSION = 1920
 # photos, not a downscaled frame), so it gets its own, larger body budget.
 ENROLL_MAX_IMAGES = 8
 ENROLL_MAX_BODY_BYTES = ENROLL_MAX_IMAGES * recognizer.MAX_ENROLL_IMAGE_BYTES + 8192
+# A small file can still decode to a huge bitmap (decompression bomb) and dlib's
+# cost grows with pixels, so bound the decoded size too. Read from the header
+# only — nothing is decoded until it passes. The web app downsizes to 2000px.
+ENROLL_MAX_DIMENSION = 4096
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.state.known = recognizer.load_known_faces(KNOWN_FACES_DIR)
+# Serialises enrol/delete so two requests for one student can't share the
+# .tmp/.old folders or interleave the folder swap with the in-memory update.
+app.state.enroll_lock = asyncio.Lock()
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -96,15 +106,24 @@ def _sniff_image_ext(data: bytes) -> str | None:
     return None
 
 
+def _within_dimension_limit(data: bytes) -> bool:
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            width, height = img.size
+    except Exception:
+        return False
+    return 0 < width <= ENROLL_MAX_DIMENSION and 0 < height <= ENROLL_MAX_DIMENSION
+
+
 @app.post("/enroll/{student_id}")
 async def enroll(student_id: str, photos: list[UploadFile] = File(...)):
-    """Replaces this student's whole enrollment photo set, then reloads.
+    """Replaces this student's whole enrollment photo set.
 
-    Writes to a temp folder first and swaps it in with one atomic rename, so a
-    failure partway through never leaves a student with zero or half-written
-    photos. Every photo is size- and signature-checked before anything is
-    written; `load_known_faces` (called at the end) separately enforces
-    "exactly one face per photo", skipping ones that don't qualify.
+    Photos are size-, signature- and dimension-checked, written to a temp
+    folder, and face-checked THERE. Only if at least one photo holds exactly one
+    face is the temp folder swapped in (one atomic rename), so neither an I/O
+    failure nor a set of unusable photos can leave a student with zero or
+    half-written photos — the previous enrollment stays until a good one replaces it.
     """
     if not recognizer.STUDENT_DIR_RE.match(student_id):
         return _error(400, "Invalid student id")
@@ -122,6 +141,9 @@ async def enroll(student_id: str, photos: list[UploadFile] = File(...)):
             ext = _sniff_image_ext(data)
             if ext is None:
                 return _error(400, "Each photo must be a JPEG or PNG image")
+            if not _within_dimension_limit(data):
+                return _error(400, "Each photo must be a readable image of at most "
+                                   f"{ENROLL_MAX_DIMENSION}px on each side")
             saved.append((ext, data))
     except Exception:
         log.exception("Reading enrollment upload failed")
@@ -130,39 +152,66 @@ async def enroll(student_id: str, photos: list[UploadFile] = File(...)):
     student_dir = os.path.join(KNOWN_FACES_DIR, student_id)
     tmp_dir = f"{student_dir}.tmp"
     old_dir = f"{student_dir}.old"
-    try:
-        os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        os.makedirs(tmp_dir, mode=0o700)
-        for index, (ext, data) in enumerate(saved):
-            with open(os.path.join(tmp_dir, f"{index}{ext}"), "wb") as f:
-                f.write(data)
-
-        # The swap-in is the only step that must not leave a student with no
-        # folder at all: move the existing one aside (cheap rename, same
-        # filesystem) rather than deleting it, so a failure on the next line
-        # can be rolled back instead of losing the previous photos.
-        shutil.rmtree(old_dir, ignore_errors=True)
-        if os.path.isdir(student_dir):
-            os.replace(student_dir, old_dir)
+    async with app.state.enroll_lock:
         try:
-            os.replace(tmp_dir, student_dir)
-        except Exception:
-            if os.path.isdir(old_dir) and not os.path.isdir(student_dir):
-                os.replace(old_dir, student_dir)  # restore what was there before
-            raise
-        shutil.rmtree(old_dir, ignore_errors=True)  # swap succeeded: drop the old copy
-    except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        log.exception("Failed to store enrollment photos for student %s", student_id)
-        return _error(500, "Enrollment failed")
+            os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            os.makedirs(tmp_dir, mode=0o700)
+            for index, (ext, data) in enumerate(saved):
+                with open(os.path.join(tmp_dir, f"{index}{ext}"), "wb") as f:
+                    f.write(data)
 
-    app.state.known = recognizer.load_known_faces(KNOWN_FACES_DIR)
-    return {
-        "studentId": int(student_id),
-        "photosReceived": len(saved),
-        "enrolled": int(student_id) in app.state.known.ids,
-    }
+            # Face detection is CPU-bound; keep it off the event loop, and do it
+            # BEFORE the swap so a bad batch can't replace a working enrollment.
+            encoding, _usable = await run_in_threadpool(recognizer.encode_student_dir, tmp_dir, student_id)
+            if encoding is None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return _error(422, "No photo contained exactly one clear face")
+
+            # Move the existing folder aside (cheap rename, same filesystem)
+            # rather than deleting it, so a failure on the next line can be
+            # rolled back instead of losing the previous photos.
+            shutil.rmtree(old_dir, ignore_errors=True)
+            if os.path.isdir(student_dir):
+                os.replace(student_dir, old_dir)
+            try:
+                os.replace(tmp_dir, student_dir)
+            except Exception:
+                if os.path.isdir(old_dir) and not os.path.isdir(student_dir):
+                    os.replace(old_dir, student_dir)  # restore what was there before
+                raise
+            shutil.rmtree(old_dir, ignore_errors=True)  # swap succeeded: drop the old copy
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            log.exception("Failed to store enrollment photos for student %s", student_id)
+            return _error(500, "Enrollment failed")
+
+        # Only this student's encoding changed: swap in a new immutable set
+        # instead of re-encoding every enrolled child's photos.
+        app.state.known = app.state.known.with_student(int(student_id), encoding)
+
+    return {"studentId": int(student_id), "photosReceived": len(saved), "enrolled": True}
+
+
+@app.delete("/enroll/{student_id}")
+async def unenroll(student_id: str):
+    """Erases a student's face photos and encoding (biometric data of a child).
+    Idempotent: `removed` says whether anything was there."""
+    if not recognizer.STUDENT_DIR_RE.match(student_id):
+        return _error(400, "Invalid student id")
+
+    student_dir = os.path.join(KNOWN_FACES_DIR, student_id)
+    async with app.state.enroll_lock:
+        try:
+            existed = os.path.isdir(student_dir)
+            for path in (student_dir, f"{student_dir}.tmp", f"{student_dir}.old"):
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+        except Exception:
+            log.exception("Failed to remove enrollment for student %s", student_id)
+            return _error(500, "Removal failed")
+        app.state.known = app.state.known.without_student(int(student_id))
+    return {"studentId": int(student_id), "removed": existed}
 
 
 def _process(data: bytes) -> dict | JSONResponse:

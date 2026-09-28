@@ -48,6 +48,19 @@ class KnownFaces:
     def __len__(self) -> int:
         return len(self.ids)
 
+    # Copy-on-write: /recognize threads keep reading the old object while the
+    # new one is built, so an enrolment never needs to block or re-encode
+    # every other student.
+    def with_student(self, student_id: int, encoding: np.ndarray) -> "KnownFaces":
+        ids = [i for i in self.ids if i != student_id]
+        rows = [self.encodings[self.ids.index(i)] for i in ids]
+        return KnownFaces(ids + [student_id], np.array(rows + [encoding]))
+
+    def without_student(self, student_id: int) -> "KnownFaces":
+        ids = [i for i in self.ids if i != student_id]
+        rows = [self.encodings[self.ids.index(i)] for i in ids]
+        return KnownFaces(ids, np.array(rows) if rows else np.empty((0, ENCODING_SIZE)))
+
     def match(self, encoding: np.ndarray) -> Match:
         if len(self.ids) == 0:
             return Match(None, None, None)
@@ -58,6 +71,35 @@ class KnownFaces:
         # DIFFERENT student — which is what makes the margin meaningful.
         margin = float(distances[order[1]] - best) if len(order) > 1 else None
         return Match(self.ids[int(order[0])], best, margin)
+
+
+def encode_student_dir(path: str, label: str = "") -> tuple[np.ndarray | None, int]:
+    """Averaged encoding of one student's folder, and how many photos were usable.
+
+    A photo is usable only if it holds exactly one face (otherwise we can't know
+    whose encoding it is). Returns (None, 0) when nothing is usable.
+    """
+    vectors = []
+    photos = sorted(os.scandir(path), key=lambda e: e.name)[:MAX_IMAGES_PER_STUDENT]
+    for index, photo in enumerate(photos):
+        ext = os.path.splitext(photo.name)[1].lower()
+        if ext not in IMAGE_EXTENSIONS or not photo.is_file(follow_symlinks=False):
+            continue
+        if photo.stat().st_size > MAX_ENROLL_IMAGE_BYTES:
+            log.warning("Student %s photo #%d skipped: file too large.", label, index)
+            continue
+        try:
+            found = face_recognition.face_encodings(face_recognition.load_image_file(photo.path))
+        except Exception:  # unreadable/corrupt image: skip it, don't abort loading everyone
+            log.warning("Student %s photo #%d skipped: could not be read.", label, index)
+            continue
+        if len(found) != 1:
+            log.warning("Student %s photo #%d skipped: expected 1 face, found %d.", label, index, len(found))
+            continue
+        vectors.append(found[0])
+    if not vectors:
+        return None, 0
+    return np.mean(vectors, axis=0), len(vectors)
 
 
 def load_known_faces(root: str) -> KnownFaces:
@@ -72,29 +114,10 @@ def load_known_faces(root: str) -> KnownFaces:
     for entry in sorted(os.scandir(root), key=lambda e: e.name):
         if not entry.is_dir(follow_symlinks=False) or not STUDENT_DIR_RE.match(entry.name):
             continue
-        vectors = []
-        photos = sorted(os.scandir(entry.path), key=lambda e: e.name)[:MAX_IMAGES_PER_STUDENT]
-        for index, photo in enumerate(photos):
-            ext = os.path.splitext(photo.name)[1].lower()
-            if ext not in IMAGE_EXTENSIONS or not photo.is_file(follow_symlinks=False):
-                continue
-            if photo.stat().st_size > MAX_ENROLL_IMAGE_BYTES:
-                log.warning("Student %s photo #%d skipped: file too large.", entry.name, index)
-                continue
-            try:
-                found = face_recognition.face_encodings(face_recognition.load_image_file(photo.path))
-            except Exception:  # unreadable/corrupt image: skip it, don't abort loading everyone
-                log.warning("Student %s photo #%d skipped: could not be read.", entry.name, index)
-                continue
-            # An enrolment photo must contain exactly one face, or we can't know
-            # whose encoding it is.
-            if len(found) != 1:
-                log.warning("Student %s photo #%d skipped: expected 1 face, found %d.", entry.name, index, len(found))
-                continue
-            vectors.append(found[0])
-        if vectors:
+        encoding, _usable = encode_student_dir(entry.path, entry.name)
+        if encoding is not None:
             ids.append(int(entry.name))
-            encodings.append(np.mean(vectors, axis=0))
+            encodings.append(encoding)
 
     log.info("Loaded %d enrolled student(s).", len(ids))
     return KnownFaces(ids, np.array(encodings) if encodings else np.empty((0, ENCODING_SIZE)))

@@ -39,6 +39,10 @@ export function isRecognitionConfigured() {
 
 export class RecognitionUnavailableError extends Error {}
 
+// The service understood the request and refused it (HTTP 422: no photo held
+// exactly one face). Not an outage, so callers answer 422, not 502.
+export class RecognitionRejectedError extends Error {}
+
 // `frame` is a Buffer holding a JPEG. Resolves to { width, height, faces }.
 // Every failure mode (not configured, network, timeout, non-2xx, bad shape)
 // becomes one RecognitionUnavailableError; the caller logs it and answers with
@@ -103,6 +107,7 @@ export async function enrollStudentPhotos(studentId, files) {
     throw new RecognitionUnavailableError(`Enrollment request failed: ${cause?.name ?? "error"}`);
   }
 
+  if (response.status === 422) throw new RecognitionRejectedError("No usable face in the enrollment photos");
   if (!response.ok) {
     throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
   }
@@ -116,4 +121,25 @@ export async function enrollStudentPhotos(studentId, files) {
   const parsed = enrollResponseSchema.safeParse(body);
   if (!parsed.success) throw new RecognitionUnavailableError("Recognition service returned an unexpected shape");
   return parsed.data;
+}
+
+// Erases a student's face photos and encoding from the recognition service.
+// Idempotent on the service side. Same failure contract as the calls above.
+export async function removeStudentEnrollment(studentId) {
+  if (!env.recognition) throw new RecognitionUnavailableError("Recognition service is not configured");
+
+  let response;
+  try {
+    response = await fetch(`${env.recognition.baseUrl}/enroll/${Number(studentId)}`, {
+      method: "DELETE",
+      headers: { "X-Service-Key": env.recognition.key },
+      redirect: "error",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new RecognitionUnavailableError(`Enrollment removal failed: ${cause?.name ?? "error"}`);
+  }
+  if (!response.ok) {
+    throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
+  }
 }

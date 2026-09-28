@@ -19,7 +19,9 @@ children**. Before adding a child's photos:
   officer confirm what your local privacy law requires (e.g. the Philippines'
   Data Privacy Act treats biometrics as sensitive personal information).
 - Keep `Images/` off git (already in `.gitignore`), off shared drives and out of backups you don't control.
-- Delete a child's folder (and call `/reload`) when they leave.
+- Deleting a student in the app now erases their enrollment automatically
+  (`DELETE /enroll/{id}`). If that call ever fails it is logged as an error —
+  remove the folder by hand (and call `/reload`) so no orphaned biometrics remain.
 - Frames sent for recognition are processed in memory only; this service never writes or logs them.
 
 ## Setup
