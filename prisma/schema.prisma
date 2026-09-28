@@ -343,6 +343,7 @@ model Material {
 
   submissions Submission[]
   albums      Album[]
+  dailyThemes DailyTheme[]
 
   @@map("materials")
 }
@@ -392,6 +393,8 @@ model DailyTheme {
   title       String
   description String?
   objectives  String[]
+  materialId  Int?
+  material    Material? @relation(fields: [materialId], references: [id], onDelete: SetNull)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

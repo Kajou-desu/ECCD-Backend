@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
-import { requireNonEmptyString, optionalString, requireStringArray, requireDateString } from "../utils/validate.js";
+import { signFileUrl } from "../lib/signedFileUrl.js";
+import { requireNonEmptyString, optionalString, requireStringArray, requireDateString, parseId } from "../utils/validate.js";
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 
 export async function getDashboardStats(_req, res, next) {
@@ -22,10 +23,12 @@ export async function getDashboardStats(_req, res, next) {
 
 export async function getDailyTheme(_req, res, next) {
   try {
-    const today = new Date();
-    const todayDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+    const todayDate = schoolDateAsUtcMidnight();
 
-    const theme = await prisma.dailyTheme.findUnique({ where: { date: todayDate } });
+    const theme = await prisma.dailyTheme.findUnique({
+      where: { date: todayDate },
+      include: { material: true },
+    });
 
     if (!theme) {
       // DailyThemeCard.jsx renders theme.title/description/objectives directly
@@ -40,7 +43,12 @@ export async function getDailyTheme(_req, res, next) {
       });
     }
 
-    res.json(theme);
+    res.json({
+      ...theme,
+      material: theme.material
+        ? { ...theme.material, fileUrl: signFileUrl(_req, theme.material.fileUrl) }
+        : null,
+    });
   } catch (err) {
     next(err);
   }
@@ -63,6 +71,7 @@ export async function upsertDailyTheme(req, res, next) {
       title: requireNonEmptyString(req.body.title, "title", 200),
       description: optionalString(req.body.description, 2000),
       objectives: requireStringArray(req.body.objectives ?? [], "objectives"),
+      materialId: req.body.materialId ? parseId(req.body.materialId, "materialId") : null,
     };
 
     const theme = await prisma.dailyTheme.upsert({

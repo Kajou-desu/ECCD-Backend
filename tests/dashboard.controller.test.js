@@ -2,12 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
-    dailyTheme: { upsert: vi.fn() },
+    dailyTheme: { findUnique: vi.fn(), upsert: vi.fn() },
   },
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { upsertDailyTheme } = await import("../src/controllers/dashboard.controller.js");
+const { getDailyTheme, upsertDailyTheme } = await import("../src/controllers/dashboard.controller.js");
 
 function mockRes() {
   const res = {};
@@ -33,6 +33,7 @@ describe("upsertDailyTheme", () => {
         title: "Letter A Day",
         description: "Exploring the letter A",
         objectives: ["Recognize the letter A", "Name 3 fruits"],
+        materialId: 17,
       },
     };
     const res = mockRes();
@@ -47,8 +48,9 @@ describe("upsertDailyTheme", () => {
         letter: "A",
         title: "Letter A Day",
         objectives: ["Recognize the letter A", "Name 3 fruits"],
+        materialId: 17,
       }),
-      update: expect.objectContaining({ letter: "A", title: "Letter A Day" }),
+      update: expect.objectContaining({ letter: "A", title: "Letter A Day", materialId: 17 }),
     });
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
   });
@@ -73,5 +75,40 @@ describe("upsertDailyTheme", () => {
 
     expect(prisma.dailyTheme.upsert).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+  });
+});
+
+describe("getDailyTheme", () => {
+  it("looks up the school-local day before UTC midnight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-19T23:30:00.000Z"));
+    prisma.dailyTheme.findUnique.mockResolvedValue(null);
+
+    const res = mockRes();
+    await getDailyTheme({}, res, vi.fn());
+
+    expect(prisma.dailyTheme.findUnique).toHaveBeenCalledWith({
+      where: { date: new Date("2026-09-20T00:00:00.000Z") },
+      include: { material: true },
+    });
+    vi.useRealTimers();
+  });
+
+  it("returns a signed URL for the linked activity file", async () => {
+    prisma.dailyTheme.findUnique.mockResolvedValue({
+      id: 1,
+      material: { id: 17, title: "Letter A worksheet", fileUrl: "activity.pdf" },
+    });
+
+    const res = mockRes();
+    const req = { protocol: "https", get: () => "classroom.example" };
+    await getDailyTheme(req, res, vi.fn());
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      material: expect.objectContaining({
+        id: 17,
+        fileUrl: expect.stringMatching(/^https:\/\/classroom\.example\/api\/files\/activity\.pdf\?/),
+      }),
+    }));
   });
 });
