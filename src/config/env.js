@@ -111,6 +111,18 @@ function recognitionConfig() {
 
 const recognition = recognitionConfig();
 
+// Optional SMS delivery (Semaphore — semaphore.co) for arrival/departure
+// notifications. Unlike SMTP, this is never required to start the server:
+// without it, attendance emails still go out and only the SMS leg is
+// skipped (logged, not fatal) — see attendanceNotification.service.js.
+function semaphoreConfig() {
+  const apiKey = process.env.SEMAPHORE_API_KEY;
+  if (!apiKey) return { configured: false, apiKey: null, senderName: null };
+  return { configured: true, apiKey, senderName: process.env.SEMAPHORE_SENDER_NAME || null };
+}
+
+const semaphore = semaphoreConfig();
+
 // --- File storage -----------------------------------------------------------
 // "local" keeps files in ./uploads (development, or a single server without a
 // bucket). "s3" uses any S3-compatible bucket — Neon Object Storage or AWS S3;
@@ -174,6 +186,7 @@ export const env = {
   schoolTimezone,
   verification,
   recognition,
+  semaphore,
   storage: {
     driver: storageDriver,
     s3: {

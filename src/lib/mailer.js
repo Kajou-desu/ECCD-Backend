@@ -40,3 +40,17 @@ export async function sendOtpEmail(email, otpCode, purpose = "Password Reset") {
     text: `Your ${purpose.toLowerCase()} code is: ${otpCode}\n\nThis code expires in 10 minutes. If you didn't request this, you can ignore this email.`,
   });
 }
+
+// Generic sender used for arrival/departure notifications (see
+// attendanceNotification.service.js). Same dev fallback as sendOtpEmail: with
+// no SMTP configured, log instead of sending so local dev doesn't need a
+// mail provider. Throws on delivery failure — the caller (notifyParents)
+// catches it so one parent's bounced email never blocks the others.
+export async function sendAttendanceEmail(email, subject, text) {
+  if (!env.smtp.configured) {
+    logger.info(`[DEV] Email to ${email}: ${subject}`);
+    return;
+  }
+
+  await getTransporter().sendMail({ from: env.smtp.from, to: email, subject, text });
+}

@@ -44,10 +44,14 @@ const db = vi.hoisted(() => {
 });
 
 vi.mock("../src/lib/prisma.js", () => ({ prisma: db.prisma }));
+vi.mock("../src/services/attendanceNotification.service.js", () => ({
+  notifyArrival: vi.fn().mockResolvedValue(undefined),
+}));
 
 const { mergeSignal, isSignalPresent, evaluate, recordSignal } = await import(
   "../src/services/attendanceVerification.service.js"
 );
+const { notifyArrival } = await import("../src/services/attendanceNotification.service.js");
 
 const CFG = { faceMaxDistance: 0.5, faceMinMargin: 0.05, bleMinRssi: -70, windowMs: 30_000, minHits: 2 };
 const T0 = new Date("2026-09-20T23:30:00.000Z");
@@ -118,6 +122,7 @@ describe("recordSignal (full flow against the in-memory tables)", () => {
     db.state.signals.length = 0;
     db.state.attendance.length = 0;
     db.state.verifications.length = 0;
+    notifyArrival.mockClear();
   });
 
   it("BLE alone never marks anyone present, however long it's seen", async () => {
@@ -211,5 +216,49 @@ describe("recordSignal (full flow against the in-memory tables)", () => {
     expect((await send(5, "ble", -50, 5)).state).toBe("already_recorded");
     expect(db.state.attendance).toHaveLength(1);
     expect(db.state.verifications).toHaveLength(1);
+  });
+});
+
+// Flushes the microtask/macrotask queue so a fire-and-forget call scheduled
+// with Promise.resolve().then(...) has had a chance to run before we assert.
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe("arrival notification", () => {
+  const SESSION = 1;
+  const DATE = new Date("2026-09-20T00:00:00.000Z");
+  const send = (studentId, kind, value, t) =>
+    recordSignal({ sessionId: SESSION, sessionDate: DATE, studentId, kind, value, now: at(t) });
+
+  beforeEach(() => {
+    db.state.signals.length = 0;
+    db.state.attendance.length = 0;
+    db.state.verifications.length = 0;
+    notifyArrival.mockClear();
+  });
+
+  it("notifies exactly once, on the write that actually verified the student", async () => {
+    await send(5, "ble", -50, 0); await send(5, "ble", -50, 1);
+    await send(5, "face", 0.3, 2);
+    expect((await send(5, "face", 0.3, 3)).state).toBe("verified");
+    await flush();
+    expect(notifyArrival).toHaveBeenCalledTimes(1);
+    expect(notifyArrival).toHaveBeenCalledWith(5, at(3));
+  });
+
+  it("does not notify again when the student stays in view (already_recorded)", async () => {
+    await send(5, "ble", -50, 0); await send(5, "ble", -50, 1);
+    await send(5, "face", 0.3, 2);
+    await send(5, "face", 0.3, 3); // verified
+    notifyArrival.mockClear();
+
+    expect((await send(5, "ble", -50, 5)).state).toBe("already_recorded");
+    await flush();
+    expect(notifyArrival).not.toHaveBeenCalled();
+  });
+
+  it("does not notify while still pending", async () => {
+    await send(5, "ble", -50, 0);
+    await flush();
+    expect(notifyArrival).not.toHaveBeenCalled();
   });
 });

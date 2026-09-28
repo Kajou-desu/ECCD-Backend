@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { env } from "../config/env.js";
+import { notifyArrival } from "./attendanceNotification.service.js";
 
 // Face + BLE => verified attendance.
 //
@@ -48,7 +49,7 @@ const keyOf = (sessionId, studentId, kind) => ({ sessionId_studentId_kind: { ses
 // teacher marked it, an earlier verification, an excused absence) is never
 // overwritten; the unique (studentId, date) key makes this race-safe.
 async function markVerified({ sessionId, sessionDate, studentId, face, ble, now }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const { count } = await tx.attendance.createMany({
       data: [{ studentId, date: sessionDate, status: "present", arrivedAt: now }],
       skipDuplicates: true,
@@ -70,6 +71,20 @@ async function markVerified({ sessionId, sessionDate, studentId, face, ble, now 
     });
     return { state: "verified", arrivedAt: now };
   });
+
+  // Outside the transaction (not part of it, and must not roll it back) and
+  // fire-and-forget: recordSignal is on the hot path of every camera frame
+  // and BLE sighting, so the response here can't wait on an email/SMS round
+  // trip. Only reached once per student per day — see the count===0 guard
+  // above and notifyArrival's own idempotency-by-construction (called only
+  // on the write that actually happened).
+  if (result.state === "verified") {
+    Promise.resolve()
+      .then(() => notifyArrival(studentId, now))
+      .catch(() => {});
+  }
+
+  return result;
 }
 
 // Records one sighting and, if it completes the pair, marks the student present.

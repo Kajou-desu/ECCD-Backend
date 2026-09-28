@@ -115,3 +115,25 @@ The defaults are starting points, not measurements.
 - Lighting, angle and a child's growth affect face matching; the manual roster is the fallback.
 - Face templates are biometric data of children. Get guardian consent, restrict access
   to `Images/`, and delete on leaving. Ask your data-protection officer what local law requires.
+
+## Arrival / departure notifications
+
+When a student is marked present **for today** (automatic face + BLE
+verification, or a teacher's single-record edit via `PUT /attendance/:studentId`),
+every linked parent/guardian is notified (once — re-saving an already-present student does not re-notify) on three channels: an in-app
+`Notification`, an email, and an SMS. Bulk entry (`POST /attendance`) and edits to
+past dates never notify.
+
+Departure is **manual**: a teacher/admin calls `PATCH /attendance/:studentId/depart`,
+which stamps `departedAt` on today's record (only if the student arrived and
+hasn't already departed) and sends the same three notifications. The teacher
+dashboard and Attendance page show a confirmed **Mark departed** button for
+present students only; re-marking a student's status clears a prior departure.
+
+- **Email** goes through the existing SMTP mailer. To use Resend, point the SMTP
+  settings at `smtp.resend.com` (see `.env.example`) with a sender on the verified
+  `eccdsmarttrack.app` domain.
+- **SMS** goes through Semaphore (`SEMAPHORE_API_KEY`), Philippine mobile numbers
+  only. Optional: unset means SMS is skipped, never a startup failure.
+- Delivery is best-effort and fault-isolated per parent and per channel: a failed
+  email or SMS is logged server-side and never fails the attendance write.

@@ -189,6 +189,11 @@ model Attendance {
   date      DateTime         @db.Date
   status    AttendanceStatus
   arrivedAt DateTime?
+  // Set once, manually, via PATCH /attendance/:studentId/depart (Teacher/Admin).
+  // There is no automatic "left the building" signal (BLE only proves nearness
+  // at the door, not an exit), so this is teacher-asserted, same as a manual
+  // arrival — see attendance.controller.js.
+  departedAt DateTime?
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
