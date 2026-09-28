@@ -80,7 +80,7 @@ const verification = {
 // Optional face-recognition microservice (face-recognition-service/). When
 // unset, the frame endpoint answers 503 and the rest of the app is unaffected.
 // When set it must be complete and safe: a real http(s) URL, plain http only for
-// loopback in production (frames contain children's faces), and a strong key.
+// loopback or Railway's private network in production (frames contain children's faces), and a strong key.
 function recognitionConfig() {
   const rawUrl = process.env.RECOGNITION_SERVICE_URL;
   const key = process.env.RECOGNITION_SERVICE_KEY;
@@ -98,8 +98,14 @@ function recognitionConfig() {
     process.exit(1);
   }
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (isProduction && url.protocol !== "https:" && !loopback) {
-    console.error("In production RECOGNITION_SERVICE_URL must use https unless it is localhost.");
+  // Railway's private network: names under .railway.internal resolve only from
+  // inside the same Railway project, so this is not the open internet. Plain
+  // http is accepted there because Railway's internal addresses have no TLS.
+  const privateNetwork = url.hostname.endsWith(".railway.internal");
+  if (isProduction && url.protocol !== "https:" && !loopback && !privateNetwork) {
+    console.error(
+      "In production RECOGNITION_SERVICE_URL must use https unless it is localhost or a *.railway.internal address.",
+    );
     process.exit(1);
   }
   if (!key || key.length < 32) {
