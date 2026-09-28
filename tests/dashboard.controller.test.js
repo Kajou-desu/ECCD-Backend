@@ -1,13 +1,16 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     dailyTheme: { findUnique: vi.fn(), upsert: vi.fn() },
+    student: { count: vi.fn() },
+    attendance: { count: vi.fn() },
+    material: { count: vi.fn() },
   },
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { getDailyTheme, upsertDailyTheme } = await import("../src/controllers/dashboard.controller.js");
+const { getDashboardStats, getDailyTheme, upsertDailyTheme } = await import("../src/controllers/dashboard.controller.js");
 
 function mockRes() {
   const res = {};
@@ -110,5 +113,26 @@ describe("getDailyTheme", () => {
         fileUrl: expect.stringMatching(/^https:\/\/classroom\.example\/api\/files\/activity\.pdf\?/),
       }),
     }));
+  });
+});
+
+describe("getDashboardStats", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("counts the school's current day, not the server's (UTC) day", async () => {
+    // 7:30 AM Sept 30 in Manila is still Sept 29 in UTC.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-29T23:30:00.000Z"));
+    prisma.student.count.mockResolvedValue(10);
+    prisma.attendance.count.mockResolvedValueOnce(4).mockResolvedValueOnce(1);
+    prisma.material.count.mockResolvedValue(3);
+
+    const res = mockRes();
+    await getDashboardStats({}, res, vi.fn());
+
+    const day = new Date("2026-09-30T00:00:00.000Z");
+    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "present" } });
+    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "absent" } });
+    expect(res.json).toHaveBeenCalledWith({ totalStudents: 10, presentToday: 4, absentToday: 1, totalMaterials: 3 });
   });
 });
