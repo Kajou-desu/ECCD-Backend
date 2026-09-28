@@ -14,12 +14,17 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY app.py recognizer.py ./
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
 # Enrolled photos (children's biometric data) live here: mount a persistent
 # volume at /data, or every redeploy un-enrolls everyone.
 RUN useradd --create-home app && mkdir -p /data/Images && chown -R app /data
-USER app
 ENV KNOWN_FACES_DIR=/data/Images
+
+# No `USER app` here on purpose: Railway mounts the volume as root and hides the
+# chown above, so entrypoint.sh (root) fixes the volume's ownership and then
+# drops to `app` before the service starts. The service itself never runs as root.
+ENTRYPOINT ["/entrypoint.sh"]
 
 EXPOSE 8001
 # One worker only: enrolled encodings are held in this process's memory.

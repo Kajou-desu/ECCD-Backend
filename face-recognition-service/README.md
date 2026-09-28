@@ -163,8 +163,12 @@ only for `*.railway.internal` because those addresses are private to the project
 5. Keep one replica. Enroll students through the deployed app after recording
    guardian consent; local enrollments are not copied to the cloud.
 
-The image runs as a non-root user. If the mounted volume is not writable, adjust
-its ownership or permissions in the Railway deployment configuration.
+Railway mounts volumes as `root`. The image's `entrypoint.sh` therefore starts as
+root only long enough to `chown` `/data/Images` to the `app` user, then drops to
+`app` before the service starts — so you do **not** need `RAILWAY_RUN_UID=0`, and
+the service never runs as root. Do not add `USER app` to the Dockerfile or set
+`RAILWAY_RUN_UID` to a non-zero value: either one starts the entrypoint without
+root, so the ownership fix cannot run.
 
 ## Calibrating
 
