@@ -1,12 +1,20 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { parseId } from "../utils/validate.js";
-import { isRecognitionConfigured, enrollStudentPhotos, RecognitionRejectedError } from "../services/recognitionClient.js";
+import {
+  isRecognitionConfigured,
+  enrollStudentPhotos,
+  countStudentEnrollmentPhotos,
+  fetchStudentEnrollmentPhoto,
+  RecognitionRejectedError,
+} from "../services/recognitionClient.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 
 // Teacher/admin only (enforced at route level); a Teacher is further
 // restricted to their own connected students.
 export const MAX_ENROLLMENT_PHOTOS = 8;
+// The service keeps at most this many images per student folder.
+const MAX_STORED_PHOTOS = 20;
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -66,6 +74,70 @@ export async function uploadEnrollmentPhotos(req, res, next) {
     }
 
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/students/:id/enrollment-photos — how many photos are enrolled.
+// Teacher/admin only (route level) + the same per-student check as uploading.
+export async function getEnrollmentPhotoCount(req, res, next) {
+  try {
+    if (!isRecognitionConfigured()) {
+      return res.status(503).json({ message: "Face recognition is not configured" });
+    }
+    const id = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, id);
+
+    try {
+      const { count } = await countStudentEnrollmentPhotos(id);
+      res.set("Cache-Control", "no-store");
+      return res.json({ count });
+    } catch (err) {
+      logger.error({ err }, "Enrollment photo count failed");
+      return res.status(502).json({ message: "Face recognition service unavailable" });
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/students/:id/enrollment-photos/:index — one enrolled photo, streamed
+// from the recognition service. Biometric data of a child: never cached, never
+// copied into the app's own storage, and only ever sent to an authorised
+// teacher/admin. The bytes are re-checked so the service can't make this
+// endpoint serve anything but a real JPEG/PNG.
+export async function getEnrollmentPhoto(req, res, next) {
+  try {
+    if (!isRecognitionConfigured()) {
+      return res.status(503).json({ message: "Face recognition is not configured" });
+    }
+    const id = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, id);
+
+    if (!/^\d{1,2}$/.test(req.params.index) || Number(req.params.index) >= MAX_STORED_PHOTOS) {
+      return res.status(400).json({ message: "Invalid photo index" });
+    }
+
+    let photo;
+    try {
+      photo = await fetchStudentEnrollmentPhoto(id, Number(req.params.index));
+    } catch (err) {
+      logger.error({ err }, "Enrollment photo fetch failed");
+      return res.status(502).json({ message: "Face recognition service unavailable" });
+    }
+    if (!photo) return res.status(404).json({ message: "Photo not found" });
+    if (!matchesDeclaredType(photo.buffer, photo.contentType)) {
+      logger.error("Recognition service returned bytes that do not match the image type");
+      return res.status(502).json({ message: "Face recognition service unavailable" });
+    }
+
+    res.set({
+      "Content-Type": photo.contentType,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    return res.send(photo.buffer);
   } catch (err) {
     next(err);
   }

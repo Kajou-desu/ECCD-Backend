@@ -316,3 +316,55 @@ class TestEnrollHardening:
     def test_delete_rejects_a_non_numeric_student_id(self, client, tmp_path, monkeypatch, bad_id):
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
         assert client.delete(f"/enroll/{bad_id}", headers=AUTH).status_code in (400, 404)
+
+
+class TestViewEnrolledPhotos:
+    """GET /enroll/{id}/photos[/{index}]: read back what is stored, nothing else."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+    @pytest.fixture()
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        student = tmp_path / "5"
+        student.mkdir()
+        (student / "0.jpg").write_bytes(jpeg())
+        (student / "1.png").write_bytes(self.PNG)
+        (student / "notes.txt").write_text("not an image")
+        (tmp_path / "secret.jpg").write_bytes(jpeg())  # outside any student folder
+        return tmp_path
+
+    def test_requires_the_service_key(self, client, store):
+        assert client.get("/enroll/5/photos").status_code == 401
+        assert client.get("/enroll/5/photos/0").status_code == 401
+
+    def test_count_lists_images_only(self, client, store):
+        r = client.get("/enroll/5/photos", headers=AUTH)
+        assert r.status_code == 200 and r.json() == {"studentId": 5, "count": 2}
+
+    def test_unknown_student_has_zero_photos(self, client, store):
+        assert client.get("/enroll/9/photos", headers=AUTH).json()["count"] == 0
+
+    def test_serves_bytes_with_the_sniffed_type_and_no_caching(self, client, store):
+        r = client.get("/enroll/5/photos/0", headers=AUTH)
+        assert r.status_code == 200 and r.content == jpeg()
+        assert r.headers["content-type"] == "image/jpeg"
+        assert "no-store" in r.headers["cache-control"]
+        assert client.get("/enroll/5/photos/1", headers=AUTH).headers["content-type"] == "image/png"
+
+    def test_out_of_range_is_404(self, client, store):
+        assert client.get("/enroll/5/photos/2", headers=AUTH).status_code == 404
+
+    @pytest.mark.parametrize("bad", ["abc", "-1", "1.5", "100", "%2e%2e", "0%2f..%2fsecret.jpg"])
+    def test_bad_index_never_reads_outside_the_folder(self, client, store, bad):
+        r = client.get(f"/enroll/5/photos/{bad}", headers=AUTH)
+        assert r.status_code in (400, 404)
+        assert r.content != jpeg() or bad == "0"
+
+    @pytest.mark.parametrize("bad_id", ["abc", "-1", "1234567890", "5%2f..%2f7"])
+    def test_bad_student_id_is_rejected(self, client, store, bad_id):
+        assert client.get(f"/enroll/{bad_id}/photos", headers=AUTH).status_code in (400, 404)
+
+    def test_a_non_image_file_is_never_served(self, client, store):
+        (store / "5" / "0.jpg").write_text("<html>not a jpeg</html>")
+        assert client.get("/enroll/5/photos/0", headers=AUTH).status_code == 404

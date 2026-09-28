@@ -20,13 +20,14 @@ import hmac
 import io
 import logging
 import os
+import re
 import shutil
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from PIL import Image
 
 import recognizer
@@ -191,6 +192,56 @@ async def enroll(student_id: str, photos: list[UploadFile] = File(...)):
         app.state.known = app.state.known.with_student(int(student_id), encoding)
 
     return {"studentId": int(student_id), "photosReceived": len(saved), "enrolled": True}
+
+
+def _enrolled_photo_paths(student_id: str) -> list[str]:
+    """Paths of this student's stored photos, in the same order the encoder reads them."""
+    student_dir = os.path.join(KNOWN_FACES_DIR, student_id)
+    if not os.path.isdir(student_dir):
+        return []
+    with os.scandir(student_dir) as it:
+        entries = sorted(it, key=lambda e: e.name)[: recognizer.MAX_IMAGES_PER_STUDENT]
+    return [
+        e.path
+        for e in entries
+        if os.path.splitext(e.name)[1].lower() in recognizer.IMAGE_EXTENSIONS
+        and e.is_file(follow_symlinks=False)
+    ]
+
+
+@app.get("/enroll/{student_id}/photos")
+def list_enrolled_photos(student_id: str):
+    """How many photos are stored for this student (no image data)."""
+    if not recognizer.STUDENT_DIR_RE.match(student_id):
+        return _error(400, "Invalid student id")
+    return {"studentId": int(student_id), "count": len(_enrolled_photo_paths(student_id))}
+
+
+@app.get("/enroll/{student_id}/photos/{index}")
+def get_enrolled_photo(student_id: str, index: str):
+    """One stored photo by position. `index` is a number, never a file name, so
+    a caller cannot steer the read outside this student's own folder."""
+    if not recognizer.STUDENT_DIR_RE.match(student_id):
+        return _error(400, "Invalid student id")
+    if not re.fullmatch(r"\d{1,2}", index):
+        return _error(400, "Invalid photo index")
+    paths = _enrolled_photo_paths(student_id)
+    position = int(index)
+    if position >= len(paths):
+        return _error(404, "Not found")
+    try:
+        with open(paths[position], "rb") as f:
+            data = f.read(recognizer.MAX_ENROLL_IMAGE_BYTES + 1)
+    except OSError:  # e.g. replaced by a concurrent re-enrollment
+        return _error(404, "Not found")
+    ext = _sniff_image_ext(data)
+    if ext is None or len(data) > recognizer.MAX_ENROLL_IMAGE_BYTES:
+        return _error(404, "Not found")
+    return Response(
+        content=data,
+        media_type="image/png" if ext == ".png" else "image/jpeg",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.delete("/enroll/{student_id}")

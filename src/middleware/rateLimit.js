@@ -212,3 +212,11 @@ export const enrollmentUserLimiter = perUserLimiter(
   30,
   "Too many enrollment photo uploads, please try again later"
 );
+
+// Viewing enrolled photos (GET /students/:id/enrollment-photos[/:index]): one
+// page view is 1 count request + up to 8 photo requests.
+export const enrollmentViewUserLimiter = perUserLimiter(
+  "rl:enrollment-view:",
+  600,
+  "Too many requests, please try again later"
+);
