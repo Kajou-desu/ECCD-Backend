@@ -69,6 +69,7 @@ describe("student detail teacher center", () => {
       expect.objectContaining({
         teacher: "Taylor Reed",
         teacherCenterLocation: "North ECCD Center",
+        school: "North ECCD Center",
       }),
     );
   });

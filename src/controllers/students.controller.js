@@ -70,6 +70,9 @@ function toStudentDetailResponse(req, student) {
     ...rest,
     teacher: teacher?.name ?? null,
     teacherCenterLocation: teacher?.centerLocation ?? null,
+    // StudentProfileHeader.jsx reads `student.school`. There is no school column;
+    // the school/center is the assigned teacher's center, so derive it here.
+    school: teacher?.centerLocation ?? null,
     photo: signFileUrl(req, student.photo),
     birthday: toDateOnly(student.birthday),
     documents: (student.documents || []).map((doc) => toDocumentResponse(req, doc)),
