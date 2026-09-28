@@ -44,7 +44,10 @@ const LIST_SELECT = {
 
 // Full shape for the edit form (StudentForm.jsx prefill) — every flat field
 // plus embedded documents and the connected teacher.
-const DETAIL_INCLUDE = { documents: true, teacher: { select: { id: true, name: true } } };
+const DETAIL_INCLUDE = {
+  documents: true,
+  teacher: { select: { id: true, name: true, centerLocation: true } },
+};
 
 // Prisma DateTime -> plain YYYY-MM-DD. Needed because StudentForm.jsx feeds
 // student.birthday straight into <input type="date" value={...}>, which
@@ -66,6 +69,7 @@ function toStudentDetailResponse(req, student) {
   return {
     ...rest,
     teacher: teacher?.name ?? null,
+    teacherCenterLocation: teacher?.centerLocation ?? null,
     photo: signFileUrl(req, student.photo),
     birthday: toDateOnly(student.birthday),
     documents: (student.documents || []).map((doc) => toDocumentResponse(req, doc)),
