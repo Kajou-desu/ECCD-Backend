@@ -3,6 +3,7 @@ import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 import { parseId } from "../utils/validate.js";
+import { notifyTeacherOfSubmission } from "../services/submissionNotification.service.js";
 
 function toSubmissionResponse(req, submission) {
   return { ...submission, fileUrl: signFileUrl(req, submission.fileUrl) };
@@ -95,6 +96,16 @@ export async function submitStudentWork(req, res, next) {
         fileName: req.file.originalname,
       },
     });
+
+    // Only when a parent/guardian submits: a teacher/admin uploading on a
+    // child's behalf must not notify the teacher about their own action.
+    // Fire-and-forget so the response never waits on it.
+    if (req.user.role === "Parent" || req.user.role === "Guardian") {
+      Promise.resolve()
+        .then(() => notifyTeacherOfSubmission(studentId, material.title))
+        .catch(() => {});
+    }
+
     res.status(201).json(toSubmissionResponse(req, submission));
   } catch (err) {
     next(err);

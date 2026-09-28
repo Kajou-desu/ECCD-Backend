@@ -47,11 +47,18 @@ export function isLiveAttendancePath(path) {
   return LIVE_ATTENDANCE_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }
 
+// The notification bell polls every ~30 s per open tab, so it gets the same
+// treatment: exempt from the shared per-IP budget (a whole school would
+// exhaust it) and covered by its own limiters below instead.
+export function isNotificationPath(path) {
+  return path === "/notifications" || path.startsWith("/notifications/");
+}
+
 // General API traffic
 export const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 min
   limit: 300,
-  skip: (req) => isLiveAttendancePath(req.path),
+  skip: (req) => isLiveAttendancePath(req.path) || isNotificationPath(req.path),
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many requests, please try again later" },
@@ -135,6 +142,25 @@ export const profileUpdateLimiter = perUserLimiter(
   "rl:profile:",
   20,
   "Too many profile updates, please try again later"
+);
+
+// Notifications: per-IP ceiling before auth (sized for a whole school behind
+// one IP), then per-user after auth. 200 / 15 min per user covers a 30 s poll
+// (~30 per tab) across several open tabs, plus mark-read/dismiss actions.
+export const notificationIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later" },
+  store: getStore("rl:notifications-ip:"),
+  passOnStoreError: true,
+});
+
+export const notificationUserLimiter = perUserLimiter(
+  "rl:notifications-user:",
+  200,
+  "Too many requests, please try again later"
 );
 
 // Live attendance (session start/stop/status, and later the signal/frame

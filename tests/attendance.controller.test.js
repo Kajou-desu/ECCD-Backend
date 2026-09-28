@@ -9,7 +9,12 @@ vi.mock("../src/lib/prisma.js", () => ({
   },
 }));
 vi.mock("../src/lib/signedFileUrl.js", () => ({ signFileUrl: vi.fn(() => null) }));
-vi.mock("../src/utils/ownership.js", () => ({ assertCanAccessStudent: vi.fn() }));
+// Ownership itself is covered against the real implementation in
+// attendanceOwnership.test.js; here it is stubbed to "allowed".
+vi.mock("../src/utils/ownership.js", () => ({
+  assertCanAccessStudent: vi.fn(),
+  assertCanAccessStudents: vi.fn(),
+}));
 vi.mock("../src/services/attendanceNotification.service.js", () => ({
   notifyArrival: vi.fn().mockResolvedValue(undefined),
   notifyDeparture: vi.fn().mockResolvedValue(undefined),
@@ -24,6 +29,8 @@ const { schoolDateString } = await import("../src/utils/schoolDate.js");
 
 // Fire-and-forget notifications run on a microtask; let them settle before asserting.
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const admin = { id: 1, role: "Admin" };
 
 function mockRes() {
   const res = {};
@@ -51,7 +58,7 @@ describe("getAttendance — verified flag", () => {
       // student 4: no record at all
     ]);
     const res = mockRes();
-    await getAttendance({ query: { date: "2026-09-20" } }, res, vi.fn());
+    await getAttendance({ user: admin, query: { date: "2026-09-20" } }, res, vi.fn());
 
     const out = res.json.mock.calls[0][0];
     expect(out.map((s) => [s.id, s.status, s.verified])).toEqual([
@@ -62,7 +69,7 @@ describe("getAttendance — verified flag", () => {
   it("asks for the verification relation in the same query (no N+1)", async () => {
     prisma.student.findMany.mockResolvedValue(students);
     prisma.attendance.findMany.mockResolvedValue([]);
-    await getAttendance({ query: { date: "2026-09-20" } }, mockRes(), vi.fn());
+    await getAttendance({ user: admin, query: { date: "2026-09-20" } }, mockRes(), vi.fn());
     expect(prisma.attendance.findMany.mock.calls[0][0].include).toEqual({ verification: { select: { id: true } } });
   });
 });
@@ -78,7 +85,7 @@ describe("manual edits supersede automatic evidence", () => {
     prisma.$transaction.mockResolvedValue([{ id: 11 }, { id: 12 }]);
     prisma.attendance.upsert.mockReturnValue({});
     await recordAttendance(
-      { body: [{ studentId: 1, date: "2026-09-20", status: "present" }, { studentId: 2, date: "2026-09-20", status: "absent" }] },
+      { user: admin, body: [{ studentId: 1, date: "2026-09-20", status: "present" }, { studentId: 2, date: "2026-09-20", status: "absent" }] },
       mockRes(), vi.fn(),
     );
     expect(prisma.attendanceVerification.deleteMany).toHaveBeenCalledWith({ where: { attendanceId: { in: [11, 12] } } });
@@ -215,7 +222,7 @@ describe("recordAttendance — bulk entry", () => {
     prisma.$transaction.mockResolvedValue([{ id: 11 }]);
     prisma.attendance.upsert.mockReturnValue({});
     await recordAttendance(
-      { body: [{ studentId: 1, date: schoolDateString(), status: "present" }] },
+      { user: admin, body: [{ studentId: 1, date: schoolDateString(), status: "present" }] },
       mockRes(), vi.fn(),
     );
     await flush();
@@ -288,7 +295,7 @@ describe("departedAt in responses", () => {
       { id: 1, studentId: 1, status: "present", arrivedAt: new Date(), departedAt, verification: null },
     ]);
     const res = mockRes();
-    await getAttendance({ query: { date: "2026-09-20" } }, res, vi.fn());
+    await getAttendance({ user: admin, query: { date: "2026-09-20" } }, res, vi.fn());
     expect(res.json.mock.calls[0][0][0].departedAt).toBe(departedAt);
   });
 });

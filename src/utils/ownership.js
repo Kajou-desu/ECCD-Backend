@@ -34,3 +34,26 @@ export async function assertCanAccessStudent(user, studentId) {
   // Default deny
   throw new AppError("Forbidden", 403);
 }
+
+/**
+ * Bulk form of assertCanAccessStudent for endpoints that write many students
+ * at once (Teacher/Admin only). One query instead of one per id, and
+ * all-or-nothing: if ANY id is not accessible the whole request is forbidden,
+ * so a mixed list can never partially succeed.
+ * Parent/Guardian are denied here — no bulk endpoint is meant for them.
+ */
+export async function assertCanAccessStudents(user, studentIds) {
+  const ids = [...new Set(studentIds)];
+
+  if (user.role === "Admin") return;
+
+  if (user.role === "Teacher") {
+    const owned = await prisma.student.count({
+      where: { id: { in: ids }, teacherId: user.id },
+    });
+    if (owned === ids.length) return;
+  }
+
+  // Default deny
+  throw new AppError("Forbidden", 403);
+}

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
+import { notificationIpLimiter, notificationUserLimiter } from "../middleware/rateLimit.js";
 import {
   getNotifications,
   markNotificationRead,
@@ -10,7 +11,8 @@ import {
 
 const router = Router();
 
-router.use(requireAuth);
+// IP ceiling first (unauthenticated floods), then identity, then per-user budget.
+router.use(notificationIpLimiter, requireAuth, notificationUserLimiter);
 
 router.get("/", getNotifications);
 router.patch("/read-all", markAllNotificationsRead);

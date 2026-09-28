@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
-import { assertCanAccessStudent } from "../utils/ownership.js";
+import { assertCanAccessStudent, assertCanAccessStudents } from "../utils/ownership.js";
+import { AppError } from "../middleware/errorHandler.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { schoolMinutesOfDay, schoolDateString } from "../utils/schoolDate.js";
 import { notifyArrival, notifyDeparture } from "../services/attendanceNotification.service.js";
@@ -35,13 +36,22 @@ export async function getAttendance(req, res, next) {
     const dateObj = toDate(date);
     const pagination = parsePagination(req.query);
 
+    // Same rule as the Student Info list: a Teacher sees only the students
+    // connected to them (Student.teacherId), an Admin sees everyone. Anything
+    // else is denied rather than defaulting to the full roster.
+    if (req.user.role !== "Teacher" && req.user.role !== "Admin") {
+      throw new AppError("Forbidden", 403);
+    }
+    const where = req.user.role === "Teacher" ? { teacherId: req.user.id } : undefined;
+
     const [students, total] = await Promise.all([
       prisma.student.findMany({
+        where,
         select: { id: true, name: true, session: true, photo: true },
         orderBy: { name: "asc" },
         ...(pagination && { skip: pagination.skip, take: pagination.take }),
       }),
-      pagination ? prisma.student.count() : Promise.resolve(null),
+      pagination ? prisma.student.count({ where }) : Promise.resolve(null),
     ]);
 
     // Only look up attendance for the students actually returned on this
@@ -80,6 +90,10 @@ export async function updateAttendance(req, res, next) {
     const studentId = parseId(req.params.studentId, "studentId");
     const date = requireDateString(req.body.date);
     const status = requireAttendanceStatus(req.body.status);
+
+    // Authorize BEFORE any read or write: a Teacher may only mark their own
+    // students, otherwise this would also alert another class's parents.
+    await assertCanAccessStudent(req.user, studentId);
 
     // Only a genuine change TO present is an arrival. Re-saving "present" for
     // a student who is already present must not text/email their parents
@@ -137,6 +151,7 @@ export async function updateAttendance(req, res, next) {
 export async function markDeparted(req, res, next) {
   try {
     const studentId = parseId(req.params.studentId, "studentId");
+    await assertCanAccessStudent(req.user, studentId);
     const today = toDate(schoolDateString());
 
     const existing = await prisma.attendance.findUnique({
@@ -183,6 +198,9 @@ export async function recordAttendance(req, res, next) {
       date: toDate(requireDateString(e.date)),
       status: requireAttendanceStatus(e.status),
     }));
+
+    // All-or-nothing ownership check before the transaction opens.
+    await assertCanAccessStudents(req.user, validated.map((e) => e.studentId));
 
     const results = await prisma.$transaction(
       validated.map(({ studentId, date, status }) =>
