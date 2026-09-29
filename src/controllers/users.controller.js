@@ -11,6 +11,7 @@ import {
   requireNonEmptyString,
   optionalString,
   optionalPhone,
+  optionalPhMobile,
   requirePassword,
 } from "../utils/validate.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -19,6 +20,14 @@ import { removeStoredFiles } from "../lib/fileStorage.js";
 import { otpMatches, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
 
 const ROLES = ["Teacher", "Parent", "Guardian", "Admin"];
+
+// Parents/Guardians get arrival/departure SMS (Semaphore, PH mobiles only), so
+// their phone must be one it can deliver to. Teachers/Admins never receive
+// SMS and may legitimately list a landline, so they keep the general check.
+const SMS_ROLES = ["Parent", "Guardian"];
+function phoneForRole(role, value) {
+  return SMS_ROLES.includes(role) ? optionalPhMobile(value, "phone") : optionalPhone(value, "phone");
+}
 
 const ACTIONS = {
   PASSWORD_CHANGE: "password_change",
@@ -163,7 +172,7 @@ export async function registerUser(req, res, next) {
           email,
           passwordHash,
           role,
-          phone: optionalPhone(req.body.phone, "phone"),
+          phone: phoneForRole(role, req.body.phone),
           address: optionalString(req.body.address, 500),
           // Which ECCD center this account is based at; only meaningful
           // for a Teacher, but stored as a plain optional field for any role.
@@ -229,7 +238,7 @@ export async function updateUser(req, res, next) {
     if (req.body.lastName !== undefined) data.lastName = requireNonEmptyString(req.body.lastName, "lastName", 100);
     if (req.body.middleName !== undefined) data.middleName = optionalString(req.body.middleName, 100);
     if (req.body.email !== undefined) data.email = requireEmail(req.body.email);
-    if (req.body.phone !== undefined) data.phone = optionalPhone(req.body.phone, "phone");
+    if (req.body.phone !== undefined) data.phone = phoneForRole(requestedRole, req.body.phone);
     if (req.body.address !== undefined) data.address = optionalString(req.body.address, 500);
     if (req.body.centerLocation !== undefined) data.centerLocation = optionalString(req.body.centerLocation, 200);
     if (req.body.role !== undefined) data.role = requestedRole;
@@ -300,7 +309,7 @@ export async function updateMyProfile(req, res, next) {
     if (req.body.lastName !== undefined) data.lastName = requireNonEmptyString(req.body.lastName, "lastName", 100);
     if (req.body.middleName !== undefined) data.middleName = optionalString(req.body.middleName, 100);
     if (req.body.email !== undefined) data.email = requireEmail(req.body.email);
-    if (req.body.phone !== undefined) data.phone = optionalPhone(req.body.phone, "phone");
+    if (req.body.phone !== undefined) data.phone = phoneForRole(req.user.role, req.body.phone);
     if (req.body.address !== undefined) data.address = optionalString(req.body.address, 500);
 
     // The email is where password-reset codes go, so changing it is as

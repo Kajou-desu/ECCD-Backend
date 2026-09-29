@@ -28,33 +28,33 @@ async function notifyParents(studentId, buildMessages) {
 
   const { title, message, emailSubject, smsText } = buildMessages(student.name);
 
-  await Promise.all(
-    links.map(async ({ parent }) => {
-      if (!parent) return;
+  // One parent at a time (a student has only a few): firing every email/SMS at
+  // once can trip Resend's and Semaphore's per-second/per-minute limits.
+  for (const { parent } of links) {
+    if (!parent) continue;
 
+    try {
+      await prisma.notification.create({ data: { userId: parent.id, title, message } });
+    } catch (err) {
+      logger.error({ err, studentId, parentId: parent.id }, "Failed to write in-app attendance notification");
+    }
+
+    if (parent.email) {
       try {
-        await prisma.notification.create({ data: { userId: parent.id, title, message } });
+        await sendAttendanceEmail(parent.email, emailSubject, message);
       } catch (err) {
-        logger.error({ err, studentId, parentId: parent.id }, "Failed to write in-app attendance notification");
+        logger.error({ err, studentId, parentId: parent.id }, "Failed to send attendance email");
       }
+    }
 
-      if (parent.email) {
-        try {
-          await sendAttendanceEmail(parent.email, emailSubject, message);
-        } catch (err) {
-          logger.error({ err, studentId, parentId: parent.id }, "Failed to send attendance email");
-        }
+    if (parent.phone) {
+      try {
+        await sendSms(parent.phone, smsText);
+      } catch (err) {
+        logger.error({ err, studentId, parentId: parent.id }, "Failed to send attendance SMS");
       }
-
-      if (parent.phone) {
-        try {
-          await sendSms(parent.phone, smsText);
-        } catch (err) {
-          logger.error({ err, studentId, parentId: parent.id }, "Failed to send attendance SMS");
-        }
-      }
-    })
-  );
+    }
+  }
 }
 
 // Called after a student is marked present (automatic face+BLE verification,

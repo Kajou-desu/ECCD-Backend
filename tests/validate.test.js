@@ -10,6 +10,8 @@ import {
   optionalString,
   optionalEmail,
   requirePhone,
+  requirePhMobile,
+  optionalPhMobile,
   requireSession,
   requireStudentStatus,
   requireBirthday,
@@ -129,6 +131,43 @@ describe("requirePhone", () => {
   it("rejects letters or too-short input", () => {
     expect(() => requirePhone("call me")).toThrow(AppError);
     expect(() => requirePhone("123")).toThrow(AppError);
+  });
+});
+
+describe("requirePhMobile", () => {
+  it.each(["09171234567", "639171234567", "+639171234567", "+63 917 123 4567", "0917-123-4567", "(0917) 123 4567"])(
+    "accepts a PH mobile number: %s",
+    (input) => {
+      expect(requirePhMobile(input)).toBe(input.trim());
+    }
+  );
+
+  it.each(["1234567", "0281234567", "+14155552671", "091712345", "0817123456789", "call me", "", 9171234567, null])(
+    "rejects anything Semaphore can't deliver to: %s",
+    (input) => {
+      expect(() => requirePhMobile(input)).toThrow(AppError);
+    }
+  );
+
+  it("rejects an over-long value even if it strips down to a valid number", () => {
+    expect(() => requirePhMobile("0917" + " ".repeat(50) + "1234567")).toThrow(AppError);
+  });
+
+  it("says what format is expected", () => {
+    expect(() => requirePhMobile("123", "guardian phone")).toThrow(/guardian phone.*Philippine mobile/);
+  });
+});
+
+describe("optionalPhMobile", () => {
+  it("returns null for blank/absent values", () => {
+    expect(optionalPhMobile(undefined)).toBeNull();
+    expect(optionalPhMobile(null)).toBeNull();
+    expect(optionalPhMobile("")).toBeNull();
+  });
+
+  it("validates a provided value", () => {
+    expect(optionalPhMobile(" 09171234567 ")).toBe("09171234567");
+    expect(() => optionalPhMobile("0281234567")).toThrow(AppError);
   });
 });
 

@@ -102,6 +102,34 @@ describe("notifyArrival", () => {
     expect(logger.error).toHaveBeenCalled();
   });
 
+  it("contacts parents one at a time, not all at once (provider rate limits)", async () => {
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([
+      parent({ id: 1, email: "mom@example.com", phone: "09171234567" }),
+      parent({ id: 2, email: "dad@example.com", phone: "09181234567" }),
+    ]);
+    const order = [];
+    sendAttendanceEmail.mockImplementation(async (to) => {
+      order.push(`email:${to}:start`);
+      await new Promise((r) => setTimeout(r, 5));
+      order.push(`email:${to}:end`);
+    });
+    sendSms.mockImplementation(async (to) => {
+      order.push(`sms:${to}`);
+    });
+
+    await notifyArrival(5, NOW);
+
+    expect(order).toEqual([
+      "email:mom@example.com:start",
+      "email:mom@example.com:end",
+      "sms:09171234567",
+      "email:dad@example.com:start",
+      "email:dad@example.com:end",
+      "sms:09181234567",
+    ]);
+  });
+
   it("never throws, even if the initial lookup itself fails", async () => {
     prisma.student.findUnique.mockRejectedValue(new Error("connection lost"));
     prisma.parentChild.findMany.mockResolvedValue([]);

@@ -1,15 +1,28 @@
 import { env } from "../config/env.js";
 import { logger } from "./logger.js";
+// Semaphore only delivers to PH mobiles, so anything else is skipped rather
+// than sent (and billed) for nothing. Same rule the account forms enforce.
+import { PH_MOBILE_RE, normalizePhone } from "../utils/validate.js";
 
 const SEMAPHORE_URL = "https://api.semaphore.co/api/v4/messages";
 
-// Philippine mobile number, with or without country code: 09XXXXXXXXX,
-// 639XXXXXXXXX or +639XXXXXXXXX. Semaphore only delivers to PH numbers, so
-// anything else is skipped rather than sent (and billed) for nothing.
-const PH_MOBILE_RE = /^(?:\+?63|0)9\d{9}$/;
+// Semaphore caps this endpoint at 120 calls/minute. Only statuses where the
+// message was certainly NOT accepted are retried (429 rate limit, 503
+// unavailable). Timeouts and other 5xx are deliberately not retried: the
+// message may already be queued, and a retry would text the parent twice.
+const RETRY_STATUSES = new Set([429, 503]);
+const MAX_RETRIES = 2;
+const MAX_WAIT_MS = 10_000;
 
-function normalizePhone(phone) {
-  return String(phone ?? "").replace(/[\s\-()]/g, "");
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Honors Retry-After (seconds) when the provider sends it, else backs off
+// 2s then 4s. Capped so a fire-and-forget send never lingers for long.
+function retryDelayMs(res, attempt) {
+  const header = res.headers?.get("retry-after");
+  const seconds = header === null || header === undefined ? NaN : Number(header);
+  const ms = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 2000 * (attempt + 1);
+  return Math.min(ms, MAX_WAIT_MS);
 }
 
 // Sends one SMS via Semaphore. With no API key configured, logs instead of
@@ -34,11 +47,17 @@ export async function sendSms(phone, message) {
     ...(env.semaphore.senderName ? { sendername: env.semaphore.senderName } : {}),
   });
 
-  const res = await fetch(SEMAPHORE_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(SEMAPHORE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (res.ok || !RETRY_STATUSES.has(res.status) || attempt >= MAX_RETRIES) break;
+    logger.warn({ status: res.status, attempt: attempt + 1 }, "Semaphore SMS throttled/unavailable — retrying");
+    await sleep(retryDelayMs(res, attempt));
+  }
 
   if (!res.ok) {
     // Provider response body may contain account/billing detail — server
