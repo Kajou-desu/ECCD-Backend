@@ -25,11 +25,19 @@ function retryDelayMs(res, attempt) {
   return Math.min(ms, MAX_WAIT_MS);
 }
 
-// Sends one SMS via Semaphore. With no API key configured, logs instead of
-// sending so local dev doesn't need a paid SMS account. Throws on an
-// unrecognised number or a failed request — the caller (notifyParents)
-// catches it so one parent's bad number never blocks the others' emails/SMS.
+// Sends one SMS through whichever provider SMS_PROVIDER selects (Semaphore by
+// default; TextBee as the temporary alternative). Callers never need to know
+// which. Throws on an unrecognised number or a failed request — the caller
+// (notifyParents) catches it so one parent's bad number never blocks the
+// others' emails/SMS.
 export async function sendSms(phone, message) {
+  if (env.smsProvider === "textbee") return sendViaTextbee(phone, message);
+  return sendViaSemaphore(phone, message);
+}
+
+// Sends one SMS via Semaphore. With no API key configured, logs instead of
+// sending so local dev doesn't need a paid SMS account.
+async function sendViaSemaphore(phone, message) {
   if (!env.semaphore.configured) {
     logger.info("[DEV] Semaphore not configured — SMS not sent");
     return;
@@ -65,5 +73,47 @@ export async function sendSms(phone, message) {
     const detail = await res.text().catch(() => "");
     logger.error({ status: res.status, detail }, "Semaphore SMS request failed");
     throw new Error(`Semaphore request failed with status ${res.status}`);
+  }
+}
+
+// Bounds a hung request so the parent-by-parent loop in notifyParents can't be
+// stalled by one slow call. The phone-backed gateway only has to queue the
+// message here, so this is generous.
+const TEXTBEE_TIMEOUT_MS = 10_000;
+
+// Sends one SMS via TextBee (textbee.dev), which relays it through an Android
+// phone's SIM. Same skip-when-unconfigured behavior as Semaphore. Deliberately
+// no retries: TextBee's rate limits aren't documented, and a blind retry after
+// a timeout could text the parent twice.
+async function sendViaTextbee(phone, message) {
+  if (!env.textbee.configured) {
+    logger.info("TextBee not configured — SMS not sent");
+    return;
+  }
+
+  const number = normalizePhone(phone);
+  if (!PH_MOBILE_RE.test(number)) {
+    throw new Error("Recipient is not a valid PH mobile number");
+  }
+  // TextBee takes international format; the validated local forms (09…, 639…,
+  // +639…) all reduce to the same 10 digits after the country/trunk prefix.
+  const recipient = `+63${number.replace(/^(?:\+?63|0)/, "")}`;
+
+  const res = await fetch(`${env.textbee.baseUrl}/gateway/send-sms`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": env.textbee.apiKey },
+    body: JSON.stringify({
+      recipients: [recipient],
+      message,
+      ...(env.textbee.deviceId ? { deviceId: env.textbee.deviceId } : {}),
+    }),
+    signal: AbortSignal.timeout(TEXTBEE_TIMEOUT_MS),
+  });
+
+  if (!res.ok) {
+    // Server log only — the provider's body may contain account/device detail.
+    const detail = await res.text().catch(() => "");
+    logger.error({ status: res.status, detail }, "TextBee SMS request failed");
+    throw new Error(`TextBee request failed with status ${res.status}`);
   }
 }

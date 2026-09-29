@@ -129,6 +129,53 @@ function semaphoreConfig() {
 
 const semaphore = semaphoreConfig();
 
+// Which provider carries the SMS. Chosen explicitly rather than inferred from
+// which keys happen to be set, so having both configured never makes routing
+// ambiguous, and switching back is a one-variable change.
+const SMS_PROVIDERS = ["semaphore", "textbee"];
+const smsProvider = (process.env.SMS_PROVIDER || "semaphore").toLowerCase();
+if (!SMS_PROVIDERS.includes(smsProvider)) {
+  console.error(`SMS_PROVIDER must be one of: ${SMS_PROVIDERS.join(", ")}.`);
+  process.exit(1);
+}
+
+// Temporary alternative SMS provider (TextBee — textbee.dev): an Android phone
+// with a SIM acts as the gateway. Like Semaphore it is never required to start
+// the server. TEXTBEE_BASE_URL exists only for a self-hosted TextBee instance.
+function textbeeConfig() {
+  const apiKey = process.env.TEXTBEE_API_KEY;
+  if (!apiKey) return { configured: false, apiKey: null, baseUrl: null, deviceId: null };
+
+  let url;
+  try {
+    url = new URL(process.env.TEXTBEE_BASE_URL || "https://api.textbee.dev/api/v1");
+  } catch {
+    console.error("TEXTBEE_BASE_URL must be a valid URL.");
+    process.exit(1);
+  }
+  // The API key travels in a header, so never send it over plain http in production.
+  const allowed = isProduction ? ["https:"] : ["https:", "http:"];
+  if (!allowed.includes(url.protocol)) {
+    console.error(`TEXTBEE_BASE_URL must use ${isProduction ? "https" : "http(s)"}.`);
+    process.exit(1);
+  }
+
+  return {
+    configured: true,
+    apiKey,
+    baseUrl: url.href.replace(/\/+$/, ""),
+    deviceId: process.env.TEXTBEE_DEVICE_ID || null,
+  };
+}
+
+const textbee = textbeeConfig();
+
+if (isProduction && !(smsProvider === "textbee" ? textbee : semaphore).configured) {
+  // Not fatal (SMS stays optional), but without this the texts would just
+  // silently never go out.
+  console.warn(`SMS_PROVIDER is "${smsProvider}" but its API key is not set — SMS will not be sent.`);
+}
+
 // --- File storage -----------------------------------------------------------
 // "local" keeps files in ./uploads (development, or a single server without a
 // bucket). "s3" uses any S3-compatible bucket — Neon Object Storage or AWS S3;
@@ -193,6 +240,8 @@ export const env = {
   verification,
   recognition,
   semaphore,
+  smsProvider,
+  textbee,
   storage: {
     driver: storageDriver,
     s3: {

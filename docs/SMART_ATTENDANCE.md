@@ -135,6 +135,8 @@ present students only; re-marking a student's status clears a prior departure.
   settings at `smtp.resend.com` (see `.env.example`) with a sender on the verified
   `eccdsmarttrack.app` domain.
 - **SMS** goes through Semaphore (`SEMAPHORE_API_KEY`), Philippine mobile numbers
-  only. Optional: unset means SMS is skipped, never a startup failure.
+  only. Optional: unset means SMS is skipped, never a startup failure. Set
+  `SMS_PROVIDER=textbee` (plus `TEXTBEE_API_KEY`) to send through TextBee instead;
+  switch back by unsetting it.
 - Delivery is best-effort and fault-isolated per parent and per channel: a failed
   email or SMS is logged server-side and never fails the attendance write.

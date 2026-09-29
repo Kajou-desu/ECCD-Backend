@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../src/config/env.js", () => ({
-  env: { semaphore: { configured: true, apiKey: "test-key", senderName: "ECCDTrck" } },
+  env: {
+    semaphore: { configured: true, apiKey: "test-key", senderName: "ECCDTrck" },
+    smsProvider: "semaphore",
+    textbee: { configured: true, apiKey: "tb-key", baseUrl: "https://api.textbee.dev/api/v1", deviceId: null },
+  },
 }));
 vi.mock("../src/lib/logger.js", () => ({
   logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
@@ -155,5 +159,99 @@ describe("sendSms retries", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("sendSms with SMS_PROVIDER=textbee", () => {
+  beforeEach(() => {
+    env.smsProvider = "textbee";
+    env.textbee.configured = true;
+    env.textbee.apiKey = "tb-key";
+    env.textbee.baseUrl = "https://api.textbee.dev/api/v1";
+    env.textbee.deviceId = null;
+  });
+
+  afterEach(() => {
+    env.smsProvider = "semaphore";
+  });
+
+  it("never calls Semaphore", async () => {
+    await sendSms("09171234567", "hello");
+
+    expect(fetch.mock.calls[0][0]).not.toContain("semaphore.co");
+  });
+
+  it("skips (and logs) instead of sending when TextBee isn't configured", async () => {
+    env.textbee.configured = false;
+
+    await sendSms("09171234567", "hello");
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalled();
+  });
+
+  it("posts JSON to /gateway/send-sms with the key in the x-api-key header only", async () => {
+    await sendSms("0917 123 4567", "Ana Cruz arrived at school at 8:30 AM.");
+
+    const [url, options] = fetch.mock.calls[0];
+    expect(url).toBe("https://api.textbee.dev/api/v1/gateway/send-sms");
+    expect(options.method).toBe("POST");
+    expect(options.headers["x-api-key"]).toBe("tb-key");
+    expect(options.body).not.toContain("tb-key");
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(options.body)).toEqual({
+      recipients: ["+639171234567"],
+      message: "Ana Cruz arrived at school at 8:30 AM.",
+    });
+  });
+
+  it.each(["09171234567", "639171234567", "+639171234567", "0917-123-4567"])(
+    "converts %s to international format",
+    async (input) => {
+      await sendSms(input, "hello");
+      expect(JSON.parse(fetch.mock.calls[0][1].body).recipients).toEqual(["+639171234567"]);
+    }
+  );
+
+  it.each(["12345", "091712345", "639171234567890", "notanumber"])(
+    "rejects a number that isn't a PH mobile number: %s",
+    async (input) => {
+      await expect(sendSms(input, "hello")).rejects.toThrow();
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  );
+
+  it("includes deviceId only when configured", async () => {
+    env.textbee.deviceId = "dev-123";
+
+    await sendSms("09171234567", "hello");
+
+    expect(JSON.parse(fetch.mock.calls[0][1].body).deviceId).toBe("dev-123");
+  });
+
+  it("honors a self-hosted base URL", async () => {
+    env.textbee.baseUrl = "https://sms.example.org/api/v1";
+
+    await sendSms("09171234567", "hello");
+
+    expect(fetch.mock.calls[0][0]).toBe("https://sms.example.org/api/v1/gateway/send-sms");
+  });
+
+  it.each([401, 429, 500, 503])(
+    "throws on %i, logs detail server-side, and does NOT retry (could double-send)",
+    async (status) => {
+      fetch.mockResolvedValue({ ok: false, status, text: async () => "provider detail" });
+
+      await expect(sendSms("09171234567", "hello")).rejects.toThrow(String(status));
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalled();
+    }
+  );
+
+  it("does not leak the provider response body in the thrown error", async () => {
+    fetch.mockResolvedValue({ ok: false, status: 400, text: async () => "secret account detail" });
+
+    await expect(sendSms("09171234567", "hello")).rejects.not.toThrow("secret account detail");
   });
 });
