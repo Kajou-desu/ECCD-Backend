@@ -30,6 +30,13 @@ const db = vi.hoisted(() => {
         }
         return { count };
       },
+      updateMany: async ({ where, data }) => {
+        const rows = state.attendance.filter(
+          (a) => a.studentId === where.studentId && a.date.getTime() === where.date.getTime() && a.status === where.status,
+        );
+        rows.forEach((r) => Object.assign(r, data));
+        return { count: rows.length };
+      },
       findUnique: async ({ where }) => {
         const k = where.studentId_date;
         return state.attendance.find((a) => a.studentId === k.studentId && a.date.getTime() === k.date.getTime()) ?? null;
@@ -185,6 +192,21 @@ describe("recordSignal (full flow against the in-memory tables)", () => {
     await send(5, "face", 0.3, 41);
     expect((await send(5, "face", 0.3, 42)).state).toBe("pending"); // BLE still only 1 hit
     expect((await send(5, "ble", -50, 43)).state).toBe("verified"); // now BLE has 2
+  });
+
+  it("overrides a manual absent mark when face and tag are both seen, with audit evidence", async () => {
+    db.state.attendance.push({ id: 98, studentId: 5, date: DATE, status: "absent", arrivedAt: null, departedAt: null });
+    await send(5, "ble", -50, 0);
+    await send(5, "ble", -50, 1);
+    await send(5, "face", 0.3, 2);
+    const res = await send(5, "face", 0.3, 3);
+
+    expect(res.state).toBe("verified");
+    expect(db.state.attendance).toHaveLength(1);
+    expect(db.state.attendance[0]).toMatchObject({ id: 98, status: "present", arrivedAt: at(3) });
+    expect(db.state.verifications).toHaveLength(1);
+    expect(db.state.verifications[0]).toMatchObject({ attendanceId: 98 });
+    expect((await send(5, "face", 0.3, 4)).state).toBe("already_recorded"); // not re-overridden or re-audited
   });
 
   it("never overwrites an existing record (e.g. teacher already marked excused)", async () => {

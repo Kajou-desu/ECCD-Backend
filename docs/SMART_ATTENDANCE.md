@@ -7,7 +7,7 @@ at the door within a short window:
 2. their **BLE tag**, heard by an ESP32.
 
 Either one alone is never enough. A teacher can always mark attendance by hand,
-and a manual entry always wins over an automatic one.
+and a manual entry wins over an automatic one, except a manual **absent** (see below).
 
 ```
                          ┌───────────────────────────┐
@@ -38,8 +38,9 @@ Frames are handled in memory and never stored.
 - The **BLE** signal counts when the smoothed RSSI is `>= BLE_MIN_RSSI` and it has
   been seen `VERIFY_MIN_HITS` times in a row.
 - Both must be fresh: seen within `VERIFY_WINDOW_SEC` of now.
-- Then the student is marked **present** — but only if they have **no record for
-  that day yet**. An existing record (marked by a teacher, excused, or from an
+- Then the student is marked **present** — if they have **no record for that day
+  yet**, or their record is a manual **absent** (face + tag both seen means the child
+  is here, so it is overridden). Any other existing record (present, excused, from an
   earlier verification) is never overwritten.
 - Evidence (face distance, RSSI, time) is stored in `attendance_verifications`.
   The roster shows "Verified automatically". If a teacher then edits the record
