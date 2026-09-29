@@ -81,7 +81,9 @@ export async function getChildProgress(req, res, next) {
       activity: s.material?.title ?? "Untitled activity",
       category: s.material?.category ?? "General",
       status: "completed",
-      notes: "",
+      submittedAt: s.submittedAt.toISOString(),
+      // Short-lived signed URL, same mechanism as the submissions endpoint.
+      fileUrl: signFileUrl(req, s.fileUrl),
     }));
 
     res.json({
