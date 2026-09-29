@@ -5,10 +5,11 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_RE = /^\d{4}-\d{2}$/;
 const PHONE_RE = /^[0-9+\-\s()]{7,20}$/;
 
-// Philippine mobile number, with or without country code: 09XXXXXXXXX,
-// 639XXXXXXXXX or +639XXXXXXXXX (separators stripped first). Shared with
-// lib/sms.js so what we accept on save is exactly what Semaphore can deliver to.
-export const PH_MOBILE_RE = /^(?:\+?63|0)9\d{9}$/;
+// Philippine mobile number, with or without country code/trunk prefix:
+// 9XXXXXXXXX (bare 10 digits), 09XXXXXXXXX, 639XXXXXXXXX or +639XXXXXXXXX
+// (separators stripped first). Shared with lib/sms.js so what we accept on
+// save is exactly what the SMS providers can deliver to.
+export const PH_MOBILE_RE = /^(?:\+?63|0)?9\d{9}$/;
 
 export function normalizePhone(phone) {
   return String(phone ?? "").replace(/[\s\-()]/g, "");

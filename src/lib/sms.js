@@ -43,10 +43,13 @@ async function sendViaSemaphore(phone, message) {
     return;
   }
 
-  const number = normalizePhone(phone);
-  if (!PH_MOBILE_RE.test(number)) {
+  const normalized = normalizePhone(phone);
+  if (!PH_MOBILE_RE.test(normalized)) {
     throw new Error("Recipient is not a valid PH mobile number");
   }
+  // Numbers may be stored as bare 10 digits (9XXXXXXXXX); Semaphore wants the
+  // local 09XXXXXXXXX form, so restore the trunk 0.
+  const number = normalized.startsWith("9") ? `0${normalized}` : normalized;
 
   const body = new URLSearchParams({
     apikey: env.semaphore.apiKey,
@@ -95,8 +98,9 @@ async function sendViaTextbee(phone, message) {
   if (!PH_MOBILE_RE.test(number)) {
     throw new Error("Recipient is not a valid PH mobile number");
   }
-  // TextBee takes international format; the validated local forms (09…, 639…,
-  // +639…) all reduce to the same 10 digits after the country/trunk prefix.
+  // TextBee takes international format; the validated forms (9…, 09…, 639…,
+  // +639…) all reduce to the same 10 digits after the country/trunk prefix,
+  // so a stored bare 10-digit number just gets "+63" put in front.
   const recipient = `+63${number.replace(/^(?:\+?63|0)/, "")}`;
 
   const res = await fetch(`${env.textbee.baseUrl}/gateway/send-sms`, {

@@ -135,7 +135,7 @@ describe("requirePhone", () => {
 });
 
 describe("requirePhMobile", () => {
-  it.each(["09171234567", "639171234567", "+639171234567", "+63 917 123 4567", "0917-123-4567", "(0917) 123 4567"])(
+  it.each(["9171234567", "09171234567", "639171234567", "+639171234567", "+63 917 123 4567", "0917-123-4567", "(0917) 123 4567"])(
     "accepts a PH mobile number: %s",
     (input) => {
       expect(requirePhMobile(input)).toBe(input.trim());

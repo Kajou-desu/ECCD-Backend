@@ -40,7 +40,7 @@ describe("sendSms", () => {
     expect(logger.info).toHaveBeenCalled();
   });
 
-  it.each(["09171234567", "639171234567", "+639171234567", "0917 123 4567", "0917-123-4567"])(
+  it.each(["9171234567", "09171234567", "639171234567", "+639171234567", "0917 123 4567", "0917-123-4567"])(
     "accepts a valid PH mobile number in various formats: %s",
     async (input) => {
       await sendSms(input, "hello");
@@ -67,6 +67,12 @@ describe("sendSms", () => {
     expect(body.get("number")).toBe("09171234567"); // spaces stripped
     expect(body.get("message")).toBe("Ana Cruz arrived at school at 8:30 AM.");
     expect(body.get("sendername")).toBe("ECCDTrck");
+  });
+
+  it("restores the leading 0 for a stored bare 10-digit number", async () => {
+    await sendSms("9171234567", "hello");
+
+    expect(new URLSearchParams(fetch.mock.calls[0][1].body).get("number")).toBe("09171234567");
   });
 
   it("omits sendername when none is configured", async () => {
@@ -205,7 +211,7 @@ describe("sendSms with SMS_PROVIDER=textbee", () => {
     });
   });
 
-  it.each(["09171234567", "639171234567", "+639171234567", "0917-123-4567"])(
+  it.each(["9171234567", "09171234567", "639171234567", "+639171234567", "0917-123-4567"])(
     "converts %s to international format",
     async (input) => {
       await sendSms(input, "hello");
