@@ -21,19 +21,25 @@ const smtpVars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS"];
 const missingSmtp = smtpVars.filter((key) => !process.env[key]);
 const smtpConfigured = missingSmtp.length === 0;
 
-if (isProduction && !smtpConfigured) {
-  // Fail closed in production: without SMTP, OTP emails silently never
-  // arrive and users are locked out of password reset.
+// RESEND_API_KEY sends email over Resend's HTTPS API, which works on hosts that
+// block outbound SMTP ports (e.g. Railway Free/Trial/Hobby). SMTP stays as the
+// fallback when it isn't set.
+const resendApiKey = process.env.RESEND_API_KEY || undefined;
+const emailConfigured = Boolean(resendApiKey) || smtpConfigured;
+
+if (isProduction && !emailConfigured) {
+  // Fail closed in production: without a mail transport, OTP emails silently
+  // never arrive and users are locked out of password reset.
   console.error(
-    `Missing required environment variables for production: ${missingSmtp.join(", ")}`
+    `Missing required environment variables for production: RESEND_API_KEY (or ${missingSmtp.join(", ")})`
   );
   process.exit(1);
 }
 
-if (!isProduction && !smtpConfigured) {
+if (!isProduction && !emailConfigured) {
   console.warn(
-    "SMTP is not configured — password reset OTPs will be logged to the console " +
-      "instead of emailed. Set SMTP_HOST/PORT/USER/PASS to test real delivery."
+    "Email is not configured — password reset OTPs will be logged to the console " +
+      "instead of emailed. Set RESEND_API_KEY (or SMTP_HOST/PORT/USER/PASS) to test real delivery."
   );
 }
 
@@ -275,6 +281,10 @@ export const env = {
           ? undefined
           : process.env.S3_FORCE_PATH_STYLE === "true",
     },
+  },
+  emailConfigured,
+  resend: {
+    apiKey: resendApiKey,
   },
   smtp: {
     configured: smtpConfigured,

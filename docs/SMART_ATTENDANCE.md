@@ -131,9 +131,9 @@ hasn't already departed) and sends the same three notifications. The teacher
 dashboard and Attendance page show a confirmed **Mark departed** button for
 present students only; re-marking a student's status clears a prior departure.
 
-- **Email** goes through the existing SMTP mailer. To use Resend, point the SMTP
-  settings at `smtp.resend.com` (see `.env.example`) with a sender on the verified
-  `eccdsmarttrack.app` domain.
+- **Email** goes through Resend's HTTPS API when `RESEND_API_KEY` is set (use a
+  sender on the verified `eccdsmarttrack.app` domain in `SMTP_FROM`), and falls
+  back to SMTP otherwise (see `.env.example`).
 - **SMS** goes through Semaphore (`SEMAPHORE_API_KEY`), Philippine mobile numbers
   only. Optional: unset means SMS is skipped, never a startup failure. Set
   `SMS_PROVIDER=textbee` (plus `TEXTBEE_API_KEY`) to send through TextBee instead;
