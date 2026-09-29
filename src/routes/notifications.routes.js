@@ -3,6 +3,8 @@ import { requireAuth } from "../middleware/auth.js";
 import { notificationIpLimiter, notificationUserLimiter } from "../middleware/rateLimit.js";
 import {
   getNotifications,
+  getNotificationPreferences,
+  updateNotificationPreferences,
   markNotificationRead,
   markAllNotificationsRead,
   dismissNotification,
@@ -15,6 +17,8 @@ const router = Router();
 router.use(notificationIpLimiter, requireAuth, notificationUserLimiter);
 
 router.get("/", getNotifications);
+router.get("/preferences", getNotificationPreferences);
+router.put("/preferences", updateNotificationPreferences);
 router.patch("/read-all", markAllNotificationsRead);
 router.patch("/:id/read", markNotificationRead);
 router.delete("/:id", dismissNotification);

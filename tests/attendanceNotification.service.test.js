@@ -27,7 +27,10 @@ const { notifyArrival, notifyDeparture } = await import(
 const NOW = new Date("2026-09-28T00:30:00.000Z"); // 8:30 AM in Asia/Manila (default school tz)
 
 function parent(over = {}) {
-  return { parent: { id: 1, email: "mom@example.com", phone: "09171234567", ...over } };
+  // notifyBy* mirror the DB defaults (true) so existing cases keep meaning "opted in".
+  return {
+    parent: { id: 1, email: "mom@example.com", phone: "09171234567", notifyByEmail: true, notifyBySms: true, ...over },
+  };
 }
 
 beforeEach(() => {
@@ -128,6 +131,54 @@ describe("notifyArrival", () => {
       "email:dad@example.com:end",
       "sms:09181234567",
     ]);
+  });
+
+  it("skips email for a parent who opted out, but still sends in-app and SMS", async () => {
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([parent({ notifyByEmail: false })]);
+
+    await notifyArrival(5, NOW);
+
+    expect(prisma.notification.create).toHaveBeenCalledTimes(1);
+    expect(sendAttendanceEmail).not.toHaveBeenCalled();
+    expect(sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips SMS for a parent who opted out, but still sends in-app and email", async () => {
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([parent({ notifyBySms: false })]);
+
+    await notifyArrival(5, NOW);
+
+    expect(prisma.notification.create).toHaveBeenCalledTimes(1);
+    expect(sendAttendanceEmail).toHaveBeenCalledTimes(1);
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it("still writes the in-app notification when a parent opted out of both channels", async () => {
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([parent({ notifyByEmail: false, notifyBySms: false })]);
+
+    await notifyDeparture(5, NOW);
+
+    expect(prisma.notification.create).toHaveBeenCalledTimes(1);
+    expect(sendAttendanceEmail).not.toHaveBeenCalled();
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it("applies each parent's own preference independently", async () => {
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([
+      parent({ id: 1, email: "mom@example.com", phone: "09171234567", notifyBySms: false }),
+      parent({ id: 2, email: "dad@example.com", phone: "09181234567", notifyByEmail: false }),
+    ]);
+
+    await notifyArrival(5, NOW);
+
+    expect(sendAttendanceEmail).toHaveBeenCalledTimes(1);
+    expect(sendAttendanceEmail).toHaveBeenCalledWith("mom@example.com", expect.any(String), expect.any(String));
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    expect(sendSms).toHaveBeenCalledWith("09181234567", expect.any(String));
   });
 
   it("never throws, even if the initial lookup itself fails", async () => {

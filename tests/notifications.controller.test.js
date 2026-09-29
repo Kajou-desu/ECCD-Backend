@@ -7,12 +7,18 @@ vi.mock("../src/lib/prisma.js", () => ({
       updateMany: vi.fn(),
       deleteMany: vi.fn(),
     },
+    user: {
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
   },
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
 const {
   getNotifications,
+  getNotificationPreferences,
+  updateNotificationPreferences,
   markNotificationRead,
   markAllNotificationsRead,
   dismissNotification,
@@ -148,5 +154,83 @@ describe("dismissAllNotifications", () => {
 
     expect(prisma.notification.deleteMany).toHaveBeenCalledWith({ where: { userId: 7 } });
     expect(res.status).toHaveBeenCalledWith(204);
+  });
+});
+
+describe("getNotificationPreferences", () => {
+  it("reads the current user's own preferences, identified by the token", async () => {
+    prisma.user.findUnique.mockResolvedValue({ notifyByEmail: true, notifyBySms: false });
+
+    const req = { user: { id: 7 }, query: { userId: "999" } }; // a client-supplied id must be ignored
+    const res = mockRes();
+    const next = vi.fn();
+
+    await getNotificationPreferences(req, res, next);
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { id: 7 },
+      select: { notifyByEmail: true, notifyBySms: true },
+    });
+    expect(res.json).toHaveBeenCalledWith({ notifyByEmail: true, notifyBySms: false });
+  });
+
+  it("404s when the user row no longer exists", async () => {
+    prisma.user.findUnique.mockResolvedValue(null);
+
+    const res = mockRes();
+    await getNotificationPreferences({ user: { id: 7 } }, res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+});
+
+describe("updateNotificationPreferences", () => {
+  async function run(body) {
+    const req = { user: { id: 7 }, body };
+    const res = mockRes();
+    const next = vi.fn();
+    await updateNotificationPreferences(req, res, next);
+    return { res, next };
+  }
+
+  it("updates only the caller's row and only the fields sent", async () => {
+    prisma.user.update.mockResolvedValue({ notifyByEmail: true, notifyBySms: false });
+
+    const { res, next } = await run({ notifyBySms: false });
+
+    expect(next).not.toHaveBeenCalled();
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 7 },
+      data: { notifyBySms: false },
+      select: { notifyByEmail: true, notifyBySms: true },
+    });
+    expect(res.json).toHaveBeenCalledWith({ notifyByEmail: true, notifyBySms: false });
+  });
+
+  it("accepts both channels at once", async () => {
+    prisma.user.update.mockResolvedValue({ notifyByEmail: false, notifyBySms: false });
+
+    await run({ notifyByEmail: false, notifyBySms: false });
+
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { notifyByEmail: false, notifyBySms: false } }),
+    );
+  });
+
+  it.each([
+    ["an empty body", {}],
+    ["a null body", null],
+    ["an array body", [true]],
+    ["a string instead of a boolean", { notifyByEmail: "false" }],
+    ["a number instead of a boolean", { notifyBySms: 0 }],
+    ["an unknown field", { notifyByEmail: true, role: "Admin" }],
+    ["an id trying to target another user", { id: 1, notifyByEmail: true }],
+    ["a __proto__ key", JSON.parse('{"__proto__": {"role": "Admin"}}')],
+  ])("rejects %s without touching the database", async (_label, body) => {
+    const { next } = await run(body);
+
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next.mock.calls[0][0].statusCode ?? next.mock.calls[0][0].status).toBe(400);
   });
 });

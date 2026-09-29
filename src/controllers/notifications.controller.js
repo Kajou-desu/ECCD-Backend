@@ -1,5 +1,59 @@
 import { prisma } from "../lib/prisma.js";
+import { AppError } from "../middleware/errorHandler.js";
 import { parseId } from "../utils/validate.js";
+
+// Only these fields can be changed through the preferences endpoint. Anything
+// else in the body is rejected rather than ignored, so a client can never
+// reach other user columns (role, isActive, ...) through this route.
+const PREFERENCE_KEYS = ["notifyByEmail", "notifyBySms"];
+const PREFERENCE_SELECT = { notifyByEmail: true, notifyBySms: true };
+
+// GET /api/notifications/preferences
+export async function getNotificationPreferences(req, res, next) {
+  try {
+    // Identity comes from the verified token (req.user), never from the request.
+    const prefs = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: PREFERENCE_SELECT,
+    });
+
+    if (!prefs) return res.status(404).json({ message: "Not found" });
+    res.json(prefs);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// PUT /api/notifications/preferences  { notifyByEmail?: boolean, notifyBySms?: boolean }
+export async function updateNotificationPreferences(req, res, next) {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AppError("Invalid notification preferences", 400);
+    }
+
+    const data = {};
+    for (const key of Object.keys(body)) {
+      if (!PREFERENCE_KEYS.includes(key) || typeof body[key] !== "boolean") {
+        throw new AppError("Invalid notification preferences", 400);
+      }
+      data[key] = body[key];
+    }
+    if (Object.keys(data).length === 0) {
+      throw new AppError("Invalid notification preferences", 400);
+    }
+
+    const prefs = await prisma.user.update({
+      where: { id: req.user.id },
+      data,
+      select: PREFERENCE_SELECT,
+    });
+
+    res.json(prefs);
+  } catch (err) {
+    next(err);
+  }
+}
 
 // GET /api/notifications?unread=true
 export async function getNotifications(req, res, next) {

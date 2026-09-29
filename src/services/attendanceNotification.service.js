@@ -21,7 +21,9 @@ async function notifyParents(studentId, buildMessages) {
     prisma.student.findUnique({ where: { id: studentId }, select: { name: true } }),
     prisma.parentChild.findMany({
       where: { studentId },
-      include: { parent: { select: { id: true, email: true, phone: true } } },
+      include: {
+        parent: { select: { id: true, email: true, phone: true, notifyByEmail: true, notifyBySms: true } },
+      },
     }),
   ]);
   if (!student || links.length === 0) return;
@@ -39,7 +41,8 @@ async function notifyParents(studentId, buildMessages) {
       logger.error({ err, studentId, parentId: parent.id }, "Failed to write in-app attendance notification");
     }
 
-    if (parent.email) {
+    // Email/SMS honor the parent's own opt-out; the in-app row above is always written.
+    if (parent.email && parent.notifyByEmail) {
       try {
         await sendAttendanceEmail(parent.email, emailSubject, message);
       } catch (err) {
@@ -47,7 +50,7 @@ async function notifyParents(studentId, buildMessages) {
       }
     }
 
-    if (parent.phone) {
+    if (parent.phone && parent.notifyBySms) {
       try {
         await sendSms(parent.phone, smsText);
       } catch (err) {

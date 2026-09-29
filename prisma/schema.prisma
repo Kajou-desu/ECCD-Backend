@@ -39,6 +39,11 @@ model User {
   role         Role      @default(Parent)
   isActive     Boolean   @default(true)
   tokenVersion Int       @default(0)
+  // Optional delivery channels for attendance alerts (arrival/departure).
+  // In-app is always on, and OTP/security emails are never affected. Default
+  // true so existing accounts keep receiving what they receive today.
+  notifyByEmail Boolean   @default(true)
+  notifyBySms   Boolean   @default(true)
   createdAt    DateTime  @default(now())
   lastLoginAt  DateTime?
   profilePicture String?
