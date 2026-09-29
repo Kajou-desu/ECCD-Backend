@@ -74,6 +74,17 @@ describe("getMonitor", () => {
     expect(body.session).toMatchObject({ id: 3, date: "2026-09-20", status: "active" });
   });
 
+  it("reports both_seen when face and tag are live but the student has no verification row", async () => {
+    prisma.attendanceSignal.findMany.mockResolvedValue([
+      sig(1, "Juan", "face", 0.3, 3, ago(2)),
+      sig(1, "Juan", "ble", -55, 3, ago(2)),
+    ]);
+    prisma.attendanceVerification.findMany.mockResolvedValue([]);
+    const { body } = await monitor();
+    expect(body.students.map((s) => [s.name, s.status])).toEqual([["Juan", "both_seen"]]);
+    expect(body.counts).toEqual({ verified: 0, faceOnly: 0, bleOnly: 0 });
+  });
+
   it("does not show evidence the verifier itself would ignore", async () => {
     prisma.attendanceSignal.findMany.mockResolvedValue([
       sig(1, "Stale", "face", 0.3, 3, ago(40)),   // older than the 30 s window
