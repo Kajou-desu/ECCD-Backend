@@ -176,6 +176,26 @@ if (isProduction && !(smsProvider === "textbee" ? textbee : semaphore).configure
   console.warn(`SMS_PROVIDER is "${smsProvider}" but its API key is not set — SMS will not be sent.`);
 }
 
+// Optional Web Push (browser notifications). Like SMS it is never required to
+// start the server: without VAPID keys, push is skipped and the settings page
+// reports it as unavailable. Generate a pair once with
+// `npx web-push generate-vapid-keys` — the private key is a secret.
+function vapidConfig() {
+  const publicKey = process.env.VAPID_PUBLIC_KEY;
+  const privateKey = process.env.VAPID_PRIVATE_KEY;
+  if (!publicKey || !privateKey) return { configured: false, publicKey: null, privateKey: null, subject: null };
+
+  // The push services use this to contact the operator about misuse.
+  const subject = process.env.VAPID_SUBJECT || "";
+  if (!/^(mailto:[^\s@]+@[^\s@]+|https:\/\/\S+)$/.test(subject)) {
+    console.error("VAPID_SUBJECT must be a mailto: address or an https:// URL when VAPID keys are set.");
+    process.exit(1);
+  }
+  return { configured: true, publicKey, privateKey, subject };
+}
+
+const vapid = vapidConfig();
+
 // --- File storage -----------------------------------------------------------
 // "local" keeps files in ./uploads (development, or a single server without a
 // bucket). "s3" uses any S3-compatible bucket — Neon Object Storage or AWS S3;
@@ -242,6 +262,7 @@ export const env = {
   semaphore,
   smsProvider,
   textbee,
+  vapid,
   storage: {
     driver: storageDriver,
     s3: {

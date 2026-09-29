@@ -5,10 +5,12 @@ vi.mock("../src/lib/prisma.js", () => ({
     student: { findUnique: vi.fn() },
     parentChild: { findMany: vi.fn() },
     notification: { create: vi.fn() },
+    pushSubscription: { deleteMany: vi.fn() },
   },
 }));
 vi.mock("../src/lib/mailer.js", () => ({ sendAttendanceEmail: vi.fn() }));
 vi.mock("../src/lib/sms.js", () => ({ sendSms: vi.fn() }));
+vi.mock("../src/lib/push.js", () => ({ sendPush: vi.fn() }));
 // Errors are expected to be logged (that's the point of this service) —
 // stub the logger so a passing test doesn't print noise, and so we can
 // assert on it where relevant.
@@ -19,6 +21,7 @@ vi.mock("../src/lib/logger.js", () => ({
 const { prisma } = await import("../src/lib/prisma.js");
 const { sendAttendanceEmail } = await import("../src/lib/mailer.js");
 const { sendSms } = await import("../src/lib/sms.js");
+const { sendPush } = await import("../src/lib/push.js");
 const { logger } = await import("../src/lib/logger.js");
 const { notifyArrival, notifyDeparture } = await import(
   "../src/services/attendanceNotification.service.js"
@@ -29,7 +32,15 @@ const NOW = new Date("2026-09-28T00:30:00.000Z"); // 8:30 AM in Asia/Manila (def
 function parent(over = {}) {
   // notifyBy* mirror the DB defaults (true) so existing cases keep meaning "opted in".
   return {
-    parent: { id: 1, email: "mom@example.com", phone: "09171234567", notifyByEmail: true, notifyBySms: true, ...over },
+    parent: {
+      id: 1,
+      email: "mom@example.com",
+      phone: "09171234567",
+      notifyByEmail: true,
+      notifyBySms: true,
+      pushSubscriptions: [],
+      ...over,
+    },
   };
 }
 
@@ -38,6 +49,8 @@ beforeEach(() => {
   prisma.notification.create.mockResolvedValue({});
   sendAttendanceEmail.mockResolvedValue(undefined);
   sendSms.mockResolvedValue(undefined);
+  sendPush.mockResolvedValue("sent");
+  prisma.pushSubscription.deleteMany.mockResolvedValue({ count: 1 });
 });
 
 describe("notifyArrival", () => {
@@ -179,6 +192,66 @@ describe("notifyArrival", () => {
     expect(sendAttendanceEmail).toHaveBeenCalledWith("mom@example.com", expect.any(String), expect.any(String));
     expect(sendSms).toHaveBeenCalledTimes(1);
     expect(sendSms).toHaveBeenCalledWith("09181234567", expect.any(String));
+  });
+
+  it("pushes to every device a parent enabled push on, with the same wording", async () => {
+    const subs = [
+      { id: 11, endpoint: "https://fcm.googleapis.com/a", p256dh: "P1", auth: "A1" },
+      { id: 12, endpoint: "https://fcm.googleapis.com/b", p256dh: "P2", auth: "A2" },
+    ];
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([parent({ pushSubscriptions: subs })]);
+
+    await notifyArrival(5, NOW);
+
+    expect(sendPush).toHaveBeenCalledTimes(2);
+    expect(sendPush).toHaveBeenCalledWith(subs[0], {
+      title: "Arrival",
+      body: expect.stringContaining("Ana Cruz arrived at school"),
+    });
+    expect(sendPush).toHaveBeenCalledWith(subs[1], expect.objectContaining({ title: "Arrival" }));
+  });
+
+  it("sends no push to a parent with no subscribed device", async () => {
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([parent()]);
+
+    await notifyArrival(5, NOW);
+
+    expect(sendPush).not.toHaveBeenCalled();
+  });
+
+  it("deletes a subscription the browser reports as gone, and only that one", async () => {
+    const subs = [
+      { id: 11, endpoint: "https://fcm.googleapis.com/a", p256dh: "P1", auth: "A1" },
+      { id: 12, endpoint: "https://fcm.googleapis.com/b", p256dh: "P2", auth: "A2" },
+    ];
+    sendPush.mockResolvedValueOnce("gone").mockResolvedValueOnce("sent");
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([parent({ pushSubscriptions: subs })]);
+
+    await notifyArrival(5, NOW);
+
+    expect(prisma.pushSubscription.deleteMany).toHaveBeenCalledTimes(1);
+    expect(prisma.pushSubscription.deleteMany).toHaveBeenCalledWith({ where: { id: 11 } });
+  });
+
+  it("a failing push never blocks the other devices, parents or channels", async () => {
+    const sub = (id) => ({ id, endpoint: `https://fcm.googleapis.com/${id}`, p256dh: "P", auth: "A" });
+    sendPush.mockRejectedValueOnce(new Error("push service down"));
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
+    prisma.parentChild.findMany.mockResolvedValue([
+      parent({ id: 1, pushSubscriptions: [sub(11), sub(12)] }),
+      parent({ id: 2, email: "dad@example.com", phone: "09181234567", pushSubscriptions: [sub(21)] }),
+    ]);
+
+    await notifyArrival(5, NOW);
+
+    expect(sendPush).toHaveBeenCalledTimes(3);
+    expect(sendAttendanceEmail).toHaveBeenCalledTimes(2);
+    expect(sendSms).toHaveBeenCalledTimes(2);
+    expect(prisma.notification.create).toHaveBeenCalledTimes(2);
+    expect(logger.error).toHaveBeenCalledWith(expect.anything(), "Failed to send attendance push");
   });
 
   it("never throws, even if the initial lookup itself fails", async () => {

@@ -5,6 +5,9 @@ import {
   getNotifications,
   getNotificationPreferences,
   updateNotificationPreferences,
+  getPushPublicKey,
+  subscribePush,
+  unsubscribePush,
   markNotificationRead,
   markAllNotificationsRead,
   dismissNotification,
@@ -19,6 +22,9 @@ router.use(notificationIpLimiter, requireAuth, notificationUserLimiter);
 router.get("/", getNotifications);
 router.get("/preferences", getNotificationPreferences);
 router.put("/preferences", updateNotificationPreferences);
+router.get("/push/public-key", getPushPublicKey);
+router.post("/push/subscribe", subscribePush);
+router.post("/push/unsubscribe", unsubscribePush);
 router.patch("/read-all", markAllNotificationsRead);
 router.patch("/:id/read", markNotificationRead);
 router.delete("/:id", dismissNotification);

@@ -49,6 +49,7 @@ model User {
   profilePicture String?
   children     ParentChild[]
   notifications Notification[]
+  pushSubscriptions PushSubscription[]
   accountActionOtps AccountActionOtp[]
   attendanceSessions AttendanceSession[]
   weeklyGoalsCreated WeeklyGoal[]
@@ -462,4 +463,21 @@ model Notification {
   @@index([userId])
   @@index([userId, isRead])
   @@map("notifications")
+}
+
+// One row per browser/device a user has allowed push on. The browser (not the
+// user) owns the endpoint, so it is unique: signing in as someone else on the
+// same browser moves the row to them instead of duplicating it.
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }

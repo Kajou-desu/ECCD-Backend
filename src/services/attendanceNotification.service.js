@@ -3,6 +3,7 @@ import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
 import { sendAttendanceEmail } from "../lib/mailer.js";
 import { sendSms } from "../lib/sms.js";
+import { sendPush } from "../lib/push.js";
 
 // Wall-clock time in the school's own timezone, e.g. "7:42 AM" — the same
 // zone attendance itself is computed in (see utils/schoolDate.js), not the
@@ -12,7 +13,7 @@ function formatSchoolTime(date, timeZone = env.schoolTimezone) {
 }
 
 // Fans a message out to every parent/guardian linked to a student: an
-// in-app Notification row, plus best-effort email and SMS. Each channel, for
+// in-app Notification row, plus best-effort email, SMS and push. Each channel, for
 // each parent, is caught independently — one bounced email or bad phone
 // number must never stop the others, and none of this may ever throw back
 // into the attendance write that triggered it (see callers).
@@ -22,7 +23,16 @@ async function notifyParents(studentId, buildMessages) {
     prisma.parentChild.findMany({
       where: { studentId },
       include: {
-        parent: { select: { id: true, email: true, phone: true, notifyByEmail: true, notifyBySms: true } },
+        parent: {
+          select: {
+            id: true,
+            email: true,
+            phone: true,
+            notifyByEmail: true,
+            notifyBySms: true,
+            pushSubscriptions: { select: { id: true, endpoint: true, p256dh: true, auth: true } },
+          },
+        },
       },
     }),
   ]);
@@ -55,6 +65,20 @@ async function notifyParents(studentId, buildMessages) {
         await sendSms(parent.phone, smsText);
       } catch (err) {
         logger.error({ err, studentId, parentId: parent.id }, "Failed to send attendance SMS");
+      }
+    }
+
+    // Push goes to every device the parent enabled it on; a subscription is
+    // the opt-in, so there is no separate flag. A device the browser reports
+    // as gone is deleted so it isn't retried on every later alert.
+    for (const subscription of parent.pushSubscriptions) {
+      try {
+        const result = await sendPush(subscription, { title, body: message });
+        if (result === "gone") {
+          await prisma.pushSubscription.deleteMany({ where: { id: subscription.id } });
+        }
+      } catch (err) {
+        logger.error({ err, studentId, parentId: parent.id }, "Failed to send attendance push");
       }
     }
   }
