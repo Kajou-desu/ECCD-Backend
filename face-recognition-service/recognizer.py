@@ -73,13 +73,14 @@ class KnownFaces:
         return Match(self.ids[int(order[0])], best, margin)
 
 
-def encode_student_dir(path: str, label: str = "") -> tuple[np.ndarray | None, int]:
-    """Averaged encoding of one student's folder, and how many photos were usable.
+def analyze_student_dir(path: str, label: str = "") -> tuple[np.ndarray | None, list[str]]:
+    """Averaged encoding of one student's folder, and the names of the usable photos.
 
     A photo is usable only if it holds exactly one face (otherwise we can't know
-    whose encoding it is). Returns (None, 0) when nothing is usable.
+    whose encoding it is). Returns (None, []) when nothing is usable.
     """
     vectors = []
+    usable: list[str] = []
     photos = sorted(os.scandir(path), key=lambda e: e.name)[:MAX_IMAGES_PER_STUDENT]
     for index, photo in enumerate(photos):
         ext = os.path.splitext(photo.name)[1].lower()
@@ -97,9 +98,16 @@ def encode_student_dir(path: str, label: str = "") -> tuple[np.ndarray | None, i
             log.warning("Student %s photo #%d skipped: expected 1 face, found %d.", label, index, len(found))
             continue
         vectors.append(found[0])
+        usable.append(photo.name)
     if not vectors:
-        return None, 0
-    return np.mean(vectors, axis=0), len(vectors)
+        return None, []
+    return np.mean(vectors, axis=0), usable
+
+
+def encode_student_dir(path: str, label: str = "") -> tuple[np.ndarray | None, int]:
+    """Averaged encoding of one student's folder, and how many photos were usable."""
+    encoding, usable = analyze_student_dir(path, label)
+    return encoding, len(usable)
 
 
 def load_known_faces(root: str) -> KnownFaces:

@@ -22,6 +22,23 @@ function toDate(dateString) {
   return new Date(`${dateString}T00:00:00.000Z`);
 }
 
+// Attendance can be recorded for today or any past day, never a future one.
+// "Today" is the school's own calendar day, and YYYY-MM-DD strings compare
+// correctly as plain strings.
+function assertNotFutureDate(dateString) {
+  if (dateString > schoolDateString()) {
+    throw new AppError("Attendance cannot be recorded for a future date", 400);
+  }
+}
+
+// A real arrival time exists only when the teacher marks today's record. A
+// back-dated "present" has no known arrival, so it stays null instead of
+// being stamped with the moment of editing (which would also make the
+// parent view count it as late).
+function arrivedAtFor(status, dateString) {
+  return status === "present" && dateString === schoolDateString() ? new Date() : null;
+}
+
 // Teacher/admin only (enforced at route level) — full roster view.
 // useAttendance.js expects a FLAT record where `id` is the student's own id
 // (it gets passed straight into updateAttendance(id, ...) -> PUT
@@ -90,6 +107,7 @@ export async function updateAttendance(req, res, next) {
     const studentId = parseId(req.params.studentId, "studentId");
     const date = requireDateString(req.body.date);
     const status = requireAttendanceStatus(req.body.status);
+    assertNotFutureDate(date);
 
     // Authorize BEFORE any read or write: a Teacher may only mark their own
     // students, otherwise this would also alert another class's parents.
@@ -111,7 +129,7 @@ export async function updateAttendance(req, res, next) {
       where: { studentId_date: { studentId, date: toDate(date) } },
       update: {
         status,
-        arrivedAt: status === "present" ? new Date() : null,
+        arrivedAt: arrivedAtFor(status, date),
         // Re-marking a status re-asserts the day from scratch: a stale
         // departure must not survive (e.g. present -> departed -> absent ->
         // present would otherwise show as already departed).
@@ -121,7 +139,7 @@ export async function updateAttendance(req, res, next) {
         studentId,
         date: toDate(date),
         status,
-        arrivedAt: status === "present" ? new Date() : null,
+        arrivedAt: arrivedAtFor(status, date),
       },
     });
     // A manual edit supersedes any automatic evidence for this record.
@@ -193,29 +211,34 @@ export async function recordAttendance(req, res, next) {
       return res.status(400).json({ message: "Too many records in one request" });
     }
 
-    const validated = entries.map((e) => ({
-      studentId: parseId(e.studentId, "studentId"),
-      date: toDate(requireDateString(e.date)),
-      status: requireAttendanceStatus(e.status),
-    }));
+    const validated = entries.map((e) => {
+      const dateString = requireDateString(e.date);
+      assertNotFutureDate(dateString);
+      return {
+        studentId: parseId(e.studentId, "studentId"),
+        dateString,
+        date: toDate(dateString),
+        status: requireAttendanceStatus(e.status),
+      };
+    });
 
     // All-or-nothing ownership check before the transaction opens.
     await assertCanAccessStudents(req.user, validated.map((e) => e.studentId));
 
     const results = await prisma.$transaction(
-      validated.map(({ studentId, date, status }) =>
+      validated.map(({ studentId, date, dateString, status }) =>
         prisma.attendance.upsert({
           where: { studentId_date: { studentId, date } },
           update: {
             status,
-            arrivedAt: status === "present" ? new Date() : null,
+            arrivedAt: arrivedAtFor(status, dateString),
             departedAt: null,
           },
           create: {
             studentId,
             date,
             status,
-            arrivedAt: status === "present" ? new Date() : null,
+            arrivedAt: arrivedAtFor(status, dateString),
           },
         })
       )

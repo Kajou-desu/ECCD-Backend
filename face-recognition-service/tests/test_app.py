@@ -170,8 +170,32 @@ class TestEnroll:
         monkeypatch.setattr(recognizer.face_recognition, "face_encodings", lambda img: [np.zeros(128)])
         r = self.enroll(client, 5, [self.photo()])
         assert r.status_code == 200
-        assert r.json() == {"studentId": 5, "photosReceived": 1, "enrolled": True}
+        assert r.json() == {
+            "studentId": 5,
+            "photosReceived": 1,
+            "photosUsable": 1,
+            "photosRejected": 0,
+            "enrolled": True,
+        }
         assert (tmp_path / "5" / "0.jpg").exists()
+
+    def test_photos_without_exactly_one_face_are_not_stored(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        # Photos are encoded in name order: 0 -> one face, 1 -> two faces, 2 -> none.
+        results = iter([[np.zeros(128)], [np.zeros(128), np.ones(128)], []])
+        monkeypatch.setattr(recognizer.face_recognition, "face_encodings", lambda img: next(results))
+
+        r = self.enroll(client, 5, [self.photo(name=f"p{i}.jpg") for i in range(3)])
+        assert r.status_code == 200
+        assert r.json() == {
+            "studentId": 5,
+            "photosReceived": 3,
+            "photosUsable": 1,
+            "photosRejected": 2,
+            "enrolled": True,
+        }
+        # Only the photo that is actually used for matching is kept on disk.
+        assert [p.name for p in (tmp_path / "5").iterdir()] == ["0.jpg"]
 
     def test_no_usable_face_is_rejected_and_keeps_the_existing_enrollment(self, client, tmp_path, monkeypatch):
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))

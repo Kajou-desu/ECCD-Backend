@@ -299,3 +299,79 @@ describe("departedAt in responses", () => {
     expect(res.json.mock.calls[0][0][0].departedAt).toBe(departedAt);
   });
 });
+
+describe("future dates are rejected", () => {
+  const tomorrow = () => {
+    const d = new Date(`${schoolDateString()}T00:00:00.000Z`);
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  };
+
+  it("updateAttendance refuses a future date before touching the DB", async () => {
+    const next = vi.fn();
+    await updateAttendance(
+      { params: { studentId: "5" }, body: { date: tomorrow(), status: "present" } },
+      mockRes(), next,
+    );
+    expect(next.mock.calls[0][0].status).toBe(400);
+    expect(prisma.attendance.upsert).not.toHaveBeenCalled();
+  });
+
+  it("recordAttendance rejects the whole batch if any entry is in the future", async () => {
+    const next = vi.fn();
+    await recordAttendance(
+      {
+        user: admin,
+        body: [
+          { studentId: 1, date: schoolDateString(), status: "present" },
+          { studentId: 2, date: tomorrow(), status: "present" },
+        ],
+      },
+      mockRes(), next,
+    );
+    expect(next.mock.calls[0][0].status).toBe(400);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("still accepts today", async () => {
+    prisma.attendance.upsert.mockResolvedValue({ id: 1, studentId: 5, status: "absent" });
+    const next = vi.fn();
+    await updateAttendance(
+      { params: { studentId: "5" }, body: { date: schoolDateString(), status: "absent" } },
+      mockRes(), next,
+    );
+    expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe("arrivedAt is only stamped for today", () => {
+  it("leaves arrivedAt null when a past day is marked present", async () => {
+    prisma.attendance.upsert.mockResolvedValue({ id: 55, studentId: 5, status: "present", arrivedAt: null });
+    await updateAttendance(
+      { params: { studentId: "5" }, body: { date: "2020-01-15", status: "present" } },
+      mockRes(), vi.fn(),
+    );
+    const args = prisma.attendance.upsert.mock.calls[0][0];
+    expect(args.update.arrivedAt).toBeNull();
+    expect(args.create.arrivedAt).toBeNull();
+  });
+
+  it("stamps arrivedAt when today is marked present", async () => {
+    prisma.attendance.upsert.mockResolvedValue({ id: 55, studentId: 5, status: "present", arrivedAt: new Date() });
+    await updateAttendance(
+      { params: { studentId: "5" }, body: { date: schoolDateString(), status: "present" } },
+      mockRes(), vi.fn(),
+    );
+    expect(prisma.attendance.upsert.mock.calls[0][0].create.arrivedAt).toBeInstanceOf(Date);
+  });
+
+  it("bulk entry leaves arrivedAt null for past days", async () => {
+    prisma.$transaction.mockResolvedValue([{ id: 11 }]);
+    prisma.attendance.upsert.mockReturnValue({});
+    await recordAttendance(
+      { user: admin, body: [{ studentId: 1, date: "2020-01-15", status: "present" }] },
+      mockRes(), vi.fn(),
+    );
+    expect(prisma.attendance.upsert.mock.calls[0][0].create.arrivedAt).toBeNull();
+  });
+});

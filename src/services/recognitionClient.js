@@ -19,6 +19,10 @@ const photoCountSchema = z.object({
 const enrollResponseSchema = z.object({
   studentId: z.number().int().positive(),
   photosReceived: z.number().int().min(0),
+  // How many of those photos held exactly one face and are now stored. Older
+  // service builds do not send these, so they are optional.
+  photosUsable: z.number().int().min(0).optional(),
+  photosRejected: z.number().int().min(0).optional(),
   enrolled: z.boolean(),
 });
 

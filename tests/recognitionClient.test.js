@@ -6,7 +6,7 @@ vi.mock("../src/config/env.js", async (importOriginal) => {
   return { env: { ...mod.env, recognition: { baseUrl: "http://127.0.0.1:8001", key: "k".repeat(40) } } };
 });
 
-const { recognizeFrame, RecognitionUnavailableError } = await import("../src/services/recognitionClient.js");
+const { recognizeFrame, enrollStudentPhotos, RecognitionUnavailableError } = await import("../src/services/recognitionClient.js");
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
 const okBody = {
@@ -85,5 +85,23 @@ describe("recognizeFrame — the response is validated, not trusted", () => {
     fetchMock.mockResolvedValue(jsonResponse(body));
     const out = await recognizeFrame(JPEG);
     expect(out.faces[0]).toEqual({ box: [1, 2, 3, 4], studentId: null, distance: null, margin: null });
+  });
+});
+
+describe("enrollStudentPhotos — response", () => {
+  const photo = { buffer: JPEG, mimetype: "image/jpeg", originalname: "a.jpg" };
+
+  it("passes through how many photos were usable and rejected", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ studentId: 5, photosReceived: 3, photosUsable: 1, photosRejected: 2, enrolled: true }),
+    );
+    const result = await enrollStudentPhotos(5, [photo, photo, photo]);
+    expect(result).toEqual({ studentId: 5, photosReceived: 3, photosUsable: 1, photosRejected: 2, enrolled: true });
+  });
+
+  it("still accepts the older response without the usable counts", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ studentId: 5, photosReceived: 1, enrolled: true }));
+    const result = await enrollStudentPhotos(5, [photo]);
+    expect(result.enrolled).toBe(true);
   });
 });

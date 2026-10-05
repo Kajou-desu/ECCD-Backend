@@ -164,10 +164,21 @@ async def enroll(student_id: str, photos: list[UploadFile] = File(...)):
 
             # Face detection is CPU-bound; keep it off the event loop, and do it
             # BEFORE the swap so a bad batch can't replace a working enrollment.
-            encoding, _usable = await run_in_threadpool(recognizer.encode_student_dir, tmp_dir, student_id)
+            encoding, usable_names = await run_in_threadpool(
+                recognizer.analyze_student_dir, tmp_dir, student_id
+            )
             if encoding is None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return _error(422, "No photo contained exactly one clear face")
+
+            # Keep only the photos that were actually used for matching. A
+            # photo with no face or several faces is never matched against, so
+            # storing it would hold a child's biometric data for no purpose and
+            # make the UI show an enrollment that is bigger than the real one.
+            keep = set(usable_names)
+            for name in os.listdir(tmp_dir):
+                if name not in keep:
+                    os.remove(os.path.join(tmp_dir, name))
 
             # Move the existing folder aside (cheap rename, same filesystem)
             # rather than deleting it, so a failure on the next line can be
@@ -191,7 +202,13 @@ async def enroll(student_id: str, photos: list[UploadFile] = File(...)):
         # instead of re-encoding every enrolled child's photos.
         app.state.known = app.state.known.with_student(int(student_id), encoding)
 
-    return {"studentId": int(student_id), "photosReceived": len(saved), "enrolled": True}
+    return {
+        "studentId": int(student_id),
+        "photosReceived": len(saved),
+        "photosUsable": len(usable_names),
+        "photosRejected": len(saved) - len(usable_names),
+        "enrolled": True,
+    }
 
 
 def _enrolled_photo_paths(student_id: str) -> list[str]:
