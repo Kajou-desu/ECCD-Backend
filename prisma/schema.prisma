@@ -39,11 +39,17 @@ model User {
   role         Role      @default(Parent)
   isActive     Boolean   @default(true)
   tokenVersion Int       @default(0)
+  // Optional delivery channels for attendance alerts (arrival/departure).
+  // In-app is always on, and OTP/security emails are never affected. Default
+  // true so existing accounts keep receiving what they receive today.
+  notifyByEmail Boolean   @default(true)
+  notifyBySms   Boolean   @default(true)
   createdAt    DateTime  @default(now())
   lastLoginAt  DateTime?
   profilePicture String?
   children     ParentChild[]
   notifications Notification[]
+  pushSubscriptions PushSubscription[]
   accountActionOtps AccountActionOtp[]
   attendanceSessions AttendanceSession[]
   weeklyGoalsCreated WeeklyGoal[]
@@ -189,6 +195,11 @@ model Attendance {
   date      DateTime         @db.Date
   status    AttendanceStatus
   arrivedAt DateTime?
+  // Set once, manually, via PATCH /attendance/:studentId/depart (Teacher/Admin).
+  // There is no automatic "left the building" signal (BLE only proves nearness
+  // at the door, not an exit), so this is teacher-asserted, same as a manual
+  // arrival — see attendance.controller.js.
+  departedAt DateTime?
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
@@ -452,4 +463,21 @@ model Notification {
   @@index([userId])
   @@index([userId, isRead])
   @@map("notifications")
+}
+
+// One row per browser/device a user has allowed push on. The browser (not the
+// user) owns the endpoint, so it is unique: signing in as someone else on the
+// same browser moves the row to them instead of duplicating it.
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }

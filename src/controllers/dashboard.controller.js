@@ -5,8 +5,9 @@ import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 
 export async function getDashboardStats(_req, res, next) {
   try {
-    const today = new Date();
-    const todayDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+    // School-local day, not the server's: the server runs in UTC, so using
+    // its local date left the counts on "yesterday" until 8 AM Manila time.
+    const todayDate = schoolDateAsUtcMidnight();
 
     const [totalStudents, presentToday, absentToday, totalMaterials] = await Promise.all([
       prisma.student.count(),

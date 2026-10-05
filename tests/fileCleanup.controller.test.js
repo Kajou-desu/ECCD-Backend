@@ -18,6 +18,14 @@ vi.mock("../src/lib/fileStorage.js", async (importOriginal) => ({
   removeStoredFiles,
 }));
 
+const { recognition } = vi.hoisted(() => ({
+  recognition: { isRecognitionConfigured: vi.fn(() => true), removeStudentEnrollment: vi.fn() },
+}));
+vi.mock("../src/services/recognitionClient.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  ...recognition,
+}));
+
 const { prisma } = await import("../src/lib/prisma.js");
 const { deleteMaterial, updateMaterial } = await import("../src/controllers/materials.controller.js");
 const { deleteAlbum, deleteAlbumPhoto } = await import("../src/controllers/albums.controller.js");
@@ -121,5 +129,38 @@ describe("files are removed together with their database rows", () => {
     );
 
     expect(removeStoredFiles).toHaveBeenCalledWith("face.jpg", ["d1.pdf"], ["s1.png"]);
+  });
+
+  it("deleteStudent also erases the child's face enrollment from the recognition service", async () => {
+    prisma.studentDocument.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.student.delete.mockResolvedValue({ id: 4, photo: null });
+
+    await deleteStudent(req({ params: { id: "4" }, user: { id: 1, role: "Admin" } }), mockRes(), vi.fn());
+
+    expect(recognition.removeStudentEnrollment).toHaveBeenCalledWith(4);
+  });
+
+  it("deleteStudent still succeeds (204) if the recognition service is down", async () => {
+    prisma.studentDocument.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.student.delete.mockResolvedValue({ id: 4, photo: null });
+    recognition.removeStudentEnrollment.mockRejectedValue(new Error("down"));
+    const res = mockRes();
+
+    await deleteStudent(req({ params: { id: "4" }, user: { id: 1, role: "Admin" } }), res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(204);
+  });
+
+  it("deleteStudent skips the recognition call when the service isn't configured", async () => {
+    prisma.studentDocument.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.student.delete.mockResolvedValue({ id: 4, photo: null });
+    recognition.isRecognitionConfigured.mockReturnValueOnce(false);
+
+    await deleteStudent(req({ params: { id: "4" }, user: { id: 1, role: "Admin" } }), mockRes(), vi.fn());
+
+    expect(recognition.removeStudentEnrollment).not.toHaveBeenCalled();
   });
 });

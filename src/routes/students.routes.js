@@ -2,7 +2,7 @@ import { Router } from "express";
 import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
-import { enrollmentUserLimiter } from "../middleware/rateLimit.js";
+import { enrollmentUserLimiter, enrollmentViewUserLimiter } from "../middleware/rateLimit.js";
 import {
   getStudents,
   getStudent,
@@ -13,7 +13,12 @@ import {
   uploadStudentPhoto,
 } from "../controllers/students.controller.js";
 import { uploadStudentDocuments, deleteStudentDocument } from "../controllers/studentDocuments.controller.js";
-import { uploadEnrollmentPhotos, MAX_ENROLLMENT_PHOTOS } from "../controllers/enrollmentPhotos.controller.js";
+import {
+  uploadEnrollmentPhotos,
+  getEnrollmentPhotoCount,
+  getEnrollmentPhoto,
+  MAX_ENROLLMENT_PHOTOS,
+} from "../controllers/enrollmentPhotos.controller.js";
 import { getSubmissions } from "../controllers/submissions.controller.js";
 import { getChildAttendance } from "../controllers/attendance.controller.js";
 import {
@@ -68,6 +73,18 @@ router.post(
   enrollmentUserLimiter,
   enrollmentPhotoUpload,
   uploadEnrollmentPhotos
+);
+router.get(
+  "/:id/enrollment-photos",
+  requireRole("Teacher", "Admin"),
+  enrollmentViewUserLimiter,
+  getEnrollmentPhotoCount
+);
+router.get(
+  "/:id/enrollment-photos/:index",
+  requireRole("Teacher", "Admin"),
+  enrollmentViewUserLimiter,
+  getEnrollmentPhoto
 );
 
 router.get("/:id/ble-devices", requireRole("Teacher", "Admin"), listBleDevices);

@@ -11,13 +11,15 @@ vi.mock("../src/lib/prisma.js", () => ({
     student: { findUnique: vi.fn() },
   },
 }));
-vi.mock("../src/services/recognitionClient.js", () => ({
+// Partial mock: the real error classes stay so the controller's instanceof check works.
+vi.mock("../src/services/recognitionClient.js", async (importOriginal) => ({
+  ...(await importOriginal()),
   isRecognitionConfigured: vi.fn(() => true),
   enrollStudentPhotos: vi.fn(),
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { enrollStudentPhotos } = await import("../src/services/recognitionClient.js");
+const { enrollStudentPhotos, RecognitionRejectedError } = await import("../src/services/recognitionClient.js");
 const { signToken } = await import("../src/utils/jwt.js");
 const { app } = await import("../src/app.js");
 
@@ -142,5 +144,13 @@ describe("POST /students/:id/enrollment-photos", () => {
       .attach("photos", JPEG, { filename: "a.jpg", contentType: "image/jpeg" });
     expect(res.status).toBe(502);
     expect(res.body).toEqual({ message: "Face recognition service unavailable" });
+  });
+
+  it("422 when the service finds no single clear face — not reported as an outage", async () => {
+    enrollStudentPhotos.mockRejectedValue(new RecognitionRejectedError("no face"));
+    const res = await request(app).post(URL).set("Authorization", auth())
+      .attach("photos", JPEG, { filename: "a.jpg", contentType: "image/jpeg" });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ message: "No photo contained exactly one clear face" });
   });
 });

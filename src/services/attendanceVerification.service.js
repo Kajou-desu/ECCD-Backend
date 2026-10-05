@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { env } from "../config/env.js";
+import { notifyArrival } from "./attendanceNotification.service.js";
 
 // Face + BLE => verified attendance.
 //
@@ -44,16 +45,24 @@ const SIGNAL_SELECT = { score: true, hits: true, lastSeenAt: true };
 const keyOf = (sessionId, studentId, kind) => ({ sessionId_studentId_kind: { sessionId, studentId, kind } });
 
 // Creates the attendance record + its audit row atomically — but only if the
-// student has NO record for that day yet. A record that already exists (a
-// teacher marked it, an earlier verification, an excused absence) is never
-// overwritten; the unique (studentId, date) key makes this race-safe.
+// student has NO record for that day yet, or the existing record is "absent"
+// (a manual absent mark is overridden when face + tag are both seen: the child
+// is demonstrably here). Any other existing record (present, excused, an
+// earlier verification) is never overwritten; the unique (studentId, date) key
+// and the status-guarded updateMany make this race-safe.
 async function markVerified({ sessionId, sessionDate, studentId, face, ble, now }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const { count } = await tx.attendance.createMany({
       data: [{ studentId, date: sessionDate, status: "present", arrivedAt: now }],
       skipDuplicates: true,
     });
-    if (count === 0) return { state: "already_recorded" };
+    if (count === 0) {
+      const { count: overridden } = await tx.attendance.updateMany({
+        where: { studentId, date: sessionDate, status: "absent" },
+        data: { status: "present", arrivedAt: now, departedAt: null },
+      });
+      if (overridden === 0) return { state: "already_recorded" };
+    }
 
     const attendance = await tx.attendance.findUnique({
       where: { studentId_date: { studentId, date: sessionDate } },
@@ -70,6 +79,20 @@ async function markVerified({ sessionId, sessionDate, studentId, face, ble, now 
     });
     return { state: "verified", arrivedAt: now };
   });
+
+  // Outside the transaction (not part of it, and must not roll it back) and
+  // fire-and-forget: recordSignal is on the hot path of every camera frame
+  // and BLE sighting, so the response here can't wait on an email/SMS round
+  // trip. Only reached once per student per day — see the count===0 guard
+  // above and notifyArrival's own idempotency-by-construction (called only
+  // on the write that actually happened).
+  if (result.state === "verified") {
+    Promise.resolve()
+      .then(() => notifyArrival(studentId, now))
+      .catch(() => {});
+  }
+
+  return result;
 }
 
 // Records one sighting and, if it completes the pair, marks the student present.

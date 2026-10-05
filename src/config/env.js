@@ -21,19 +21,25 @@ const smtpVars = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS"];
 const missingSmtp = smtpVars.filter((key) => !process.env[key]);
 const smtpConfigured = missingSmtp.length === 0;
 
-if (isProduction && !smtpConfigured) {
-  // Fail closed in production: without SMTP, OTP emails silently never
-  // arrive and users are locked out of password reset.
+// RESEND_API_KEY sends email over Resend's HTTPS API, which works on hosts that
+// block outbound SMTP ports (e.g. Railway Free/Trial/Hobby). SMTP stays as the
+// fallback when it isn't set.
+const resendApiKey = process.env.RESEND_API_KEY || undefined;
+const emailConfigured = Boolean(resendApiKey) || smtpConfigured;
+
+if (isProduction && !emailConfigured) {
+  // Fail closed in production: without a mail transport, OTP emails silently
+  // never arrive and users are locked out of password reset.
   console.error(
-    `Missing required environment variables for production: ${missingSmtp.join(", ")}`
+    `Missing required environment variables for production: RESEND_API_KEY (or ${missingSmtp.join(", ")})`
   );
   process.exit(1);
 }
 
-if (!isProduction && !smtpConfigured) {
+if (!isProduction && !emailConfigured) {
   console.warn(
-    "SMTP is not configured — password reset OTPs will be logged to the console " +
-      "instead of emailed. Set SMTP_HOST/PORT/USER/PASS to test real delivery."
+    "Email is not configured — password reset OTPs will be logged to the console " +
+      "instead of emailed. Set RESEND_API_KEY (or SMTP_HOST/PORT/USER/PASS) to test real delivery."
   );
 }
 
@@ -80,7 +86,7 @@ const verification = {
 // Optional face-recognition microservice (face-recognition-service/). When
 // unset, the frame endpoint answers 503 and the rest of the app is unaffected.
 // When set it must be complete and safe: a real http(s) URL, plain http only for
-// loopback in production (frames contain children's faces), and a strong key.
+// loopback or Railway's private network in production (frames contain children's faces), and a strong key.
 function recognitionConfig() {
   const rawUrl = process.env.RECOGNITION_SERVICE_URL;
   const key = process.env.RECOGNITION_SERVICE_KEY;
@@ -98,8 +104,14 @@ function recognitionConfig() {
     process.exit(1);
   }
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (isProduction && url.protocol !== "https:" && !loopback) {
-    console.error("In production RECOGNITION_SERVICE_URL must use https unless it is localhost.");
+  // Railway's private network: names under .railway.internal resolve only from
+  // inside the same Railway project, so this is not the open internet. Plain
+  // http is accepted there because Railway's internal addresses have no TLS.
+  const privateNetwork = url.hostname.endsWith(".railway.internal");
+  if (isProduction && url.protocol !== "https:" && !loopback && !privateNetwork) {
+    console.error(
+      "In production RECOGNITION_SERVICE_URL must use https unless it is localhost or a *.railway.internal address.",
+    );
     process.exit(1);
   }
   if (!key || key.length < 32) {
@@ -110,6 +122,85 @@ function recognitionConfig() {
 }
 
 const recognition = recognitionConfig();
+
+// Optional SMS delivery (Semaphore — semaphore.co) for arrival/departure
+// notifications. Unlike SMTP, this is never required to start the server:
+// without it, attendance emails still go out and only the SMS leg is
+// skipped (logged, not fatal) — see attendanceNotification.service.js.
+function semaphoreConfig() {
+  const apiKey = process.env.SEMAPHORE_API_KEY;
+  if (!apiKey) return { configured: false, apiKey: null, senderName: null };
+  return { configured: true, apiKey, senderName: process.env.SEMAPHORE_SENDER_NAME || null };
+}
+
+const semaphore = semaphoreConfig();
+
+// Which provider carries the SMS. Chosen explicitly rather than inferred from
+// which keys happen to be set, so having both configured never makes routing
+// ambiguous, and switching back is a one-variable change.
+const SMS_PROVIDERS = ["semaphore", "textbee"];
+const smsProvider = (process.env.SMS_PROVIDER || "semaphore").toLowerCase();
+if (!SMS_PROVIDERS.includes(smsProvider)) {
+  console.error(`SMS_PROVIDER must be one of: ${SMS_PROVIDERS.join(", ")}.`);
+  process.exit(1);
+}
+
+// Temporary alternative SMS provider (TextBee — textbee.dev): an Android phone
+// with a SIM acts as the gateway. Like Semaphore it is never required to start
+// the server. TEXTBEE_BASE_URL exists only for a self-hosted TextBee instance.
+function textbeeConfig() {
+  const apiKey = process.env.TEXTBEE_API_KEY;
+  if (!apiKey) return { configured: false, apiKey: null, baseUrl: null, deviceId: null };
+
+  let url;
+  try {
+    url = new URL(process.env.TEXTBEE_BASE_URL || "https://api.textbee.dev/api/v1");
+  } catch {
+    console.error("TEXTBEE_BASE_URL must be a valid URL.");
+    process.exit(1);
+  }
+  // The API key travels in a header, so never send it over plain http in production.
+  const allowed = isProduction ? ["https:"] : ["https:", "http:"];
+  if (!allowed.includes(url.protocol)) {
+    console.error(`TEXTBEE_BASE_URL must use ${isProduction ? "https" : "http(s)"}.`);
+    process.exit(1);
+  }
+
+  return {
+    configured: true,
+    apiKey,
+    baseUrl: url.href.replace(/\/+$/, ""),
+    deviceId: process.env.TEXTBEE_DEVICE_ID || null,
+  };
+}
+
+const textbee = textbeeConfig();
+
+if (isProduction && !(smsProvider === "textbee" ? textbee : semaphore).configured) {
+  // Not fatal (SMS stays optional), but without this the texts would just
+  // silently never go out.
+  console.warn(`SMS_PROVIDER is "${smsProvider}" but its API key is not set — SMS will not be sent.`);
+}
+
+// Optional Web Push (browser notifications). Like SMS it is never required to
+// start the server: without VAPID keys, push is skipped and the settings page
+// reports it as unavailable. Generate a pair once with
+// `npx web-push generate-vapid-keys` — the private key is a secret.
+function vapidConfig() {
+  const publicKey = process.env.VAPID_PUBLIC_KEY;
+  const privateKey = process.env.VAPID_PRIVATE_KEY;
+  if (!publicKey || !privateKey) return { configured: false, publicKey: null, privateKey: null, subject: null };
+
+  // The push services use this to contact the operator about misuse.
+  const subject = process.env.VAPID_SUBJECT || "";
+  if (!/^(mailto:[^\s@]+@[^\s@]+|https:\/\/\S+)$/.test(subject)) {
+    console.error("VAPID_SUBJECT must be a mailto: address or an https:// URL when VAPID keys are set.");
+    process.exit(1);
+  }
+  return { configured: true, publicKey, privateKey, subject };
+}
+
+const vapid = vapidConfig();
 
 // --- File storage -----------------------------------------------------------
 // "local" keeps files in ./uploads (development, or a single server without a
@@ -174,6 +265,10 @@ export const env = {
   schoolTimezone,
   verification,
   recognition,
+  semaphore,
+  smsProvider,
+  textbee,
+  vapid,
   storage: {
     driver: storageDriver,
     s3: {
@@ -186,6 +281,10 @@ export const env = {
           ? undefined
           : process.env.S3_FORCE_PATH_STYLE === "true",
     },
+  },
+  emailConfigured,
+  resend: {
+    apiKey: resendApiKey,
   },
   smtp: {
     configured: smtpConfigured,

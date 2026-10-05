@@ -5,6 +5,16 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_RE = /^\d{4}-\d{2}$/;
 const PHONE_RE = /^[0-9+\-\s()]{7,20}$/;
 
+// Philippine mobile number, with or without country code/trunk prefix:
+// 9XXXXXXXXX (bare 10 digits), 09XXXXXXXXX, 639XXXXXXXXX or +639XXXXXXXXX
+// (separators stripped first). Shared with lib/sms.js so what we accept on
+// save is exactly what the SMS providers can deliver to.
+export const PH_MOBILE_RE = /^(?:\+?63|0)?9\d{9}$/;
+
+export function normalizePhone(phone) {
+  return String(phone ?? "").replace(/[\s\-()]/g, "");
+}
+
 // DATE_RE/MONTH_RE only check the string's SHAPE (4 digits - 2 digits [-
 // 2 digits]), not that it names a real calendar date. Date.UTC silently
 // rolls an out-of-range value over into a different, valid date instead of
@@ -120,6 +130,20 @@ export function requirePhone(value, label = "phone") {
 export function optionalPhone(value, label = "phone") {
   if (value === undefined || value === null || value === "") return null;
   return requirePhone(value, label);
+}
+
+// For accounts that receive SMS (Parent/Guardian): a number Semaphore can't
+// deliver to would silently never get an alert, so reject it at save time.
+export function requirePhMobile(value, label = "phone") {
+  if (typeof value !== "string" || value.length > 20 || !PH_MOBILE_RE.test(normalizePhone(value))) {
+    throw new AppError(`Invalid ${label}: use a Philippine mobile number, e.g. 09171234567`, 400);
+  }
+  return value.trim();
+}
+
+export function optionalPhMobile(value, label = "phone") {
+  if (value === undefined || value === null || value === "") return null;
+  return requirePhMobile(value, label);
 }
 
 export function requireSession(value) {

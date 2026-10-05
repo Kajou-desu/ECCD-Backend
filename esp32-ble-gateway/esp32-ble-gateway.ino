@@ -41,7 +41,7 @@
 // ---- Tunables -------------------------------------------------------------
 const int SCAN_SECONDS = 2;
 // Coarse floor only, to skip noise. The backend applies the real threshold.
-const int MIN_REPORT_RSSI = -15;
+const int MIN_REPORT_RSSI = -70;
 const int MAX_TAGS = 50;                            // matches the server's per-request limit
 const unsigned long REGISTRY_REFRESH_MS = 5UL * 60UL * 1000UL;
 const unsigned long REGISTRY_RETRY_MS = 30UL * 1000UL;

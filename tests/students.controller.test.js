@@ -21,7 +21,7 @@ vi.mock("../src/lib/prisma.js", () => ({
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { createStudent, updateStudent, importStudents } = await import(
+const { createStudent, getStudent, updateStudent, importStudents } = await import(
   "../src/controllers/students.controller.js"
 );
 
@@ -37,6 +37,42 @@ function mockRes() {
 beforeEach(() => {
   vi.clearAllMocks();
   prisma.$transaction.mockImplementation((callback) => callback(prisma));
+});
+
+describe("student detail teacher center", () => {
+  it("returns the linked teacher's center location", async () => {
+    prisma.student.findUnique.mockResolvedValue({
+      id: 7,
+      name: "Kai Moran",
+      birthday: new Date("2023-03-04T00:00:00.000Z"),
+      photo: null,
+      documents: [],
+      teacher: { id: 2, name: "Taylor Reed", centerLocation: "North ECCD Center" },
+    });
+    const res = mockRes();
+
+    await getStudent(
+      { params: { id: "7" }, user: { id: 1, role: "Admin" } },
+      res,
+      vi.fn(),
+    );
+
+    expect(prisma.student.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 7 },
+        include: expect.objectContaining({
+          teacher: { select: { id: true, name: true, centerLocation: true } },
+        }),
+      }),
+    );
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        teacher: "Taylor Reed",
+        teacherCenterLocation: "North ECCD Center",
+        school: "North ECCD Center",
+      }),
+    );
+  });
 });
 
 describe("student gender handling", () => {

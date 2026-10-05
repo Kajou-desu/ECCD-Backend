@@ -7,7 +7,7 @@ at the door within a short window:
 2. their **BLE tag**, heard by an ESP32.
 
 Either one alone is never enough. A teacher can always mark attendance by hand,
-and a manual entry always wins over an automatic one.
+and a manual entry wins over an automatic one, except a manual **absent** (see below).
 
 ```
                          ┌───────────────────────────┐
@@ -38,8 +38,9 @@ Frames are handled in memory and never stored.
 - The **BLE** signal counts when the smoothed RSSI is `>= BLE_MIN_RSSI` and it has
   been seen `VERIFY_MIN_HITS` times in a row.
 - Both must be fresh: seen within `VERIFY_WINDOW_SEC` of now.
-- Then the student is marked **present** — but only if they have **no record for
-  that day yet**. An existing record (marked by a teacher, excused, or from an
+- Then the student is marked **present** — if they have **no record for that day
+  yet**, or their record is a manual **absent** (face + tag both seen means the child
+  is here, so it is overridden). Any other existing record (present, excused, from an
   earlier verification) is never overwritten.
 - Evidence (face distance, RSSI, time) is stored in `attendance_verifications`.
   The roster shows "Verified automatically". If a teacher then edits the record
@@ -115,3 +116,27 @@ The defaults are starting points, not measurements.
 - Lighting, angle and a child's growth affect face matching; the manual roster is the fallback.
 - Face templates are biometric data of children. Get guardian consent, restrict access
   to `Images/`, and delete on leaving. Ask your data-protection officer what local law requires.
+
+## Arrival / departure notifications
+
+When a student is marked present **for today** (automatic face + BLE
+verification, or a teacher's single-record edit via `PUT /attendance/:studentId`),
+every linked parent/guardian is notified (once — re-saving an already-present student does not re-notify) on three channels: an in-app
+`Notification`, an email, and an SMS. Bulk entry (`POST /attendance`) and edits to
+past dates never notify.
+
+Departure is **manual**: a teacher/admin calls `PATCH /attendance/:studentId/depart`,
+which stamps `departedAt` on today's record (only if the student arrived and
+hasn't already departed) and sends the same three notifications. The teacher
+dashboard and Attendance page show a confirmed **Mark departed** button for
+present students only; re-marking a student's status clears a prior departure.
+
+- **Email** goes through Resend's HTTPS API when `RESEND_API_KEY` is set (use a
+  sender on the verified `eccdsmarttrack.app` domain in `SMTP_FROM`), and falls
+  back to SMTP otherwise (see `.env.example`).
+- **SMS** goes through Semaphore (`SEMAPHORE_API_KEY`), Philippine mobile numbers
+  only. Optional: unset means SMS is skipped, never a startup failure. Set
+  `SMS_PROVIDER=textbee` (plus `TEXTBEE_API_KEY`) to send through TextBee instead;
+  switch back by unsetting it.
+- Delivery is best-effort and fault-isolated per parent and per channel: a failed
+  email or SMS is logged server-side and never fails the attendance write.

@@ -1,5 +1,6 @@
 import { pipeline } from "node:stream/promises";
 import { AppError } from "../middleware/errorHandler.js";
+import { env } from "../config/env.js";
 import { verifyFileSignature } from "../lib/signedFileUrl.js";
 import { storageKeyFrom } from "../lib/fileStorage.js";
 import { getStorage } from "../storage/index.js";
@@ -14,6 +15,18 @@ import { mimeFromKey } from "../storage/mimeTypes.js";
 // streamed through, so this signature check is the only way in, whichever
 // storage provider is configured. The key is restricted to a plain filename
 // (storageKeyFrom) so client input can never address another object or path.
+// helmet() also sends X-Frame-Options: SAMEORIGIN and a CSP with
+// frame-ancestors 'self' / object-src 'none' on every response. Both stop the
+// frontend (a different origin) from showing a PDF in an <iframe> — the browser
+// reports "refused to connect". For this route only, replace them with a CSP
+// that lets exactly the configured frontend origins frame the file (never "*").
+// Safe to drop the rest of helmet's CSP here: only images/PDF/Word files are
+// ever stored (storage/mimeTypes.js), served with nosniff, never HTML/SVG.
+function frameAncestorsPolicy() {
+  const origins = env.clientOrigins.filter((origin) => /^https?:\/\/[^\s;,'"]+$/.test(origin));
+  return `frame-ancestors ${origins.length ? origins.join(" ") : "'none'"}`;
+}
+
 export async function getFile(req, res, next) {
   try {
     const key = storageKeyFrom(req.params.filename);
@@ -44,7 +57,9 @@ export async function getFile(req, res, next) {
       "Content-Type": mimeFromKey(key),
       "Cache-Control": "private, max-age=300",
       "Cross-Origin-Resource-Policy": "cross-origin",
+      "Content-Security-Policy": frameAncestorsPolicy(),
     });
+    res.removeHeader("X-Frame-Options");
     if (object.contentLength != null) res.set("Content-Length", String(object.contentLength));
 
     await pipeline(object.body, res);

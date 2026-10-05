@@ -20,6 +20,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import { logger } from "../lib/logger.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
 import { fileUrl } from "../middleware/upload.js";
+import { isRecognitionConfigured, removeStudentEnrollment } from "../services/recognitionClient.js";
 
 // Lean shape for roster/table/dashboard views (StudentTable, EventCard,
 // UploadStudentWork picker, useStudents search).
@@ -43,7 +44,10 @@ const LIST_SELECT = {
 
 // Full shape for the edit form (StudentForm.jsx prefill) — every flat field
 // plus embedded documents and the connected teacher.
-const DETAIL_INCLUDE = { documents: true, teacher: { select: { id: true, name: true } } };
+const DETAIL_INCLUDE = {
+  documents: true,
+  teacher: { select: { id: true, name: true, centerLocation: true } },
+};
 
 // Prisma DateTime -> plain YYYY-MM-DD. Needed because StudentForm.jsx feeds
 // student.birthday straight into <input type="date" value={...}>, which
@@ -65,6 +69,10 @@ function toStudentDetailResponse(req, student) {
   return {
     ...rest,
     teacher: teacher?.name ?? null,
+    teacherCenterLocation: teacher?.centerLocation ?? null,
+    // StudentProfileHeader.jsx reads `student.school`. There is no school column;
+    // the school/center is the assigned teacher's center, so derive it here.
+    school: teacher?.centerLocation ?? null,
     photo: signFileUrl(req, student.photo),
     birthday: toDateOnly(student.birthday),
     documents: (student.documents || []).map((doc) => toDocumentResponse(req, doc)),
@@ -427,6 +435,18 @@ export async function deleteStudent(req, res, next) {
       documents.map((d) => d.fileUrl),
       submissions.map((s) => s.fileUrl),
     );
+
+    // The child's face photos/encoding live in the recognition service, outside
+    // the database cascade: erase them too. The student is already gone, so a
+    // failure here is logged (id only, never the photos) rather than failing the
+    // request — an orphaned enrollment needs following up, not a retry loop.
+    if (isRecognitionConfigured()) {
+      try {
+        await removeStudentEnrollment(id);
+      } catch (err) {
+        logger.error({ err, studentId: id }, "Could not erase face enrollment for a deleted student");
+      }
+    }
     res.status(204).send();
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Student not found" });

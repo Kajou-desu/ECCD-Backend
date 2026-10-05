@@ -9,6 +9,12 @@ import { env } from "../config/env.js";
 const TIMEOUT_MS = 3000;
 const ENROLL_TIMEOUT_MS = 15_000; // several full-size photos, not one downscaled frame
 const MAX_FACES = 20;
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // matches the service's MAX_ENROLL_IMAGE_BYTES
+
+const photoCountSchema = z.object({
+  studentId: z.number().int().positive(),
+  count: z.number().int().min(0).max(20), // service caps a student's folder at 20 images
+});
 
 const enrollResponseSchema = z.object({
   studentId: z.number().int().positive(),
@@ -38,6 +44,10 @@ export function isRecognitionConfigured() {
 }
 
 export class RecognitionUnavailableError extends Error {}
+
+// The service understood the request and refused it (HTTP 422: no photo held
+// exactly one face). Not an outage, so callers answer 422, not 502.
+export class RecognitionRejectedError extends Error {}
 
 // `frame` is a Buffer holding a JPEG. Resolves to { width, height, faces }.
 // Every failure mode (not configured, network, timeout, non-2xx, bad shape)
@@ -103,6 +113,7 @@ export async function enrollStudentPhotos(studentId, files) {
     throw new RecognitionUnavailableError(`Enrollment request failed: ${cause?.name ?? "error"}`);
   }
 
+  if (response.status === 422) throw new RecognitionRejectedError("No usable face in the enrollment photos");
   if (!response.ok) {
     throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
   }
@@ -116,4 +127,93 @@ export async function enrollStudentPhotos(studentId, files) {
   const parsed = enrollResponseSchema.safeParse(body);
   if (!parsed.success) throw new RecognitionUnavailableError("Recognition service returned an unexpected shape");
   return parsed.data;
+}
+
+// Erases a student's face photos and encoding from the recognition service.
+// Idempotent on the service side. Same failure contract as the calls above.
+export async function removeStudentEnrollment(studentId) {
+  if (!env.recognition) throw new RecognitionUnavailableError("Recognition service is not configured");
+
+  let response;
+  try {
+    response = await fetch(`${env.recognition.baseUrl}/enroll/${Number(studentId)}`, {
+      method: "DELETE",
+      headers: { "X-Service-Key": env.recognition.key },
+      redirect: "error",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new RecognitionUnavailableError(`Enrollment removal failed: ${cause?.name ?? "error"}`);
+  }
+  if (!response.ok) {
+    throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
+  }
+}
+
+// How many enrollment photos the service holds for this student (no image data).
+export async function countStudentEnrollmentPhotos(studentId) {
+  if (!env.recognition) throw new RecognitionUnavailableError("Recognition service is not configured");
+
+  let response;
+  try {
+    response = await fetch(`${env.recognition.baseUrl}/enroll/${Number(studentId)}/photos`, {
+      headers: { "X-Service-Key": env.recognition.key },
+      redirect: "error",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new RecognitionUnavailableError(`Photo count request failed: ${cause?.name ?? "error"}`);
+  }
+  if (!response.ok) throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new RecognitionUnavailableError("Recognition service returned invalid JSON");
+  }
+  const parsed = photoCountSchema.safeParse(body);
+  if (!parsed.success) throw new RecognitionUnavailableError("Recognition service returned an unexpected shape");
+  return parsed.data;
+}
+
+// One stored enrollment photo by position. Resolves to { buffer, contentType },
+// or null if that photo no longer exists. The caller must still check the bytes.
+export async function fetchStudentEnrollmentPhoto(studentId, index) {
+  if (!env.recognition) throw new RecognitionUnavailableError("Recognition service is not configured");
+
+  let response;
+  try {
+    response = await fetch(
+      `${env.recognition.baseUrl}/enroll/${Number(studentId)}/photos/${Number(index)}`,
+      {
+        headers: { "X-Service-Key": env.recognition.key },
+        redirect: "error",
+        signal: AbortSignal.timeout(ENROLL_TIMEOUT_MS),
+      },
+    );
+  } catch (cause) {
+    throw new RecognitionUnavailableError(`Photo request failed: ${cause?.name ?? "error"}`);
+  }
+  if (response.status === 404) return null;
+  if (!response.ok) throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
+
+  const contentType = response.headers.get("content-type")?.split(";")[0].trim();
+  if (contentType !== "image/jpeg" && contentType !== "image/png") {
+    throw new RecognitionUnavailableError("Recognition service returned an unexpected content type");
+  }
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_PHOTO_BYTES) {
+    throw new RecognitionUnavailableError("Recognition service returned an oversized photo");
+  }
+  let buffer;
+  try {
+    buffer = Buffer.from(await response.arrayBuffer());
+  } catch {
+    throw new RecognitionUnavailableError("Recognition service photo could not be read");
+  }
+  if (buffer.length > MAX_PHOTO_BYTES) {
+    throw new RecognitionUnavailableError("Recognition service returned an oversized photo");
+  }
+  return { buffer, contentType };
 }

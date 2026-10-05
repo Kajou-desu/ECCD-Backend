@@ -1,0 +1,9 @@
+# Keep children's photos, secrets and dev files out of the image.
+Images/
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+tests/
+requirements-dev.txt
+README.md

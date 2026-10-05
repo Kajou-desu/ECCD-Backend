@@ -89,6 +89,44 @@ describe("getChildProgress", () => {
     );
   });
 
+  it("returns recent activities with submittedAt and a signed fileUrl, without notes", async () => {
+    process.env.JWT_SECRET = "test-secret";
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.weeklyGoal.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([
+      {
+        id: 7,
+        submittedAt: new Date("2026-09-12T02:00:00.000Z"),
+        fileUrl: "work-123.pdf",
+        material: { title: "Shapes", category: "Math" },
+      },
+    ]);
+
+    const req = {
+      params: { childId: "5" },
+      user: { id: 1, role: "Admin" },
+      protocol: "https",
+      get: () => "api.example.test",
+    };
+    const res = mockRes();
+
+    await getChildProgress(req, res, vi.fn());
+
+    const [payload] = res.json.mock.calls[0][0].recentActivities;
+    expect(payload).toMatchObject({
+      id: 7,
+      activity: "Shapes",
+      category: "Math",
+      status: "completed",
+      submittedAt: "2026-09-12T02:00:00.000Z",
+    });
+    expect(payload.fileUrl).toMatch(
+      /^https:\/\/api\.example\.test\/api\/files\/work-123\.pdf\?exp=\d+&sig=[0-9a-f]+$/,
+    );
+    expect(payload).not.toHaveProperty("notes");
+  });
+
   it("returns 404 when the child doesn't exist", async () => {
     prisma.student.findUnique.mockResolvedValue(null);
 

@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../src/lib/prisma.js", () => ({ prisma: { student: { findUnique: vi.fn() } } }));
-vi.mock("../src/services/recognitionClient.js", () => ({
+vi.mock("../src/services/recognitionClient.js", async (importOriginal) => ({
+  ...(await importOriginal()),
   isRecognitionConfigured: vi.fn(),
   enrollStudentPhotos: vi.fn(),
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { isRecognitionConfigured, enrollStudentPhotos } = await import("../src/services/recognitionClient.js");
+const { isRecognitionConfigured, enrollStudentPhotos, RecognitionRejectedError } = await import(
+  "../src/services/recognitionClient.js"
+);
 const { uploadEnrollmentPhotos } = await import("../src/controllers/enrollmentPhotos.controller.js");
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
@@ -79,6 +82,13 @@ describe("uploadEnrollmentPhotos — gating", () => {
     expect(res.status).toHaveBeenCalledWith(502);
     expect(body).toEqual({ message: "Face recognition service unavailable" });
     expect(JSON.stringify(body)).not.toMatch(/10\.1\.2\.3|ECONNREFUSED|abc/);
+  });
+
+  it("422 (not 502) when the service rejects the photos, so the UI can say what to change", async () => {
+    enrollStudentPhotos.mockRejectedValue(new RecognitionRejectedError("no face"));
+    const { res, body } = await run();
+    expect(res.status).toHaveBeenCalledWith(422);
+    expect(body).toEqual({ message: "No photo contained exactly one clear face" });
   });
 
   it("passes unexpected errors to next()", async () => {

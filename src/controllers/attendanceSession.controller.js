@@ -145,11 +145,13 @@ export async function getMonitor(_req, res, next) {
       entry(v.attendance.studentId, v.attendance.student.name).verifiedAt = v.verifiedAt;
     }
 
-    const rank = { verified: 0, face_only: 1, ble_only: 2 };
+    const rank = { verified: 0, both_seen: 1, face_only: 2, ble_only: 3 };
     const students = [...byStudent.values()]
       .map(({ face, ble, ...rest }) => ({
         ...rest,
-        status: rest.verifiedAt ? "verified" : face ? "face_only" : "ble_only",
+        // Both live signals but no verification row: the student already has a
+        // record for today (e.g. marked by hand), which verification never overwrites.
+        status: rest.verifiedAt ? "verified" : face && ble ? "both_seen" : face ? "face_only" : "ble_only",
       }))
       .sort(
         (a, b) =>
