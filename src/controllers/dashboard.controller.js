@@ -72,7 +72,12 @@ export async function upsertDailyTheme(req, res, next) {
       title: requireNonEmptyString(req.body.title, "title", 200),
       description: optionalString(req.body.description, 2000),
       objectives: requireStringArray(req.body.objectives ?? [], "objectives"),
-      materialId: req.body.materialId ? parseId(req.body.materialId, "materialId") : null,
+      // Only an absent/null/blank materialId means "no material". Anything
+      // else (including 0) must be a real id — falsy-checking silently turned
+      // 0 into "no material".
+      materialId: [undefined, null, ""].includes(req.body.materialId)
+        ? null
+        : parseId(req.body.materialId, "materialId"),
     };
 
     const theme = await prisma.dailyTheme.upsert({
@@ -83,6 +88,8 @@ export async function upsertDailyTheme(req, res, next) {
 
     res.json(theme);
   } catch (err) {
+    // materialId that doesn't exist fails the foreign-key constraint.
+    if (err.code === "P2003") return res.status(400).json({ message: "Material not found" });
     next(err);
   }
 }

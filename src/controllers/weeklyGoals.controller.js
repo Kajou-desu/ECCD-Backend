@@ -156,11 +156,17 @@ export async function updateGoalProgress(req, res, next) {
       throw new AppError("Too many updates in a single request", 400);
     }
 
-    const parsed = updates.map((u) => ({
-      studentId: parseId(u.studentId, "studentId"),
-      progress: requireProgress(u.progress),
-      status: requireNonEmptyString(u.status ?? "In progress", "status", 100),
-    }));
+    const parsed = updates.map((u, index) => {
+      // A null/array/primitive entry would otherwise throw a TypeError (500).
+      if (u === null || typeof u !== "object" || Array.isArray(u)) {
+        throw new AppError(`Invalid update at position ${index + 1}`, 400);
+      }
+      return {
+        studentId: parseId(u.studentId, "studentId"),
+        progress: requireProgress(u.progress),
+        status: requireNonEmptyString(u.status ?? "In progress", "status", 100),
+      };
+    });
 
     const goal = await prisma.weeklyGoal.findUnique({ where: { id: goalId }, select: { id: true } });
     if (!goal) return res.status(404).json({ message: "Goal not found" });

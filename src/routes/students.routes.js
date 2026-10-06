@@ -2,6 +2,9 @@ import { Router } from "express";
 import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
+import { AppError } from "../middleware/errorHandler.js";
+import { parseId } from "../utils/validate.js";
+import { assertCanAccessStudent } from "../utils/ownership.js";
 import { enrollmentUserLimiter, enrollmentViewUserLimiter } from "../middleware/rateLimit.js";
 import {
   getStudents,
@@ -64,13 +67,33 @@ const enrollmentPhotoUpload = multer({
     fields: 0,
     parts: MAX_ENROLLMENT_PHOTOS + 1,
   },
-  fileFilter: (_req, file, cb) => cb(null, file.mimetype === "image/jpeg" || file.mimetype === "image/png"),
+  // Reject, don't skip: cb(null, false) silently dropped the file, so with
+  // 8 selected and one WEBP/HEIC the other 7 were enrolled (replacing the old
+  // set) and the request still answered 200.
+  fileFilter: (_req, file, cb) =>
+    file.mimetype === "image/jpeg" || file.mimetype === "image/png"
+      ? cb(null, true)
+      : cb(new AppError("Each photo must be a JPEG or PNG image", 400)),
 }).array("photos", MAX_ENROLLMENT_PHOTOS);
+
+// multer buffers up to 8 x 10 MB in memory as soon as it runs, so the
+// ownership decision has to come BEFORE it: otherwise any Teacher could make
+// the server hold that much for any student id and only then be told 403.
+// (The controller still checks too; this is the cheap early gate.)
+async function authorizeEnrollmentTarget(req, _res, next) {
+  try {
+    await assertCanAccessStudent(req.user, parseId(req.params.id, "id"));
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
 
 router.post(
   "/:id/enrollment-photos",
   requireRole("Teacher", "Admin"),
   enrollmentUserLimiter,
+  authorizeEnrollmentTarget,
   enrollmentPhotoUpload,
   uploadEnrollmentPhotos
 );

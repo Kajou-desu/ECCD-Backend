@@ -13,6 +13,14 @@ import { otpMatches, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
 // wrong-password attempt. Without it, "no such user" answers in a couple of
 // milliseconds and "wrong password" takes ~100ms — a timing difference that
 // lets anyone enumerate which emails have accounts.
+// A new reset code is not issued within this window of the previous one. The
+// response is identical either way (so it reveals nothing about the account);
+// it stops one address being flooded with mail and keeps a double-click or a
+// "resend" tap from invalidating the code the user is about to type.
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+
+class InvalidOtpError extends Error {}
+
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString("hex"), 10);
 
 export async function login(req, res, next) {
@@ -68,6 +76,15 @@ export async function forgotPassword(req, res, next) {
     // Always respond 200 to avoid leaking which emails exist
     if (!user) return res.json({ message: "If the email exists, an OTP was sent" });
 
+    const latest = await prisma.passwordResetOtp.findFirst({
+      where: { email },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    });
+    if (latest && Date.now() - latest.createdAt.getTime() < OTP_RESEND_COOLDOWN_MS) {
+      return res.json({ message: "If the email exists, an OTP was sent" });
+    }
+
     // crypto.randomInt is a CSPRNG — Math.random() is NOT safe for security tokens.
     const otpCode = String(crypto.randomInt(100000, 1000000));
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
@@ -112,32 +129,49 @@ export async function resetPassword(req, res, next) {
       return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
-    if (!otpMatches(otpCode, record.otpCode)) {
-      await prisma.passwordResetOtp.update({
-        where: { id: record.id },
-        data: { attempts: { increment: 1 } },
-      });
-      return res.status(400).json({ message: "Invalid or expired OTP" });
-    }
-
-    // Consume every outstanding OTP for this email, not just the one used,
-    // so a code issued earlier in the same window can't be replayed. Done
-    // BEFORE changing the password and used as the gate: the update only
-    // matches rows still unused, so of two simultaneous requests carrying the
-    // same valid code, exactly one sees count > 0.
-    const consumed = await prisma.passwordResetOtp.updateMany({
-      where: { email, isUsed: false },
-      data: { isUsed: true },
+    // Claim one guess BEFORE comparing, as a single conditional UPDATE. The
+    // old read-compare-then-increment let N parallel requests all read
+    // attempts=0 and each try a different code, exceeding the 5-guess cap;
+    // here the database admits at most MAX_OTP_ATTEMPTS claims in total, however
+    // many requests race. A correct guess also uses up one attempt, which is
+    // harmless because the code is single-use anyway.
+    const claimed = await prisma.passwordResetOtp.updateMany({
+      where: { id: record.id, isUsed: false, attempts: { lt: MAX_OTP_ATTEMPTS } },
+      data: { attempts: { increment: 1 } },
     });
-    if (consumed.count === 0) {
+    if (claimed.count === 0 || !otpMatches(otpCode, record.otpCode)) {
       return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
-    await prisma.user.update({
-      where: { email },
-      data: { passwordHash, tokenVersion: { increment: 1 } },
-    });
+
+    // Consume the codes and change the password in ONE transaction. Before,
+    // the codes were burned first, so a failure while updating the user (DB
+    // error, account deleted or email changed since the code was issued)
+    // left the person with an error and a dead code. The consume step is
+    // still the gate: of two simultaneous requests carrying the same valid
+    // code, exactly one sees count > 0. It consumes every outstanding code
+    // for the email so one issued earlier can't be replayed.
+    try {
+      await prisma.$transaction(async (tx) => {
+        const consumed = await tx.passwordResetOtp.updateMany({
+          where: { email, isUsed: false },
+          data: { isUsed: true },
+        });
+        if (consumed.count === 0) throw new InvalidOtpError();
+        await tx.user.update({
+          where: { email },
+          data: { passwordHash, tokenVersion: { increment: 1 } },
+        });
+      });
+    } catch (err) {
+      // P2025: no user with this email any more. The transaction rolled back,
+      // so nothing was consumed.
+      if (err instanceof InvalidOtpError || err.code === "P2025") {
+        return res.status(400).json({ message: "Invalid or expired OTP" });
+      }
+      throw err;
+    }
 
     res.json({ message: "Password reset successful" });
   } catch (err) {

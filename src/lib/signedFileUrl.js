@@ -5,6 +5,37 @@ const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour — long enough for a normal
 // viewing session, short enough to meaningfully limit exposure if a URL
 // leaks (browser history, logs, referrer headers, screenshots).
 
+// Expiry is rounded UP to a 5-minute boundary. With a raw Date.now() + ttl,
+// every API response minted a different exp/sig for the same file, so the
+// browser saw a new URL each time and its cache (Cache-Control: max-age=300)
+// almost never hit. Within a window the URL is now identical. A link lives
+// between ttl and ttl + 5 min, never less than the ttl it was asked for.
+// Skipped for short custom TTLs, which exist to expire quickly.
+const EXPIRY_BUCKET_MS = 5 * 60 * 1000;
+
+function expiryFor(ttlMs) {
+  const exp = Date.now() + ttlMs;
+  return ttlMs >= EXPIRY_BUCKET_MS ? Math.ceil(exp / EXPIRY_BUCKET_MS) * EXPIRY_BUCKET_MS : exp;
+}
+
+// Origin used in file links. PUBLIC_API_URL (e.g. https://api.example.com) wins
+// when set: req.protocol/Host depend on the proxy setup, and a wrong
+// "trust proxy" hop count yields http:// links that the frontend's CSP
+// img-src would block. Falls back to the request when unset or not a valid
+// http(s) URL.
+function publicBase(req) {
+  const configured = process.env.PUBLIC_API_URL;
+  if (configured) {
+    try {
+      const url = new URL(configured);
+      if (url.protocol === "https:" || url.protocol === "http:") return url.origin;
+    } catch {
+      /* invalid value: fall through to the request-derived origin */
+    }
+  }
+  return `${req.protocol}://${req.get("host")}`;
+}
+
 function sign(filename, exp) {
   // Namespaced (":file-url") so this reuses JWT_SECRET without letting a
   // signed file URL be replayed as, or forged from, a JWT — same secret,
@@ -26,9 +57,9 @@ function sign(filename, exp) {
 export function signFileUrl(req, storedValue, ttlMs = DEFAULT_TTL_MS) {
   if (!storedValue) return storedValue;
   const filename = path.basename(storedValue);
-  const exp = Date.now() + ttlMs;
+  const exp = expiryFor(ttlMs);
   const sig = sign(filename, exp);
-  return `${req.protocol}://${req.get("host")}/api/files/${filename}?exp=${exp}&sig=${sig}`;
+  return `${publicBase(req)}/api/files/${filename}?exp=${exp}&sig=${sig}`;
 }
 
 // Verifies the ?exp=&sig= query params attached by signFileUrl above.

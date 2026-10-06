@@ -93,10 +93,16 @@ def health():
 
 
 @app.post("/reload")
-def reload_known_faces():
-    """Re-reads KNOWN_FACES_DIR after photos are added or removed."""
-    app.state.known = recognizer.load_known_faces(KNOWN_FACES_DIR)
-    return {"students": len(app.state.known)}
+async def reload_known_faces():
+    """Re-reads KNOWN_FACES_DIR after photos are added or removed.
+
+    Takes the same lock as enroll/unenroll: a reload that scans the folder
+    while one of them is mid-swap could otherwise publish a stale snapshot over
+    their update (e.g. bring back an encoding that was just deleted). The scan
+    is blocking, so it runs in the threadpool, off the event loop."""
+    async with app.state.enroll_lock:
+        app.state.known = await run_in_threadpool(recognizer.load_known_faces, KNOWN_FACES_DIR)
+        return {"students": len(app.state.known)}
 
 
 def _sniff_image_ext(data: bytes) -> str | None:

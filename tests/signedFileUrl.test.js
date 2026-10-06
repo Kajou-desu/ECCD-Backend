@@ -83,3 +83,53 @@ describe("signFileUrl + verifyFileSignature round trip", () => {
     }
   });
 });
+
+describe("signFileUrl — stable URLs and public base", () => {
+  const expOf = (url) => Number(new URL(url).searchParams.get("exp"));
+
+  it("returns the identical URL for the same file within a window (so the browser cache can hit)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-05T10:00:10Z"));
+      const first = signFileUrl(mockReq(), "abc123.jpg");
+      vi.setSystemTime(new Date("2026-10-05T10:03:50Z"));
+      expect(signFileUrl(mockReq(), "abc123.jpg")).toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never expires sooner than the requested ttl, and at most one bucket later", () => {
+    const ttl = 60 * 60 * 1000;
+    const before = Date.now();
+    const exp = expOf(signFileUrl(mockReq(), "abc123.jpg", ttl));
+    expect(exp).toBeGreaterThanOrEqual(before + ttl);
+    expect(exp).toBeLessThan(Date.now() + ttl + 5 * 60 * 1000);
+  });
+
+  it("keeps a short custom ttl exact (not rounded up)", () => {
+    const before = Date.now();
+    const exp = expOf(signFileUrl(mockReq(), "abc123.jpg", 1000));
+    expect(exp).toBeLessThanOrEqual(Date.now() + 1000);
+    expect(exp).toBeGreaterThanOrEqual(before + 1000);
+  });
+
+  it("uses PUBLIC_API_URL instead of the request's protocol/host when set", () => {
+    process.env.PUBLIC_API_URL = "https://api.school.example/";
+    try {
+      const req = { protocol: "http", get: () => "internal-host:4000" };
+      expect(signFileUrl(req, "abc123.jpg")).toMatch(/^https:\/\/api\.school\.example\/api\/files\/abc123\.jpg\?/);
+    } finally {
+      delete process.env.PUBLIC_API_URL;
+    }
+  });
+
+  it("ignores an invalid PUBLIC_API_URL and falls back to the request", () => {
+    process.env.PUBLIC_API_URL = "javascript:alert(1)";
+    try {
+      expect(signFileUrl(mockReq(), "abc123.jpg")).toMatch(/^https:\/\/api\.example\.com\//);
+    } finally {
+      delete process.env.PUBLIC_API_URL;
+    }
+  });
+});

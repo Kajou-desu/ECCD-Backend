@@ -366,6 +366,7 @@ describe("arrivedAt is only stamped for today", () => {
   });
 
   it("bulk entry leaves arrivedAt null for past days", async () => {
+    prisma.attendance.findMany.mockResolvedValue([]);
     prisma.$transaction.mockResolvedValue([{ id: 11 }]);
     prisma.attendance.upsert.mockReturnValue({});
     await recordAttendance(
@@ -373,5 +374,75 @@ describe("arrivedAt is only stamped for today", () => {
       mockRes(), vi.fn(),
     );
     expect(prisma.attendance.upsert.mock.calls[0][0].create.arrivedAt).toBeNull();
+  });
+});
+
+describe("recordAttendance — idempotency and error reporting", () => {
+  it("does not touch a record whose status is unchanged (keeps arrivedAt and verification)", async () => {
+    const today = schoolDateString();
+    const stored = { id: 7, studentId: 1, date: new Date(`${today}T00:00:00.000Z`), status: "present", arrivedAt: new Date() };
+    prisma.attendance.findMany.mockResolvedValue([stored]);
+    prisma.$transaction.mockResolvedValue([]);
+    const res = mockRes();
+
+    await recordAttendance({ user: admin, body: [{ studentId: 1, date: today, status: "present" }] }, res, vi.fn());
+
+    expect(prisma.attendance.upsert).not.toHaveBeenCalled();
+    expect(prisma.attendanceVerification.deleteMany).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(res.json).toHaveBeenCalledWith([stored]);
+  });
+
+  it("writes only the changed rows and returns results in request order", async () => {
+    const today = schoolDateString();
+    const unchanged = { id: 7, studentId: 1, date: new Date(`${today}T00:00:00.000Z`), status: "absent" };
+    const written = { id: 8, studentId: 2, status: "present" };
+    prisma.attendance.findMany.mockResolvedValue([unchanged]);
+    prisma.attendance.upsert.mockReturnValue({});
+    prisma.$transaction.mockResolvedValue([written]);
+    const res = mockRes();
+
+    await recordAttendance(
+      { user: admin, body: [{ studentId: 1, date: today, status: "absent" }, { studentId: 2, date: today, status: "present" }] },
+      res, vi.fn(),
+    );
+
+    expect(prisma.attendance.upsert).toHaveBeenCalledTimes(1);
+    expect(prisma.attendanceVerification.deleteMany).toHaveBeenCalledWith({ where: { attendanceId: { in: [8] } } });
+    expect(res.json).toHaveBeenCalledWith([unchanged, written]);
+  });
+
+  it("names the failing row in the error", async () => {
+    const next = vi.fn();
+    await recordAttendance(
+      { user: admin, body: [{ studentId: 1, date: "2020-01-15", status: "present" }, { studentId: 2, date: "2020-01-15", status: "bogus" }] },
+      mockRes(), next,
+    );
+    expect(next.mock.calls[0][0].message).toMatch(/^Row 2: /);
+    expect(next.mock.calls[0][0].status).toBe(400);
+  });
+
+  it("rejects a null entry with a 400 instead of throwing a TypeError", async () => {
+    const next = vi.fn();
+    await recordAttendance({ user: admin, body: [null] }, mockRes(), next);
+    expect(next.mock.calls[0][0].status).toBe(400);
+  });
+});
+
+describe("getChildAttendance — log dates", () => {
+  it("formats the stored UTC-midnight date in UTC, so a server west of UTC can't show the previous day", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    prisma.attendance.findMany.mockResolvedValue([
+      { date: new Date("2026-10-01T00:00:00.000Z"), status: "absent", arrivedAt: null, departedAt: null },
+    ]);
+    const spy = vi.spyOn(Date.prototype, "toLocaleDateString");
+    const res = mockRes();
+    try {
+      await getChildAttendance({ user: admin, params: { childId: "5" }, query: { month: "2026-10" } }, res, vi.fn());
+      expect(spy).toHaveBeenCalledWith("en-US", expect.objectContaining({ timeZone: "UTC" }));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(res.json.mock.calls[0][0].logs[0].date).toBe("Oct 01, 2026");
   });
 });

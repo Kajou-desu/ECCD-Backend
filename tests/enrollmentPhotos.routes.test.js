@@ -106,6 +106,27 @@ describe("POST /students/:id/enrollment-photos", () => {
     expect(enrollStudentPhotos).not.toHaveBeenCalled();
   });
 
+  it("rejects the WHOLE upload when one file is an unsupported type (no silent partial enrollment)", async () => {
+    const res = await request(app).post(URL).set("Authorization", auth())
+      .attach("photos", JPEG, { filename: "a.jpg", contentType: "image/jpeg" })
+      .attach("photos", Buffer.from("RIFFxxxxWEBP"), { filename: "b.webp", contentType: "image/webp" });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/JPEG or PNG/);
+    expect(enrollStudentPhotos).not.toHaveBeenCalled();
+  });
+
+  it("checks ownership BEFORE multer buffers the body (a Teacher's request for another teacher's student is 403, not a multer error)", async () => {
+    prisma.student.findUnique.mockResolvedValue({ id: 5, teacherId: 99 }); // someone else's student
+    // 9 files would make multer answer 400 if it ran first.
+    let req = request(app).post(URL).set("Authorization", auth());
+    for (let i = 0; i < 9; i += 1) {
+      req = req.attach("photos", JPEG, { filename: `p${i}.jpg`, contentType: "image/jpeg" });
+    }
+    const res = await req;
+    expect(res.status).toBe(403);
+    expect(enrollStudentPhotos).not.toHaveBeenCalled();
+  });
+
   it("rejects bytes that don't match the declared image/jpeg type (HTML disguised as a photo)", async () => {
     const res = await request(app).post(URL).set("Authorization", auth())
       .attach("photos", Buffer.from("<html><script>alert(1)</script></html>"), {

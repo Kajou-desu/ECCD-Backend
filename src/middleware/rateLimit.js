@@ -70,9 +70,15 @@ export const apiLimiter = rateLimit({
 
 // Login / password-reset endpoints — much stricter to slow brute force
 // and OTP-guessing attempts.
+//
+// skipSuccessfulRequests: only FAILED attempts count. Otherwise every
+// successful login ate the same budget, and a school's staff sharing one
+// NAT address locked each other out at the 11th morning login. Brute force
+// is made of failures, so this loses no protection against it.
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many attempts, please try again later" },
@@ -105,7 +111,26 @@ export const authEmailLimiter = rateLimit({
   message: { message: "Too many attempts for this account, please try again later" },
   store: getStore("rl:auth-email:"),
   passOnStoreError: true,
+  // Failed attempts only, same reasoning as authLimiter: a legitimate user's
+  // successful logins must not count towards locking their own account.
+  skipSuccessfulRequests: true,
   keyGenerator: emailRateLimitKey,
+});
+
+// POST /auth/forgot-password ALWAYS answers 200 (so as not to reveal which
+// emails exist), which means skipSuccessfulRequests would exempt it from the
+// limiters above entirely. It gets its own IP bucket that counts every call,
+// and is deliberately NOT keyed by email: an email-keyed bucket here would
+// let anyone lock a victim out of password reset by spamming their address.
+// Per-address flooding is bounded by the resend cooldown in the controller.
+export const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many attempts, please try again later" },
+  store: getStore("rl:forgot-password:"),
+  passOnStoreError: true,
 });
 
 // The limiters above are keyed by IP, which is the wrong bucket for
@@ -142,6 +167,17 @@ export const profileUpdateLimiter = perUserLimiter(
   "rl:profile:",
   20,
   "Too many profile updates, please try again later"
+);
+
+// Account-action codes (request a code / change password / delete account).
+// These routes sit behind requireAuth, so they are limited per account rather
+// than per IP: sharing authLimiter's IP bucket meant a school's staff and
+// parents behind one NAT exhausted each other's budget, and made the login
+// limit and these profile actions fight over the same counter.
+export const accountOtpLimiter = perUserLimiter(
+  "rl:account-otp:",
+  10,
+  "Too many attempts, please try again later"
 );
 
 // Notifications: per-IP ceiling before auth (sized for a whole school behind

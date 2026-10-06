@@ -19,6 +19,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     },
     student: {
       findMany: vi.fn(),
+      count: vi.fn(),
     },
     accountActionOtp: {
       findFirst: vi.fn(),
@@ -70,6 +71,8 @@ function mockValidOtp() {
     expiresAt: new Date(Date.now() + 60_000),
     attempts: 0,
   });
+  // 1st updateMany claims the attempt, 2nd consumes the code; both succeed.
+  prisma.accountActionOtp.updateMany.mockResolvedValue({ count: 1 });
 }
 
 beforeEach(() => {
@@ -422,6 +425,81 @@ describe("deleteMyAccount", () => {
 
     expect(prisma.user.delete).toHaveBeenCalledWith({ where: { id: 1 } });
     expect(res.status).toHaveBeenCalledWith(204);
+  });
+});
+
+describe("deleteMyAccount — OTP handling and Teacher guard", () => {
+  const req = (role = "Parent") => ({
+    body: { password: "correct-horse-1", otpCode: VALID_OTP },
+    user: { id: 1, role },
+  });
+
+  it("does not consume the code when the password is wrong (so one typo doesn't force a new code)", async () => {
+    const passwordHash = await bcrypt.hash("some-other-pass-1", 10);
+    prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Parent", passwordHash });
+    mockValidOtp();
+    const res = mockRes();
+
+    await deleteMyAccount(req(), res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    // Only the attempt claim ran; nothing flipped isUsed.
+    const calls = prisma.accountActionOtp.updateMany.mock.calls.map((c) => c[0].data);
+    expect(calls).toEqual([{ attempts: { increment: 1 } }]);
+  });
+
+  it("consumes the code only after every check has passed", async () => {
+    const passwordHash = await bcrypt.hash("correct-horse-1", 10);
+    prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Parent", passwordHash });
+    prisma.user.delete.mockResolvedValue({});
+    mockValidOtp();
+
+    await deleteMyAccount(req(), mockRes(), vi.fn());
+
+    const calls = prisma.accountActionOtp.updateMany.mock.calls.map((c) => c[0].data);
+    expect(calls).toEqual([{ attempts: { increment: 1 } }, { isUsed: true }]);
+  });
+
+  it("refuses to delete a Teacher who still has students, and keeps the code usable", async () => {
+    const passwordHash = await bcrypt.hash("correct-horse-1", 10);
+    prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Teacher", passwordHash });
+    prisma.student.count.mockResolvedValue(3);
+    mockValidOtp();
+    const res = mockRes();
+
+    await deleteMyAccount(req("Teacher"), res, vi.fn());
+
+    expect(prisma.student.count).toHaveBeenCalledWith({ where: { teacherId: 1 } });
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    const calls = prisma.accountActionOtp.updateMany.mock.calls.map((c) => c[0].data);
+    expect(calls).not.toContainEqual({ isUsed: true });
+  });
+
+  it("deletes a Teacher with no students", async () => {
+    const passwordHash = await bcrypt.hash("correct-horse-1", 10);
+    prisma.user.findUnique.mockResolvedValue({ id: 1, role: "Teacher", passwordHash });
+    prisma.student.count.mockResolvedValue(0);
+    prisma.user.delete.mockResolvedValue({});
+    mockValidOtp();
+    const res = mockRes();
+
+    await deleteMyAccount(req("Teacher"), res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(204);
+  });
+
+  it("rejects when parallel requests already used the attempts (claim matches no row)", async () => {
+    prisma.accountActionOtp.findFirst.mockResolvedValue({
+      id: 1, otpCode: VALID_OTP, expiresAt: new Date(Date.now() + 60_000), attempts: 0,
+    });
+    prisma.accountActionOtp.updateMany.mockResolvedValue({ count: 0 });
+    const res = mockRes();
+
+    await deleteMyAccount(req(), res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(prisma.user.delete).not.toHaveBeenCalled();
   });
 });
 

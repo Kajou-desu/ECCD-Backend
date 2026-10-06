@@ -211,22 +211,44 @@ export async function recordAttendance(req, res, next) {
       return res.status(400).json({ message: "Too many records in one request" });
     }
 
-    const validated = entries.map((e) => {
-      const dateString = requireDateString(e.date);
-      assertNotFutureDate(dateString);
-      return {
-        studentId: parseId(e.studentId, "studentId"),
-        dateString,
-        date: toDate(dateString),
-        status: requireAttendanceStatus(e.status),
-      };
+    // Report WHICH row is bad: with up to 200 rows, a bare "Invalid date"
+    // gives the teacher nothing to fix.
+    const validated = entries.map((e, index) => {
+      try {
+        // A null/array/primitive entry would otherwise throw a TypeError (500).
+        if (e === null || typeof e !== "object" || Array.isArray(e)) {
+          throw new AppError("Invalid record", 400);
+        }
+        const dateString = requireDateString(e.date);
+        assertNotFutureDate(dateString);
+        return {
+          studentId: parseId(e.studentId, "studentId"),
+          dateString,
+          date: toDate(dateString),
+          status: requireAttendanceStatus(e.status),
+        };
+      } catch (err) {
+        if (err instanceof AppError) throw new AppError(`Row ${index + 1}: ${err.message}`, err.status);
+        throw err;
+      }
     });
 
     // All-or-nothing ownership check before the transaction opens.
     await assertCanAccessStudents(req.user, validated.map((e) => e.studentId));
 
-    const results = await prisma.$transaction(
-      validated.map(({ studentId, date, dateString, status }) =>
+    // Idempotent: re-posting a record whose status already matches changes
+    // nothing. Previously it reset arrivedAt to now, cleared departedAt and
+    // deleted the verification row — downgrading a face/BLE "verified"
+    // present to a manual one just because the form was submitted twice.
+    const existing = await prisma.attendance.findMany({
+      where: { OR: validated.map(({ studentId, date }) => ({ studentId, date })) },
+    });
+    const keyOf = (entry) => `${entry.studentId}:${entry.dateString}`;
+    const existingByKey = new Map(existing.map((r) => [`${r.studentId}:${r.date.toISOString().slice(0, 10)}`, r]));
+    const toWrite = validated.filter((entry) => existingByKey.get(keyOf(entry))?.status !== entry.status);
+
+    const written = await prisma.$transaction(
+      toWrite.map(({ studentId, date, dateString, status }) =>
         prisma.attendance.upsert({
           where: { studentId_date: { studentId, date } },
           update: {
@@ -243,10 +265,17 @@ export async function recordAttendance(req, res, next) {
         })
       )
     );
-    // A manual edit supersedes any automatic evidence for these records.
-    await prisma.attendanceVerification.deleteMany({
-      where: { attendanceId: { in: results.map((r) => r.id) } },
-    });
+    // A manual edit supersedes any automatic evidence for the records that
+    // actually changed.
+    if (written.length) {
+      await prisma.attendanceVerification.deleteMany({
+        where: { attendanceId: { in: written.map((r) => r.id) } },
+      });
+    }
+
+    // Respond in request order, mixing untouched and written records.
+    const writtenByKey = new Map(toWrite.map((entry, i) => [keyOf(entry), written[i]]));
+    const results = validated.map((entry) => writtenByKey.get(keyOf(entry)) ?? existingByKey.get(keyOf(entry)));
     res.status(201).json(results);
   } catch (err) {
     next(err);
@@ -308,7 +337,10 @@ export async function getChildAttendance(req, res, next) {
       else if (r.status === "excused") excusedDays += 1;
 
       return {
+        // r.date is a UTC-midnight @db.Date; without timeZone "UTC" a server
+        // running west of UTC would format it as the previous day.
         date: r.date.toLocaleDateString("en-US", {
+          timeZone: "UTC",
           month: "short",
           day: "2-digit",
           year: "numeric",

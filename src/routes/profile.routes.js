@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { upload } from "../middleware/upload.js";
-import { authLimiter, profileUpdateLimiter } from "../middleware/rateLimit.js";
+import { accountOtpLimiter, profileUpdateLimiter } from "../middleware/rateLimit.js";
 import {
   updateUser,
   updateMyProfile,
@@ -23,9 +23,9 @@ router.put("/update", requireAuth, requireRole("Teacher", "Admin"), updateUser);
 // account only (req.user.id, never a client-supplied id).
 router.put("/me", requireAuth, profileUpdateLimiter, updateMyProfile);
 router.post("/me/photo", requireAuth, upload.single("photo", { imagesOnly: true }), uploadMyProfilePhoto);
-router.post("/me/password/request-otp", requireAuth, authLimiter, requestPasswordChangeOtp);
-router.put("/me/password", requireAuth, authLimiter, changeMyPassword);
-router.post("/me/delete/request-otp", requireAuth, authLimiter, requestAccountDeletionOtp);
-router.delete("/me", requireAuth, authLimiter, deleteMyAccount);
+router.post("/me/password/request-otp", requireAuth, accountOtpLimiter, requestPasswordChangeOtp);
+router.put("/me/password", requireAuth, accountOtpLimiter, changeMyPassword);
+router.post("/me/delete/request-otp", requireAuth, accountOtpLimiter, requestAccountDeletionOtp);
+router.delete("/me", requireAuth, accountOtpLimiter, deleteMyAccount);
 
 export default router;

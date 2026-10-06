@@ -21,6 +21,7 @@ import { logger } from "../lib/logger.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
 import { fileUrl } from "../middleware/upload.js";
 import { isRecognitionConfigured, removeStudentEnrollment } from "../services/recognitionClient.js";
+import { schoolDateString } from "../utils/schoolDate.js";
 
 // Lean shape for roster/table/dashboard views (StudentTable, EventCard,
 // UploadStudentWork picker, useStudents search).
@@ -79,12 +80,18 @@ function toStudentDetailResponse(req, student) {
   };
 }
 
+// The year comes from the school-local date, not a literal: "2026" was
+// hard-coded, so every student created in later years got a 2026 code.
+function codeYear() {
+  return schoolDateString().slice(0, 4);
+}
+
 function temporaryStudentCode() {
-  return `ECCD-2026-TEMP-${crypto.randomUUID()}`;
+  return `ECCD-${codeYear()}-TEMP-${crypto.randomUUID()}`;
 }
 
 function finalStudentCode(studentId) {
-  return `ECCD-2026-${studentId}`;
+  return `ECCD-${codeYear()}-${studentId}`;
 }
 
 const EMAIL_FIELDS = ["motherEmail", "fatherEmail", "guardianEmail"];

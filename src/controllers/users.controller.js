@@ -49,21 +49,37 @@ async function issueAccountOtp(userId, email, action) {
   );
 }
 
-async function verifyAccountOtp(userId, action, otpCode) {
+// Checks a code WITHOUT consuming it, and returns the matching record (or
+// null). One guess is claimed with a single conditional UPDATE before the
+// comparison, so parallel requests can't exceed MAX_OTP_ATTEMPTS (the old
+// read-compare-increment sequence let them all read attempts=0).
+async function checkAccountOtp(userId, action, otpCode) {
   const record = await prisma.accountActionOtp.findFirst({
     where: { userId, action, isUsed: false },
     orderBy: { createdAt: "desc" },
   });
-  if (!record || record.expiresAt < new Date() || record.attempts >= MAX_OTP_ATTEMPTS) return false;
-  if (!otpMatches(otpCode, record.otpCode)) {
-    await prisma.accountActionOtp.update({
-      where: { id: record.id },
-      data: { attempts: { increment: 1 } },
-    });
-    return false;
-  }
-  await prisma.accountActionOtp.update({ where: { id: record.id }, data: { isUsed: true } });
-  return true;
+  if (!record || record.expiresAt < new Date() || record.attempts >= MAX_OTP_ATTEMPTS) return null;
+
+  const claimed = await prisma.accountActionOtp.updateMany({
+    where: { id: record.id, isUsed: false, attempts: { lt: MAX_OTP_ATTEMPTS } },
+    data: { attempts: { increment: 1 } },
+  });
+  if (claimed.count === 0 || !otpMatches(otpCode, record.otpCode)) return null;
+  return record;
+}
+
+// Single-use: only the request that flips isUsed false -> true wins.
+async function consumeAccountOtp(record) {
+  const { count } = await prisma.accountActionOtp.updateMany({
+    where: { id: record.id, isUsed: false },
+    data: { isUsed: true },
+  });
+  return count === 1;
+}
+
+async function verifyAccountOtp(userId, action, otpCode) {
+  const record = await checkAccountOtp(userId, action, otpCode);
+  return record ? consumeAccountOtp(record) : false;
 }
 
 // Excludes passwordHash/tokenVersion — never sent to the client.
@@ -456,7 +472,11 @@ export async function deleteMyAccount(req, res, next) {
     if (typeof password !== "string" || !password) {
       return res.status(400).json({ message: "Password is required to confirm deletion" });
     }
-    if (!(await verifyAccountOtp(req.user.id, ACTIONS.ACCOUNT_DELETE, otpCode))) {
+    // The code is checked first (so the password can't be probed without it)
+    // but only CONSUMED once the password is also right — a mistyped password
+    // used to burn the code and force a new request.
+    const otpRecord = await checkAccountOtp(req.user.id, ACTIONS.ACCOUNT_DELETE, otpCode);
+    if (!otpRecord) {
       return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
@@ -465,12 +485,29 @@ export async function deleteMyAccount(req, res, next) {
     if (!(await bcrypt.compare(password, user.passwordHash))) {
       return res.status(401).json({ message: "Incorrect password" });
     }
+    // Student.teacherId is ON DELETE SET NULL, so deleting a Teacher who still
+    // has students would leave them assigned to nobody — invisible to every
+    // Teacher. Make them hand the students over first.
+    if (user.role === "Teacher") {
+      const assigned = await prisma.student.count({ where: { teacherId: user.id } });
+      if (assigned > 0) {
+        return res.status(400).json({
+          message: "Reassign your students to another teacher before deleting this account.",
+        });
+      }
+    }
 
     if (user.role === "Admin") {
       const adminCount = await prisma.user.count({ where: { role: "Admin", isActive: true } });
       if (adminCount <= 1) {
         return res.status(400).json({ message: "Promote another account to Admin before deleting this one." });
       }
+    }
+
+    // Last step before the irreversible one: every refusal above leaves the
+    // code usable for a retry.
+    if (!(await consumeAccountOtp(otpRecord))) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
     await prisma.user.delete({ where: { id: user.id } });

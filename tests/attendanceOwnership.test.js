@@ -159,6 +159,7 @@ describe("recordAttendance (bulk) — ownership", () => {
   });
 
   it("allows a Teacher when every student is theirs", async () => {
+    prisma.attendance.findMany.mockResolvedValue([]);
     prisma.student.count.mockResolvedValue(3);
     prisma.$transaction.mockResolvedValue([{ id: 1 }, { id: 2 }, { id: 3 }]);
     const res = mockRes();
@@ -171,6 +172,7 @@ describe("recordAttendance (bulk) — ownership", () => {
   });
 
   it("allows an Admin without any ownership query", async () => {
+    prisma.attendance.findMany.mockResolvedValue([]);
     prisma.$transaction.mockResolvedValue([{ id: 1 }]);
     const next = vi.fn();
     await recordAttendance({ user: admin, body: body([1]) }, mockRes(), next);

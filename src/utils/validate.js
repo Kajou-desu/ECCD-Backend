@@ -1,8 +1,11 @@
 import { AppError } from "../middleware/errorHandler.js";
+import { schoolDateString } from "./schoolDate.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH_RE = /^\d{4}-\d{2}$/;
+const MIN_BIRTH_YEAR = 1900;
+const MAX_EMAIL_LENGTH = 254; // RFC 5321
 const PHONE_RE = /^[0-9+\-\s()]{7,20}$/;
 
 // Philippine mobile number, with or without country code/trunk prefix:
@@ -35,9 +38,16 @@ export const SESSIONS = ["morning", "afternoon"];
 export const STUDENT_STATUSES = ["active", "inactive"];
 export const GENDERS = ["male", "female", "other", "prefer_not_to_say"];
 
+// Prisma Int columns are 32-bit signed; anything larger fails inside the
+// database driver (a 500) instead of being rejected here as a 400.
+const MAX_INT32 = 2147483647;
+
+// Accepts a positive integer, either as a number or as a plain decimal digit
+// string. Number() alone would also accept "1e3", "0x10" and " 5 ".
 export function parseId(raw, label = "id") {
-  const id = Number(raw);
-  if (!Number.isInteger(id) || id <= 0) {
+  const isDigitString = typeof raw === "string" && /^\d{1,10}$/.test(raw);
+  const id = typeof raw === "number" ? raw : isDigitString ? Number(raw) : NaN;
+  if (!Number.isInteger(id) || id <= 0 || id > MAX_INT32) {
     throw new AppError(`Invalid ${label}`, 400);
   }
   return id;
@@ -57,15 +67,26 @@ export function parsePagination(query, { maxPageSize = 200 } = {}) {
     throw new AppError(`pageSize must be ${maxPageSize} or less`, 400);
   }
 
-  return { page, pageSize, skip: (page - 1) * pageSize, take: pageSize };
+  const skip = (page - 1) * pageSize;
+  if (skip > MAX_INT32) {
+    throw new AppError("Invalid page", 400);
+  }
+
+  return { page, pageSize, skip, take: pageSize };
 }
 
 export function requireEmail(email) {
-  if (typeof email !== "string" || !EMAIL_RE.test(email)) {
+  if (typeof email !== "string" || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email)) {
     throw new AppError("Invalid email", 400);
   }
   return email.toLowerCase().trim();
 }
+
+// Sanity window for school/calendar dates (attendance, events, daily themes).
+// Not a business rule — it only stops typos such as year 0202 or 20260 from
+// being stored; future-date rules stay with the callers that need them.
+const MIN_CALENDAR_YEAR = 2000;
+const MAX_CALENDAR_YEAR = 2100;
 
 export function requireDateString(value, label = "date") {
   if (typeof value !== "string" || !DATE_RE.test(value)) {
@@ -74,6 +95,9 @@ export function requireDateString(value, label = "date") {
   const [year, month, day] = value.split("-").map(Number);
   if (!isRealCalendarDate(year, month, day)) {
     throw new AppError(`Invalid ${label}, expected YYYY-MM-DD`, 400);
+  }
+  if (year < MIN_CALENDAR_YEAR || year > MAX_CALENDAR_YEAR) {
+    throw new AppError(`Invalid ${label}, year must be between ${MIN_CALENDAR_YEAR} and ${MAX_CALENDAR_YEAR}`, 400);
   }
   return value;
 }
@@ -114,7 +138,7 @@ export function optionalString(value, maxLength = 1000) {
 
 export function optionalEmail(value) {
   if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string" || !EMAIL_RE.test(value)) {
+  if (typeof value !== "string" || value.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(value)) {
     throw new AppError("Invalid email", 400);
   }
   return value.toLowerCase().trim();
@@ -166,9 +190,12 @@ export function requirePassword(value, label = "password") {
   if (typeof value !== "string" || value.length < 10) {
     throw new AppError(`${label} must be at least 10 characters`, 400);
   }
-  // bcrypt ignores everything past 72 bytes; reject rather than silently truncate.
-  if (value.length > 72) {
-    throw new AppError(`${label} must be at most 72 characters`, 400);
+  // bcrypt ignores everything past 72 BYTES, and a non-ASCII character takes
+  // 2-4 bytes in UTF-8, so a character count would let a 40-character
+  // password through that is then silently truncated. Reject rather than
+  // truncate.
+  if (Buffer.byteLength(value, "utf8") > 72) {
+    throw new AppError(`${label} must be at most 72 characters (non-English characters count as more than one)`, 400);
   }
   if (!/[A-Za-z]/.test(value) || !/[0-9]/.test(value)) {
     throw new AppError(`${label} must contain at least one letter and one number`, 400);
@@ -184,6 +211,11 @@ export function requireBirthday(value) {
   if (!isRealCalendarDate(year, month, day)) {
     throw new AppError("Invalid birthday, expected YYYY-MM-DD", 400);
   }
+  // A birthday can't be in the future (compared against the school-local
+  // today) or implausibly old for a child record.
+  if (year < MIN_BIRTH_YEAR || value > schoolDateString()) {
+    throw new AppError("Invalid birthday, date is out of range", 400);
+  }
   return new Date(`${value}T00:00:00.000Z`);
 }
 
@@ -196,7 +228,11 @@ export function requireGender(value) {
 
 // 0-100 inclusive integer, as sent from a progress slider/input.
 export function requireProgress(value) {
-  const progress = Number(value);
+  // Number("") / Number(null) / Number([]) are all 0, which would silently
+  // record "0% progress" for a missing or malformed value. Only a number or
+  // a plain digit string is accepted.
+  const progress =
+    typeof value === "number" ? value : typeof value === "string" && /^\d{1,3}$/.test(value) ? Number(value) : NaN;
   if (!Number.isInteger(progress) || progress < 0 || progress > 100) {
     throw new AppError("Invalid progress, expected an integer from 0 to 100", 400);
   }

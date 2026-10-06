@@ -6,6 +6,9 @@ process.env.JWT_SECRET = "test-secret-at-least-32-characters-long";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     user: { findUnique: vi.fn(), update: vi.fn() },
+    // resetPassword runs its consume + password update inside one
+    // transaction; passing `prisma` as `tx` keeps every mock below in play.
+    $transaction: vi.fn((callback) => callback(prisma)),
     passwordResetOtp: {
       create: vi.fn(),
       findFirst: vi.fn(),
@@ -203,6 +206,27 @@ describe("forgotPassword", () => {
     });
   });
 
+  it("does not issue a new code within the resend cooldown, and answers the same", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
+    prisma.passwordResetOtp.findFirst.mockResolvedValue({ createdAt: new Date(Date.now() - 10_000) });
+
+    const res = mockRes();
+    await forgotPassword({ body: { email: "user@example.com" } }, res, vi.fn());
+
+    expect(prisma.passwordResetOtp.create).not.toHaveBeenCalled();
+    expect(sendOtpEmail).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({ message: "If the email exists, an OTP was sent" });
+  });
+
+  it("issues a new code once the cooldown has passed", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
+    prisma.passwordResetOtp.findFirst.mockResolvedValue({ createdAt: new Date(Date.now() - 61_000) });
+
+    await forgotPassword({ body: { email: "user@example.com" } }, mockRes(), vi.fn());
+
+    expect(prisma.passwordResetOtp.create).toHaveBeenCalledOnce();
+  });
+
   it("answers 200 (not 500) when the email provider fails, so failures don't reveal which emails exist", async () => {
     prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
     sendOtpEmail.mockRejectedValueOnce(new Error("SMTP down"));
@@ -256,8 +280,9 @@ describe("resetPassword", () => {
     expect(res.status).toHaveBeenCalledWith(400);
   });
 
-  it("counts a wrong code against the OTP and does not reset the password", async () => {
+  it("claims an attempt before comparing, and a wrong code does not reset the password", async () => {
     prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
+    prisma.passwordResetOtp.updateMany.mockResolvedValue({ count: 1 });
 
     const req = {
       body: { email: "user@example.com", otpCode: "000000", newPassword: "newpassword123" },
@@ -266,8 +291,8 @@ describe("resetPassword", () => {
     await resetPassword(req, res, vi.fn());
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(prisma.passwordResetOtp.update).toHaveBeenCalledWith({
-      where: { id: 7 },
+    expect(prisma.passwordResetOtp.updateMany).toHaveBeenCalledWith({
+      where: { id: 7, isUsed: false, attempts: { lt: 5 } },
       data: { attempts: { increment: 1 } },
     });
     expect(prisma.user.update).not.toHaveBeenCalled();
@@ -286,15 +311,35 @@ describe("resetPassword", () => {
     expect(prisma.user.update).not.toHaveBeenCalled();
   });
 
-  it("refuses a code that was already consumed by a concurrent request", async () => {
+  it("refuses a guess when parallel requests already used up the attempts (claim matches no row)", async () => {
+    // Every request read attempts=0, but the conditional UPDATE only admits 5.
     prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
     prisma.passwordResetOtp.updateMany.mockResolvedValue({ count: 0 });
 
-    const req = {
-      body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" },
-    };
     const res = mockRes();
-    await resetPassword(req, res, vi.fn());
+    await resetPassword(
+      { body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" } },
+      res,
+      vi.fn(),
+    );
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a code that was already consumed by a concurrent request", async () => {
+    prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
+    // 1st updateMany = claim the attempt, 2nd = consume (already used elsewhere)
+    prisma.passwordResetOtp.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+
+    const res = mockRes();
+    await resetPassword(
+      { body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" } },
+      res,
+      vi.fn(),
+    );
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(prisma.user.update).not.toHaveBeenCalled();
@@ -304,11 +349,12 @@ describe("resetPassword", () => {
     prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
     prisma.passwordResetOtp.updateMany.mockResolvedValue({ count: 1 });
 
-    const req = {
-      body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" },
-    };
     const res = mockRes();
-    await resetPassword(req, res, vi.fn());
+    await resetPassword(
+      { body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" } },
+      res,
+      vi.fn(),
+    );
 
     expect(prisma.user.update).toHaveBeenCalledWith({
       where: { email: "user@example.com" },
@@ -318,6 +364,39 @@ describe("resetPassword", () => {
       where: { email: "user@example.com", isUsed: false },
       data: { isUsed: true },
     });
+    expect(prisma.$transaction).toHaveBeenCalledOnce();
     expect(res.json).toHaveBeenCalledWith({ message: "Password reset successful" });
+  });
+
+  it("answers 400 (not 500) and rolls back when the account no longer exists", async () => {
+    prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
+    prisma.passwordResetOtp.updateMany.mockResolvedValue({ count: 1 });
+    prisma.user.update.mockRejectedValue(Object.assign(new Error("gone"), { code: "P2025" }));
+
+    const res = mockRes();
+    const next = vi.fn();
+    await resetPassword(
+      { body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" } },
+      res,
+      next,
+    );
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  it("passes unexpected database errors to the error handler, not to the client", async () => {
+    prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
+    prisma.passwordResetOtp.updateMany.mockResolvedValue({ count: 1 });
+    prisma.user.update.mockRejectedValue(new Error("connection lost"));
+
+    const next = vi.fn();
+    await resetPassword(
+      { body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" } },
+      mockRes(),
+      next,
+    );
+
+    expect(next).toHaveBeenCalledOnce();
   });
 });
