@@ -50,6 +50,8 @@ class TestLoadKnownFaces:
         (tmp_path / "12" / "notes.txt").write_bytes(b"x")          # not an image
         (tmp_path / "Maria Santos").mkdir()                          # named folder: ignored
         (tmp_path / "Maria Santos" / "a.jpg").write_bytes(b"x")
+        (tmp_path / "012").mkdir()                                   # leading zero: ignored
+        (tmp_path / "012" / "a.jpg").write_bytes(b"x")
         (tmp_path / "..hidden").mkdir()
         (tmp_path / "..hidden" / "a.jpg").write_bytes(b"x")
         (tmp_path / "loose.jpg").write_bytes(b"x")                   # file, not a folder

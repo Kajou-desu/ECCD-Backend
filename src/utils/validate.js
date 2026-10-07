@@ -7,6 +7,7 @@ const MONTH_RE = /^\d{4}-\d{2}$/;
 const MIN_BIRTH_YEAR = 1900;
 const MAX_EMAIL_LENGTH = 254; // RFC 5321
 const PHONE_RE = /^[0-9+\-\s()]{7,20}$/;
+const MIN_PHONE_DIGITS = 7;
 
 // Philippine mobile number, with or without country code/trunk prefix:
 // 9XXXXXXXXX (bare 10 digits), 09XXXXXXXXX, 639XXXXXXXXX or +639XXXXXXXXX
@@ -133,7 +134,8 @@ export function optionalString(value, maxLength = 1000) {
   if (typeof value !== "string" || value.length > maxLength) {
     throw new AppError("Invalid text field", 400);
   }
-  return value.trim();
+  // Whitespace-only counts as blank, same as "".
+  return value.trim() || null;
 }
 
 export function optionalEmail(value) {
@@ -145,7 +147,11 @@ export function optionalEmail(value) {
 }
 
 export function requirePhone(value, label = "phone") {
-  if (typeof value !== "string" || !PHONE_RE.test(value.trim())) {
+  if (
+    typeof value !== "string" ||
+    !PHONE_RE.test(value.trim()) ||
+    value.replace(/\D/g, "").length < MIN_PHONE_DIGITS
+  ) {
     throw new AppError(`Invalid ${label}`, 400);
   }
   return value.trim();

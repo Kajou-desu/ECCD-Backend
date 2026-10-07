@@ -76,6 +76,17 @@ describe("getEvents", () => {
     );
   });
 
+  it("honours ?page/?pageSize on the all-events list and rejects an oversized page", async () => {
+    prisma.event.findMany.mockResolvedValue([]);
+
+    await getEvents({ query: { all: "true", page: "2", pageSize: "50" } }, mockRes(), vi.fn());
+    expect(prisma.event.findMany).toHaveBeenCalledWith({ orderBy: { date: "desc" }, skip: 50, take: 50 });
+
+    const next = vi.fn();
+    await getEvents({ query: { all: "true", page: "1", pageSize: "5000" } }, mockRes(), next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+  });
+
   it("returns event options across all dates for album associations", async () => {
     prisma.event.findMany.mockResolvedValue([
       { id: 4, title: "Family Day", date: new Date(Date.UTC(2026, 8, 12)) },
@@ -84,7 +95,7 @@ describe("getEvents", () => {
     const res = mockRes();
     await getEvents({ query: { all: "true" } }, res, vi.fn());
 
-    expect(prisma.event.findMany).toHaveBeenCalledWith({ orderBy: { date: "desc" } });
+    expect(prisma.event.findMany).toHaveBeenCalledWith({ orderBy: { date: "desc" }, take: 500 });
     expect(res.json).toHaveBeenCalledWith([
       { id: 4, title: "Family Day", dateKey: "2026-09-12" },
     ]);

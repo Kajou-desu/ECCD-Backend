@@ -53,6 +53,24 @@ beforeEach(() => {
 });
 
 describe("getNotifications", () => {
+  it("defaults to 100 rows, honours ?limit, and rejects more than 200", async () => {
+    prisma.notification.findMany.mockResolvedValue([]);
+
+    await getNotifications({ query: {}, user: { id: 7 } }, mockRes(), vi.fn());
+    expect(prisma.notification.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 100 }));
+
+    await getNotifications({ query: { limit: "25" }, user: { id: 7 } }, mockRes(), vi.fn());
+    expect(prisma.notification.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 25 }));
+
+    for (const limit of ["201", "0", "abc"]) {
+      const next = vi.fn();
+      prisma.notification.findMany.mockClear();
+      await getNotifications({ query: { limit }, user: { id: 7 } }, mockRes(), next);
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+      expect(prisma.notification.findMany).not.toHaveBeenCalled();
+    }
+  });
+
   it("scopes the query to the current user", async () => {
     prisma.notification.findMany.mockResolvedValue([]);
 

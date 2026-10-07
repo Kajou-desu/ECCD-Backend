@@ -55,6 +55,11 @@ export async function getFile(req, res, next) {
     // expiring URL, and every other endpoint keeps helmet's stricter default.
     res.set({
       "Content-Type": mimeFromKey(key),
+      // Inline so a PDF previews the same way in every browser; the filename is
+      // the validated storage key (a plain name), never client input.
+      "Content-Disposition": `inline; filename="${key.replace(/[^A-Za-z0-9._-]/g, "_")}"`,
+      // The URL carries the signature; don't leak it to other sites via Referer.
+      "Referrer-Policy": "no-referrer",
       "Cache-Control": "private, max-age=300",
       "Cross-Origin-Resource-Policy": "cross-origin",
       "Content-Security-Policy": frameAncestorsPolicy(),

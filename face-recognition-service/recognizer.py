@@ -22,8 +22,9 @@ log = logging.getLogger("recognizer")
 
 # Enrolment folders must be named by the numeric student id. Anything else
 # (names, "..", symlinks) is ignored, so a stray or hostile folder can't be
-# picked up or steer the loader outside KNOWN_FACES_DIR.
-STUDENT_DIR_RE = re.compile(r"^\d{1,9}$")
+# picked up or steer the loader outside KNOWN_FACES_DIR. No leading zeros, so
+# "01" and "1" can never be two folders that map to the same integer id.
+STUDENT_DIR_RE = re.compile(r"^[1-9]\d{0,8}$")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_ENROLL_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGES_PER_STUDENT = 20

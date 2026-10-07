@@ -24,6 +24,16 @@ export function errorHandler(err, req, res, _next) {
   const level = err.expose && (err.status || 400) < 500 ? "warn" : "error";
   logger[level]({ err, reqId: req.id, path: req.path, method: req.method }, err.message);
 
+  // body-parser errors carry the parser's own message (which can echo request
+  // content); answer with fixed text instead. Checked before err.expose since
+  // these errors set expose=true themselves.
+  if (err.type === "entity.parse.failed") {
+    return res.status(400).json({ message: "Invalid JSON" });
+  }
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ message: "Payload too large" });
+  }
+
   if (err.expose) {
     return res.status(err.status || 400).json({ message: err.message });
   }

@@ -6,6 +6,7 @@ process.env.JWT_SECRET = "test-secret-at-least-32-characters-long";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     user: { findUnique: vi.fn(), update: vi.fn() },
+    accountActionOtp: { deleteMany: vi.fn() },
     // resetPassword runs its consume + password update inside one
     // transaction; passing `prisma` as `tx` keeps every mock below in play.
     $transaction: vi.fn((callback) => callback(prisma)),
@@ -19,10 +20,12 @@ vi.mock("../src/lib/prisma.js", () => ({
 }));
 vi.mock("../src/lib/mailer.js", () => ({
   sendOtpEmail: vi.fn(),
+  sendAttendanceEmail: vi.fn(),
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { sendOtpEmail } = await import("../src/lib/mailer.js");
+const { sendOtpEmail, sendAttendanceEmail } = await import("../src/lib/mailer.js");
+const { hashOtp } = await import("../src/utils/otp.js");
 const { login, forgotPassword, resetPassword } = await import(
   "../src/controllers/auth.controller.js"
 );
@@ -36,6 +39,8 @@ function mockRes() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prisma.passwordResetOtp.findFirst.mockReset();
+  sendAttendanceEmail.mockResolvedValue(undefined);
 });
 
 describe("login", () => {
@@ -184,19 +189,51 @@ describe("forgotPassword", () => {
     expect(sendOtpEmail).not.toHaveBeenCalled();
   });
 
-  it("creates an OTP and emails it when the user exists", async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
+  it("creates an OTP and emails it when the user exists, storing only its HMAC", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com", isActive: true });
 
     const req = { body: { email: "user@example.com" } };
     const res = mockRes();
     await forgotPassword(req, res, vi.fn());
 
     expect(prisma.passwordResetOtp.create).toHaveBeenCalledOnce();
+    const code = sendOtpEmail.mock.calls[0][1];
     expect(sendOtpEmail).toHaveBeenCalledWith("user@example.com", expect.stringMatching(/^\d{6}$/));
+    const stored = prisma.passwordResetOtp.create.mock.calls[0][0].data.otpCode;
+    expect(stored).toBe(hashOtp(code));
+    expect(stored).not.toBe(code);
+  });
+
+  it("sends the response before any DB lookup, so registered and unknown emails answer alike", async () => {
+    const order = [];
+    prisma.user.findUnique.mockImplementation(async () => {
+      order.push("lookup");
+      return null;
+    });
+    const res = mockRes();
+    res.json.mockImplementation(() => {
+      order.push("respond");
+      return res;
+    });
+
+    await forgotPassword({ body: { email: "user@example.com" } }, res, vi.fn());
+
+    expect(order).toEqual(["respond", "lookup"]);
+  });
+
+  it("issues no OTP for a disabled account but gives the same generic response", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com", isActive: false });
+
+    const res = mockRes();
+    await forgotPassword({ body: { email: "user@example.com" } }, res, vi.fn());
+
+    expect(res.json).toHaveBeenCalledWith({ message: "If the email exists, an OTP was sent" });
+    expect(prisma.passwordResetOtp.create).not.toHaveBeenCalled();
+    expect(sendOtpEmail).not.toHaveBeenCalled();
   });
 
   it("retires earlier unused codes so only the newest one is valid", async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com", isActive: true });
 
     await forgotPassword({ body: { email: "user@example.com" } }, mockRes(), vi.fn());
 
@@ -207,7 +244,7 @@ describe("forgotPassword", () => {
   });
 
   it("does not issue a new code within the resend cooldown, and answers the same", async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com", isActive: true });
     prisma.passwordResetOtp.findFirst.mockResolvedValue({ createdAt: new Date(Date.now() - 10_000) });
 
     const res = mockRes();
@@ -219,7 +256,7 @@ describe("forgotPassword", () => {
   });
 
   it("issues a new code once the cooldown has passed", async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com", isActive: true });
     prisma.passwordResetOtp.findFirst.mockResolvedValue({ createdAt: new Date(Date.now() - 61_000) });
 
     await forgotPassword({ body: { email: "user@example.com" } }, mockRes(), vi.fn());
@@ -228,7 +265,7 @@ describe("forgotPassword", () => {
   });
 
   it("answers 200 (not 500) when the email provider fails, so failures don't reveal which emails exist", async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com" });
+    prisma.user.findUnique.mockResolvedValue({ id: 1, email: "user@example.com", isActive: true });
     sendOtpEmail.mockRejectedValueOnce(new Error("SMTP down"));
 
     const res = mockRes();
@@ -247,7 +284,7 @@ describe("resetPassword", () => {
   const futureExpiry = () => new Date(Date.now() + 10 * 60 * 1000);
   const goodRecord = (overrides = {}) => ({
     id: 7,
-    otpCode: "123456",
+    otpCode: hashOtp("123456"),
     attempts: 0,
     expiresAt: futureExpiry(),
     ...overrides,
@@ -348,6 +385,7 @@ describe("resetPassword", () => {
   it("updates the password and consumes all outstanding OTPs on success", async () => {
     prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
     prisma.passwordResetOtp.updateMany.mockResolvedValue({ count: 1 });
+    prisma.user.update.mockResolvedValue({ id: 1 });
 
     const res = mockRes();
     await resetPassword(
@@ -356,10 +394,20 @@ describe("resetPassword", () => {
       vi.fn(),
     );
 
+    expect(prisma.$transaction).toHaveBeenCalledOnce();
     expect(prisma.user.update).toHaveBeenCalledWith({
       where: { email: "user@example.com" },
       data: expect.objectContaining({ tokenVersion: { increment: 1 } }),
+      select: { id: true },
     });
+    // Pending password-change / account-deletion codes die with the reset.
+    expect(prisma.accountActionOtp.deleteMany).toHaveBeenCalledWith({ where: { userId: 1 } });
+    // Heads-up email goes out, fire-and-forget.
+    expect(sendAttendanceEmail).toHaveBeenCalledWith(
+      "user@example.com",
+      expect.stringContaining("password was changed"),
+      expect.any(String),
+    );
     expect(prisma.passwordResetOtp.updateMany).toHaveBeenCalledWith({
       where: { email: "user@example.com", isUsed: false },
       data: { isUsed: true },
@@ -383,6 +431,8 @@ describe("resetPassword", () => {
 
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: "Invalid or expired OTP" });
+    expect(sendAttendanceEmail).not.toHaveBeenCalled();
   });
 
   it("passes unexpected database errors to the error handler, not to the client", async () => {
@@ -398,5 +448,24 @@ describe("resetPassword", () => {
     );
 
     expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("still succeeds when the password-changed email fails to send", async () => {
+    prisma.passwordResetOtp.findFirst.mockResolvedValue(goodRecord());
+    prisma.passwordResetOtp.updateMany.mockResolvedValue({ count: 1 });
+    prisma.user.update.mockResolvedValue({ id: 1 });
+    sendAttendanceEmail.mockRejectedValue(new Error("SMTP down"));
+
+    const res = mockRes();
+    const next = vi.fn();
+    await resetPassword(
+      { body: { email: "user@example.com", otpCode: "123456", newPassword: "newpassword123" } },
+      res,
+      next,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({ message: "Password reset successful" });
   });
 });

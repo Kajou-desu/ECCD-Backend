@@ -2,7 +2,9 @@ import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import { prisma } from "./src/lib/prisma.js";
 
-const EMAIL = process.env.ADMIN_SEED_EMAIL || "admin@eccdsmarttrack.app";
+// Lowercased: login/forgot-password canonicalize to lowercase, so a mixed-case
+// stored email could never be matched.
+const EMAIL = (process.env.ADMIN_SEED_EMAIL || "admin@eccdsmarttrack.app").trim().toLowerCase();
 const PASSWORD = process.env.ADMIN_SEED_PASSWORD || crypto.randomBytes(16).toString("hex");
 
 async function main() {

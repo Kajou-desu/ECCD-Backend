@@ -6,6 +6,7 @@ import {
   enrollStudentPhotos,
   countStudentEnrollmentPhotos,
   fetchStudentEnrollmentPhoto,
+  removeStudentEnrollment,
   RecognitionRejectedError,
 } from "../services/recognitionClient.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
@@ -138,6 +139,30 @@ export async function getEnrollmentPhoto(req, res, next) {
       "X-Content-Type-Options": "nosniff",
     });
     return res.send(photo.buffer);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// DELETE /api/students/:id/enrollment-photos — erases this student's enrolled
+// face photos and encoding from the recognition service (biometric data of a
+// child). Same route-level role gate and per-student check as the other
+// enrollment routes. Idempotent: 204 whether or not anything was enrolled.
+export async function deleteEnrollmentPhotos(req, res, next) {
+  try {
+    if (!isRecognitionConfigured()) {
+      return res.status(503).json({ message: "Face recognition is not configured" });
+    }
+    const id = parseId(req.params.id, "id");
+    await assertCanAccessStudent(req.user, id);
+
+    try {
+      await removeStudentEnrollment(id);
+    } catch (err) {
+      logger.error({ err }, "Enrollment photo removal failed");
+      return res.status(502).json({ message: "Face recognition service unavailable" });
+    }
+    return res.status(204).end();
   } catch (err) {
     next(err);
   }

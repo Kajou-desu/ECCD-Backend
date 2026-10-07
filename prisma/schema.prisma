@@ -62,13 +62,14 @@ model User {
 model PasswordResetOtp {
   id        Int      @id @default(autoincrement())
   email     String
+  // HMAC-SHA256 hex of the code (see utils/otp.js), never the code itself.
   otpCode   String
   isUsed    Boolean  @default(false)
   attempts  Int      @default(0)
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  @@index([email, otpCode, isUsed])
+  @@index([email, isUsed, createdAt])
   @@index([expiresAt])
   @@map("password_reset_otps")
 }
@@ -78,6 +79,7 @@ model AccountActionOtp {
   id        Int      @id @default(autoincrement())
   userId    Int
   action    String
+  // HMAC-SHA256 hex of the code (see utils/otp.js), never the code itself.
   otpCode   String
   isUsed    Boolean  @default(false)
   attempts  Int      @default(0)

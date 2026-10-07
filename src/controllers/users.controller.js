@@ -17,7 +17,7 @@ import {
 import { AppError } from "../middleware/errorHandler.js";
 import { sendOtpEmail } from "../lib/mailer.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
-import { otpMatches, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
+import { otpMatches, hashOtp, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
 
 const ROLES = ["Teacher", "Parent", "Guardian", "Admin"];
 
@@ -34,6 +34,20 @@ const ACTIONS = {
   ACCOUNT_DELETE: "account_delete",
 };
 
+const MAX_STUDENT_IDS = 100;
+
+// Strict: only real positive integers are accepted (no true/"2"/0/-1/1.5
+// coercion), at most MAX_STUDENT_IDS entries; duplicates collapse.
+function parseStudentIds(raw) {
+  if (raw.length > MAX_STUDENT_IDS) {
+    throw new AppError(`studentIds must have at most ${MAX_STUDENT_IDS} entries`, 400);
+  }
+  if (!raw.every((id) => Number.isInteger(id) && id > 0)) {
+    throw new AppError("Invalid studentIds, expected positive integers", 400);
+  }
+  return [...new Set(raw)];
+}
+
 async function issueAccountOtp(userId, email, action) {
   await prisma.accountActionOtp.updateMany({
     where: { userId, action, isUsed: false },
@@ -41,7 +55,7 @@ async function issueAccountOtp(userId, email, action) {
   });
   const otpCode = String(crypto.randomInt(100000, 1000000));
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-  await prisma.accountActionOtp.create({ data: { userId, action, otpCode, expiresAt } });
+  await prisma.accountActionOtp.create({ data: { userId, action, otpCode: hashOtp(otpCode), expiresAt } });
   await sendOtpEmail(
     email,
     otpCode,
@@ -170,9 +184,7 @@ export async function registerUser(req, res, next) {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const studentIds = Array.isArray(req.body.studentIds)
-      ? [...new Set(req.body.studentIds.map((id) => Number(id)).filter(Number.isInteger))]
-      : [];
+    const studentIds = Array.isArray(req.body.studentIds) ? parseStudentIds(req.body.studentIds) : [];
 
     if (studentIds.length && !["Parent", "Guardian"].includes(role)) {
       return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
@@ -267,9 +279,7 @@ export async function updateUser(req, res, next) {
       });
     }
 
-    const studentIds = Array.isArray(req.body.studentIds)
-      ? [...new Set(req.body.studentIds.map((value) => Number(value)).filter(Number.isInteger))]
-      : null;
+    const studentIds = Array.isArray(req.body.studentIds) ? parseStudentIds(req.body.studentIds) : null;
 
     if (studentIds && !["Parent", "Guardian"].includes(requestedRole) && studentIds.length) {
       return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });

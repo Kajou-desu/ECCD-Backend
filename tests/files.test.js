@@ -78,6 +78,12 @@ describe.each(["local", "s3"])("GET /api/files/:filename (%s storage)", (kind) =
     expect(health.headers["x-frame-options"]).toBe("SAMEORIGIN");
   });
 
+  it("previews inline with a safe filename and sends no Referer", async () => {
+    const res = await request(app).get(urlFor(KEY));
+    expect(res.headers["content-disposition"]).toBe(`inline; filename="${KEY}"`);
+    expect(res.headers["referrer-policy"]).toBe("no-referrer");
+  });
+
   it("marks served files private so shared caches/CDNs don't store them", async () => {
     const res = await request(app).get(urlFor(KEY));
     expect(res.headers["cache-control"]).toMatch(/\bprivate\b/);

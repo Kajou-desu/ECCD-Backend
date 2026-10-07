@@ -121,6 +121,12 @@ describe("requireNonEmptyString / optionalString", () => {
     expect(optionalString("")).toBeNull();
     expect(() => optionalString("a".repeat(2000))).toThrow(AppError);
   });
+
+  it("optionalString stores null for whitespace-only input", () => {
+    expect(optionalString("   ")).toBeNull();
+    expect(optionalString(" \t\n ")).toBeNull();
+    expect(optionalString("  hi ")).toBe("hi");
+  });
 });
 
 describe("requirePhone", () => {
@@ -131,6 +137,14 @@ describe("requirePhone", () => {
   it("rejects letters or too-short input", () => {
     expect(() => requirePhone("call me")).toThrow(AppError);
     expect(() => requirePhone("123")).toThrow(AppError);
+  });
+
+  it("requires at least 7 digits, not just 7 allowed characters", () => {
+    expect(() => requirePhone("-------")).toThrow(AppError);
+    expect(() => requirePhone("(+) - ( ) +")).toThrow(AppError);
+    expect(() => requirePhone("12-34-5")).toThrow(AppError);
+    expect(requirePhone("(02) 8123-45")).toBe("(02) 8123-45");
+    expect(requirePhone("123-4567")).toBe("123-4567");
   });
 });
 

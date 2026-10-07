@@ -129,10 +129,17 @@ export async function unsubscribePush(req, res, next) {
   }
 }
 
-// GET /api/notifications?unread=true
+const DEFAULT_NOTIFICATION_LIMIT = 100;
+const MAX_NOTIFICATION_LIMIT = 200;
+
+// GET /api/notifications?unread=true&limit=100  (newest first, limit max 200)
 export async function getNotifications(req, res, next) {
   try {
     const unreadOnly = req.query.unread === "true";
+    const limit = req.query.limit === undefined ? DEFAULT_NOTIFICATION_LIMIT : parseId(req.query.limit, "limit");
+    if (limit > MAX_NOTIFICATION_LIMIT) {
+      throw new AppError(`limit must be ${MAX_NOTIFICATION_LIMIT} or less`, 400);
+    }
 
     const notifications = await prisma.notification.findMany({
       where: {
@@ -140,6 +147,7 @@ export async function getNotifications(req, res, next) {
         ...(unreadOnly ? { isRead: false } : {}),
       },
       orderBy: { createdAt: "desc" },
+      take: limit,
     });
 
     res.json(notifications);

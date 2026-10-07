@@ -25,7 +25,7 @@ import shutil
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from PIL import Image
@@ -64,6 +64,41 @@ def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"detail": message}, status_code=status)
 
 
+def _body_limit(path: str) -> int:
+    return ENROLL_MAX_BODY_BYTES if path.startswith("/enroll/") else MAX_BODY_BYTES
+
+
+class BodyCapMiddleware:
+    """Hard cap on the bytes actually received. Content-Length is only what the
+    client claims, so count what arrives and abort with 413 once it exceeds the
+    limit (raised from receive(), inside the router, so it becomes a normal
+    HTTP error). Pure ASGI because BaseHTTPMiddleware does not forward a
+    replaced receive callable."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST":
+            return await self.app(scope, receive, send)
+        limit = _body_limit(scope["path"])
+        total = 0
+
+        async def capped_receive():
+            nonlocal total
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > limit:
+                    raise HTTPException(status_code=413, detail="Request too large")
+            return message
+
+        return await self.app(scope, capped_receive, send)
+
+
+app.add_middleware(BodyCapMiddleware)
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
     if request.url.path == "/health":
@@ -80,8 +115,7 @@ async def guard(request: Request, call_next):
         length = request.headers.get("content-length", "")
         if not length.isdigit():
             return _error(411, "Content-Length required")
-        limit = ENROLL_MAX_BODY_BYTES if request.url.path.startswith("/enroll/") else MAX_BODY_BYTES
-        if int(length) > limit:
+        if int(length) > _body_limit(request.url.path):
             return _error(413, "Request too large")
 
     return await call_next(request)

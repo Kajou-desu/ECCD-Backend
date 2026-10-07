@@ -38,6 +38,21 @@ class TestAuth:
     def test_recognize_requires_the_exact_key(self, client, headers):
         assert post(client, jpeg(), headers=headers).status_code == 401
 
+    def test_reload_waits_for_the_enrol_lock(self, client, monkeypatch):
+        import asyncio
+        calls = []
+        monkeypatch.setattr(recognizer, "load_known_faces", lambda root: calls.append(root) or service.app.state.known)
+
+        async def hold_lock_then_reload():
+            async with service.app.state.enroll_lock:
+                task = asyncio.create_task(service.reload_known_faces())
+                await asyncio.sleep(0.05)
+                assert not task.done() and calls == []
+            return await task
+
+        assert asyncio.run(hold_lock_then_reload()) == {"students": len(service.app.state.known)}
+        assert len(calls) == 1
+
     def test_reload_requires_the_key_too(self, client):
         assert client.post("/reload").status_code == 401
         assert client.post("/reload", headers=AUTH).status_code == 200
@@ -130,7 +145,7 @@ class TestEnroll:
         r = client.post("/enroll/5", files=[self.photo()])
         assert r.status_code == 401
 
-    @pytest.mark.parametrize("bad_id", ["abc", "-5", "1.5", "5 ", "../5", "0000000001x"])
+    @pytest.mark.parametrize("bad_id", ["abc", "-5", "1.5", "5 ", "../5", "0000000001x", "0", "01", "007"])
     def test_rejects_a_non_numeric_student_id(self, client, tmp_path, monkeypatch, bad_id):
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
         r = client.post(f"/enroll/{bad_id}", headers=AUTH, files=[self.photo()])
@@ -150,6 +165,17 @@ class TestEnroll:
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
         r = self.enroll(client, 5, None, content_length=service.ENROLL_MAX_BODY_BYTES + 1)
         assert r.status_code == 413
+
+    def test_rejects_a_body_larger_than_its_declared_content_length(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        monkeypatch.setattr(service, "ENROLL_MAX_BODY_BYTES", 1000)
+        r = client.post(
+            "/enroll/5",
+            headers={**AUTH, "Content-Length": "100", "Content-Type": "multipart/form-data; boundary=b"},
+            content=b"--b\r\n" + b"x" * 5000,
+        )
+        assert r.status_code == 413
+        assert not (tmp_path / "5").exists()
 
     def test_rejects_an_oversized_single_photo(self, client, tmp_path, monkeypatch):
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
@@ -336,7 +362,7 @@ class TestEnrollHardening:
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
         assert client.delete("/enroll/5").status_code == 401
 
-    @pytest.mark.parametrize("bad_id", ["abc", "-5", "1.5", "0000000001x"])
+    @pytest.mark.parametrize("bad_id", ["abc", "-5", "1.5", "0000000001x", "0", "01"])
     def test_delete_rejects_a_non_numeric_student_id(self, client, tmp_path, monkeypatch, bad_id):
         monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
         assert client.delete(f"/enroll/{bad_id}", headers=AUTH).status_code in (400, 404)
@@ -385,7 +411,7 @@ class TestViewEnrolledPhotos:
         assert r.status_code in (400, 404)
         assert r.content != jpeg() or bad == "0"
 
-    @pytest.mark.parametrize("bad_id", ["abc", "-1", "1234567890", "5%2f..%2f7"])
+    @pytest.mark.parametrize("bad_id", ["abc", "-1", "1234567890", "5%2f..%2f7", "0", "05"])
     def test_bad_student_id_is_rejected(self, client, store, bad_id):
         assert client.get(f"/enroll/{bad_id}/photos", headers=AUTH).status_code in (400, 404)
 

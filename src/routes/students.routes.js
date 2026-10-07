@@ -20,6 +20,7 @@ import {
   uploadEnrollmentPhotos,
   getEnrollmentPhotoCount,
   getEnrollmentPhoto,
+  deleteEnrollmentPhotos,
   MAX_ENROLLMENT_PHOTOS,
 } from "../controllers/enrollmentPhotos.controller.js";
 import { getSubmissions } from "../controllers/submissions.controller.js";
@@ -102,6 +103,12 @@ router.get(
   requireRole("Teacher", "Admin"),
   enrollmentViewUserLimiter,
   getEnrollmentPhotoCount
+);
+router.delete(
+  "/:id/enrollment-photos",
+  requireRole("Teacher", "Admin"),
+  enrollmentUserLimiter,
+  deleteEnrollmentPhotos
 );
 router.get(
   "/:id/enrollment-photos/:index",

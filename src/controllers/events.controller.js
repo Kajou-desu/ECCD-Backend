@@ -5,9 +5,11 @@ import {
   requireNonEmptyString,
   optionalString,
   parseId,
+  parsePagination,
 } from "../utils/validate.js";
 import { AppError } from "../middleware/errorHandler.js";
 
+const MAX_ALL_EVENTS = 500;
 const EVENT_CATEGORIES = ["Holiday", "Birthday", "Event", "Others"];
 
 function requireEventCategory(value) {
@@ -27,7 +29,13 @@ function requireEventCategory(value) {
 export async function getEvents(req, res, next) {
   try {
     if (req.query.all === "true") {
-      const events = await prisma.event.findMany({ orderBy: { date: "desc" } });
+      // Bounded: ?page&?pageSize (max 200) when given, otherwise the newest
+      // MAX_ALL_EVENTS — this feeds a dropdown, never needs the whole table.
+      const pagination = parsePagination(req.query);
+      const events = await prisma.event.findMany({
+        orderBy: { date: "desc" },
+        ...(pagination ? { skip: pagination.skip, take: pagination.take } : { take: MAX_ALL_EVENTS }),
+      });
       return res.json(events.map((event) => ({
         id: event.id,
         title: event.title,

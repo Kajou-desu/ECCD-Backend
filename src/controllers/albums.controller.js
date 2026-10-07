@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
-import { parseId, parsePagination, requireNonEmptyString } from "../utils/validate.js";
+import { parseId, parsePagination, requireNonEmptyString, optionalString } from "../utils/validate.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
 import { AppError } from "../middleware/errorHandler.js";
 
@@ -10,6 +10,18 @@ import { AppError } from "../middleware/errorHandler.js";
 // photo object returned from this controller is shaped { id, url, caption }.
 function toPhotoResponse(req, photo) {
   return { id: photo.id, url: signFileUrl(req, photo.fileUrl), caption: photo.caption };
+}
+
+// Multer's originalname is client-controlled and uncapped: normalize, drop
+// control characters (incl. newlines/NUL) and cap at the 255-char filename norm.
+const CAPTION_MAX = 255;
+function toCaption(originalname) {
+  return String(originalname ?? "")
+    .normalize("NFC")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .slice(0, CAPTION_MAX);
 }
 
 function toAlbumResponse(req, album) {
@@ -67,6 +79,7 @@ export async function getAlbums(req, res, next) {
 export async function createAlbum(req, res, next) {
   try {
     const title = requireNonEmptyString(req.body.title, "title", 200);
+    const description = optionalString(req.body.description, 1000);
     const { associationType } = req.body;
     const associationId = parseId(req.body.associationId, "associationId");
     if (associationType !== "event" && associationType !== "activity") {
@@ -81,6 +94,7 @@ export async function createAlbum(req, res, next) {
     const album = await prisma.album.create({
       data: {
         title,
+        description,
         eventId: associationType === "event" ? associationId : null,
         materialId: associationType === "activity" ? associationId : null,
       },
@@ -102,6 +116,7 @@ export async function updateAlbum(req, res, next) {
     const id = parseId(req.params.albumId, "albumId");
     const title = requireNonEmptyString(req.body.title, "title", 200);
     const data = { title };
+    if (req.body.description !== undefined) data.description = optionalString(req.body.description, 1000);
 
     if (req.body.associationType !== undefined || req.body.associationId !== undefined) {
       const { associationType } = req.body;
@@ -171,7 +186,7 @@ export async function addAlbumPhotos(req, res, next) {
           data: {
             albumId,
             fileUrl: fileUrl(req, file.filename),
-            caption: file.originalname,
+            caption: toCaption(file.originalname),
           },
         })
       )

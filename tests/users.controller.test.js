@@ -59,6 +59,7 @@ function mockRes() {
 }
 
 const VALID_OTP = "123456";
+const { hashOtp } = await import("../src/utils/otp.js");
 
 // changeMyPassword/deleteMyAccount now require a verified OTP before doing
 // anything else; stub a matching, unexpired, unused-attempt record so
@@ -67,7 +68,7 @@ const VALID_OTP = "123456";
 function mockValidOtp() {
   prisma.accountActionOtp.findFirst.mockResolvedValue({
     id: 1,
-    otpCode: VALID_OTP,
+    otpCode: hashOtp(VALID_OTP),
     expiresAt: new Date(Date.now() + 60_000),
     attempts: 0,
   });
@@ -782,7 +783,7 @@ describe("parent/guardian <-> student linking", () => {
     prisma.user.update.mockResolvedValue({ id: 5 });
 
     await updateUser(
-      { body: { userId: 5, studentIds: [1, "2", 3, 3] }, user: admin },
+      { body: { userId: 5, studentIds: [1, 2, 3, 3] }, user: admin },
       mockRes(),
       vi.fn(),
     );
@@ -878,5 +879,49 @@ describe("parent/guardian <-> student linking", () => {
     );
 
     expect(prisma.student.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("studentIds validation", () => {
+  const baseBody = {
+    firstName: "Maria",
+    lastName: "Santos",
+    email: "maria@example.com",
+    password: "correct-horse-1",
+    role: "Parent",
+    phone: "09171234567",
+  };
+  const admin = { id: 1, role: "Admin" };
+
+  it.each([[[true]], [[0]], [[-1]], [[1.5]], [["2"]], [[null]]])(
+    "registerUser rejects non-strict ids %j without touching the database",
+    async (studentIds) => {
+      const next = vi.fn();
+      await registerUser({ body: { ...baseBody, studentIds }, user: admin }, mockRes(), next);
+
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("registerUser rejects more than 100 ids", async () => {
+    const next = vi.fn();
+    const studentIds = Array.from({ length: 101 }, (_, i) => i + 1);
+    await registerUser({ body: { ...baseBody, studentIds }, user: admin }, mockRes(), next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    expect(prisma.user.create).not.toHaveBeenCalled();
+  });
+
+  it("updateUser rejects non-strict ids and oversized lists before any write", async () => {
+    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Parent", email: "maria@example.com" });
+
+    for (const studentIds of [[true], [0], [-3], [2.5], Array.from({ length: 101 }, (_, i) => i + 1)]) {
+      const next = vi.fn();
+      await updateUser({ body: { userId: 5, studentIds }, user: admin }, mockRes(), next);
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    }
+    expect(prisma.parentChild.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.user.update).not.toHaveBeenCalled();
   });
 });

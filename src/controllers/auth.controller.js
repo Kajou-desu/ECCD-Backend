@@ -3,10 +3,10 @@ import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { signToken } from "../utils/jwt.js";
 import { requireEmail } from "../utils/validate.js";
-import { sendOtpEmail } from "../lib/mailer.js";
+import { sendOtpEmail, sendAttendanceEmail } from "../lib/mailer.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { logger } from "../lib/logger.js";
-import { otpMatches, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
+import { otpMatches, hashOtp, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
 
 // Compared against when the email isn't registered (or the account is
 // disabled), so those requests spend the same bcrypt time as a real
@@ -18,8 +18,6 @@ import { otpMatches, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
 // it stops one address being flooded with mail and keeps a double-click or a
 // "resend" tap from invalidating the code the user is about to type.
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
-
-class InvalidOtpError extends Error {}
 
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString("hex"), 10);
 
@@ -68,47 +66,56 @@ export async function login(req, res, next) {
   }
 }
 
+const FORGOT_PASSWORD_RESPONSE = { message: "If the email exists, an OTP was sent" };
+
+// Everything that differs between "registered" and "unknown" email happens
+// here, AFTER the response has gone out, so response time is the same for
+// both. Failures are only logged — the client never learns about them.
+async function issuePasswordResetOtp(email) {
+  const user = await prisma.user.findUnique({ where: { email } });
+  // Disabled accounts get no codes (same generic response as unknown emails).
+  if (!user || !user.isActive) return;
+
+  const latest = await prisma.passwordResetOtp.findFirst({
+    where: { email },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
+  if (latest && Date.now() - latest.createdAt.getTime() < OTP_RESEND_COOLDOWN_MS) return;
+
+  // crypto.randomInt is a CSPRNG — Math.random() is NOT safe for security tokens.
+  const otpCode = String(crypto.randomInt(100000, 1000000));
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+
+  // Only the newest code is ever valid — issuing a new one retires any
+  // still-unused earlier ones (same rule the account-action OTPs follow).
+  // Only the HMAC of the code is stored; the plaintext goes to the mailbox.
+  await prisma.passwordResetOtp.updateMany({
+    where: { email, isUsed: false },
+    data: { isUsed: true },
+  });
+  await prisma.passwordResetOtp.create({ data: { email, otpCode: hashOtp(otpCode), expiresAt } });
+
+  await sendOtpEmail(email, otpCode);
+}
+
 export async function forgotPassword(req, res, next) {
+  let email;
   try {
-    const email = requireEmail(req.body.email);
-
-    const user = await prisma.user.findUnique({ where: { email } });
-    // Always respond 200 to avoid leaking which emails exist
-    if (!user) return res.json({ message: "If the email exists, an OTP was sent" });
-
-    const latest = await prisma.passwordResetOtp.findFirst({
-      where: { email },
-      orderBy: { createdAt: "desc" },
-      select: { createdAt: true },
-    });
-    if (latest && Date.now() - latest.createdAt.getTime() < OTP_RESEND_COOLDOWN_MS) {
-      return res.json({ message: "If the email exists, an OTP was sent" });
-    }
-
-    // crypto.randomInt is a CSPRNG — Math.random() is NOT safe for security tokens.
-    const otpCode = String(crypto.randomInt(100000, 1000000));
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
-
-    // Only the newest code is ever valid — issuing a new one retires any
-    // still-unused earlier ones (same rule the account-action OTPs follow).
-    await prisma.passwordResetOtp.updateMany({
-      where: { email, isUsed: false },
-      data: { isUsed: true },
-    });
-    await prisma.passwordResetOtp.create({ data: { email, otpCode, expiresAt } });
-
-    // Not awaited, and failures are only logged: awaiting the SMTP round trip
-    // made "registered email" visibly slower than "unknown email", and a
-    // delivery error surfaced as a 500 only for registered emails — both let
-    // an outsider tell which emails have accounts. The response is now the
-    // same, and as fast, either way.
-    sendOtpEmail(email, otpCode).catch((err) => {
-      logger.error({ err }, "Failed to send password reset OTP email");
-    });
-
-    res.json({ message: "If the email exists, an OTP was sent" });
+    email = requireEmail(req.body.email);
   } catch (err) {
-    next(err);
+    return next(err);
+  }
+
+  // Respond first, then do the lookup/DB writes/SMTP: otherwise registered
+  // emails (lookup + two writes) answer measurably slower than unknown ones,
+  // and a DB or SMTP failure would surface only for registered emails.
+  res.json(FORGOT_PASSWORD_RESPONSE);
+
+  try {
+    await issuePasswordResetOtp(email);
+  } catch (err) {
+    logger.error({ err }, "Failed to issue password reset OTP");
   }
 }
 
@@ -145,33 +152,46 @@ export async function resetPassword(req, res, next) {
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
 
-    // Consume the codes and change the password in ONE transaction. Before,
-    // the codes were burned first, so a failure while updating the user (DB
-    // error, account deleted or email changed since the code was issued)
-    // left the person with an error and a dead code. The consume step is
-    // still the gate: of two simultaneous requests carrying the same valid
-    // code, exactly one sees count > 0. It consumes every outstanding code
-    // for the email so one issued earlier can't be replayed.
+    // Consume the OTPs and change the password atomically: if the account is
+    // gone (user.update throws P2025) the whole thing rolls back instead of
+    // leaving the code burned with nothing changed.
+    //
+    // Consumes every outstanding OTP for this email, not just the one used,
+    // so a code issued earlier in the same window can't be replayed. The
+    // update only matches rows still unused, so of two simultaneous requests
+    // carrying the same valid code, exactly one sees count > 0.
+    let changed = false;
     try {
-      await prisma.$transaction(async (tx) => {
+      changed = await prisma.$transaction(async (tx) => {
         const consumed = await tx.passwordResetOtp.updateMany({
           where: { email, isUsed: false },
           data: { isUsed: true },
         });
-        if (consumed.count === 0) throw new InvalidOtpError();
-        await tx.user.update({
+        if (consumed.count === 0) return false;
+
+        const user = await tx.user.update({
           where: { email },
           data: { passwordHash, tokenVersion: { increment: 1 } },
+          select: { id: true },
         });
+        // Pending password-change / account-deletion codes were issued under
+        // the old credentials; they must not survive a reset.
+        await tx.accountActionOtp.deleteMany({ where: { userId: user.id } });
+        return true;
       });
     } catch (err) {
-      // P2025: no user with this email any more. The transaction rolled back,
-      // so nothing was consumed.
-      if (err instanceof InvalidOtpError || err.code === "P2025") {
-        return res.status(400).json({ message: "Invalid or expired OTP" });
-      }
-      throw err;
+      if (err.code !== "P2025") throw err;
     }
+    if (!changed) return res.status(400).json({ message: "Invalid or expired OTP" });
+
+    // Fire-and-forget heads-up so an unexpected reset gets noticed.
+    sendAttendanceEmail(
+      email,
+      "ECCD SmartTrack — Your password was changed",
+      "Your ECCD SmartTrack password was just changed using a password reset code.\n\nIf this was you, no action is needed. If it wasn't, contact your center administrator immediately.",
+    ).catch((err) => {
+      logger.error({ err }, "Failed to send password-changed notification email");
+    });
 
     res.json({ message: "Password reset successful" });
   } catch (err) {
