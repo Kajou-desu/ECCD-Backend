@@ -133,3 +133,29 @@ describe("signFileUrl — stable URLs and public base", () => {
     }
   });
 });
+
+describe("sensitive (document) links", () => {
+  const qs = (url) => new URL(url).searchParams;
+
+  it("expires at the exact TTL — no cache-window rounding", () => {
+    const before = Date.now();
+    const exp = Number(qs(signFileUrl(mockReq(), "doc.pdf", 5 * 60 * 1000, { sensitive: true })).get("exp"));
+    expect(exp).toBeGreaterThanOrEqual(before + 5 * 60 * 1000);
+    expect(exp).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+  });
+
+  it("verifies only as sensitive, and the flag cannot be flipped", () => {
+    const params = qs(signFileUrl(mockReq(), "doc.pdf", 5 * 60 * 1000, { sensitive: true }));
+    const [exp, sig] = [params.get("exp"), params.get("sig")];
+    expect(params.get("s")).toBe("1");
+    expect(verifyFileSignature("doc.pdf", exp, sig, true)).toBe(true);
+    expect(verifyFileSignature("doc.pdf", exp, sig, false)).toBe(false);
+  });
+
+  it("an ordinary link never verifies as sensitive", () => {
+    const params = qs(signFileUrl(mockReq(), "photo.jpg"));
+    expect(params.get("s")).toBeNull();
+    expect(verifyFileSignature("photo.jpg", params.get("exp"), params.get("sig"), true)).toBe(false);
+    expect(verifyFileSignature("photo.jpg", params.get("exp"), params.get("sig"))).toBe(true);
+  });
+});

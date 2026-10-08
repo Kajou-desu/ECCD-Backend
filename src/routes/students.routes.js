@@ -15,7 +15,7 @@ import {
   importStudents,
   uploadStudentPhoto,
 } from "../controllers/students.controller.js";
-import { uploadStudentDocuments, deleteStudentDocument } from "../controllers/studentDocuments.controller.js";
+import { uploadStudentDocuments, deleteStudentDocument, getStudentDocumentLink } from "../controllers/studentDocuments.controller.js";
 import {
   uploadEnrollmentPhotos,
   getEnrollmentPhotoCount,
@@ -55,6 +55,8 @@ router.post(
   upload.array("documents", 10),
   uploadStudentDocuments
 );
+// Ownership (incl. Parent/Guardian scoped to own children) enforced in the controller.
+router.get("/:id/documents/:documentId/link", getStudentDocumentLink);
 router.delete("/:id/documents/:documentId", requireRole("Teacher", "Admin"), deleteStudentDocument);
 
 // Enrollment photos (face recognition): biometric data of a child, so these

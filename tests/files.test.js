@@ -145,3 +145,156 @@ describe.each(["local", "s3"])("GET /api/files/:filename (%s storage)", (kind) =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// M36 thumbnails and M38 document links, against both storage providers.
+// ---------------------------------------------------------------------------
+const sharp = (await import("sharp")).default;
+const { thumbnailKeyFor } = await import("../src/lib/fileStorage.js");
+const { signFileUrl: signUrl, DOCUMENT_URL_TTL_MS } = await import("../src/lib/signedFileUrl.js");
+
+const PHOTO_KEY = "1758400000000-aaaa0000bbbb1111.png";
+const DOC_KEY = "1758400000000-dddd0000eeee1111.pdf";
+const BAD_IMAGE_KEY = "1758400000000-cccc0000dddd1111.jpg";
+
+const binary = (res, cb) => {
+  const chunks = [];
+  res.on("data", (c) => chunks.push(c));
+  res.on("end", () => cb(null, Buffer.concat(chunks)));
+};
+const get = (url) => request(app).get(url).buffer(true).parse(binary);
+
+async function putBytes(harness, key, bytes, type) {
+  const scratch = path.join(os.tmpdir(), `eccd-thumb-test-${process.pid}-${key}`);
+  fs.writeFileSync(scratch, bytes);
+  await harness.storage.put(key, scratch, type);
+  fs.rmSync(scratch, { force: true });
+}
+
+describe.each(["local", "s3"])("thumbnails and document links (%s storage)", (kind) => {
+  let harness;
+  let original;
+
+  beforeAll(async () => {
+    harness = await createHarness(kind);
+    setStorageForTests(harness.storage);
+    // A real 1600x1200 photo with some detail so it doesn't compress to nothing.
+    original = await sharp({
+      create: { width: 1600, height: 1200, channels: 3, background: { r: 200, g: 120, b: 60 } },
+    })
+      .composite([{ input: Buffer.from("<svg width='1600' height='1200'><circle cx='800' cy='600' r='400' fill='navy'/></svg>") }])
+      .png()
+      .toBuffer();
+    await putBytes(harness, PHOTO_KEY, original, "image/png");
+    await putBytes(harness, DOC_KEY, CONTENT, "application/pdf");
+    await putBytes(harness, BAD_IMAGE_KEY, Buffer.from("this is not an image"), "image/jpeg");
+  });
+  afterAll(async () => {
+    setStorageForTests(undefined);
+    await harness.close();
+  });
+
+  describe("thumbnails (M36)", () => {
+    it("serves a small JPEG for ?v=thumb, much lighter than the original", async () => {
+      const res = await get(`${urlFor(PHOTO_KEY)}&v=thumb`);
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toMatch(/^image\/jpeg/);
+      const meta = await sharp(res.body).metadata();
+      expect(meta.width).toBe(480);
+      expect(meta.height).toBe(360);
+      expect(res.body.length).toBeLessThan(original.length / 3);
+    });
+
+    it("stores the thumbnail so the next request doesn't resize again", async () => {
+      await get(`${urlFor(PHOTO_KEY)}&v=thumb`);
+      expect(harness.keys()).toContain(thumbnailKeyFor(PHOTO_KEY));
+
+      const stored = harness.read(thumbnailKeyFor(PHOTO_KEY));
+      const again = await get(`${urlFor(PHOTO_KEY)}&v=thumb`);
+      expect(again.body.equals(Buffer.from(stored))).toBe(true);
+    });
+
+    it("keeps serving the full image when ?v=thumb is absent", async () => {
+      const res = await get(urlFor(PHOTO_KEY));
+      expect(res.body.equals(original)).toBe(true);
+    });
+
+    it("still needs a valid signature — a thumbnail is not a way around it", async () => {
+      const res = await request(app).get(`/api/files/${PHOTO_KEY}?v=thumb`);
+      expect(res.status).toBe(404);
+    });
+
+    it("falls back to the original when the image can't be decoded", async () => {
+      const res = await get(`${urlFor(BAD_IMAGE_KEY)}&v=thumb`);
+      expect(res.status).toBe(200);
+      expect(res.body.toString()).toBe("this is not an image");
+    });
+
+    it("deleting a photo deletes its thumbnail too (a copy of the same child's picture)", async () => {
+      const key = "1758400000000-9999999988888888.png";
+      await putBytes(harness, key, original, "image/png");
+      await get(`${urlFor(key)}&v=thumb`);
+      expect(harness.keys()).toContain(thumbnailKeyFor(key));
+
+      const { removeStoredFiles } = await import("../src/lib/fileStorage.js");
+      await removeStoredFiles(key);
+
+      expect(harness.keys()).not.toContain(key);
+      expect(harness.keys()).not.toContain(thumbnailKeyFor(key));
+    });
+
+    it("ignores ?v=thumb for a non-image", async () => {
+      const res = await get(`${urlFor(DOC_KEY)}&v=thumb`);
+      expect(res.status).toBe(200);
+      expect(res.body.equals(CONTENT)).toBe(true);
+    });
+  });
+
+  describe("document links (M38)", () => {
+    const docUrl = (key = DOC_KEY) => {
+      const { pathname, search } = new URL(
+        signUrl(mockReq(), key, DOCUMENT_URL_TTL_MS, { sensitive: true }),
+      );
+      return `${pathname}${search}`;
+    };
+
+    it("serves a document link, with no caching at all", async () => {
+      const res = await get(docUrl());
+      expect(res.status).toBe(200);
+      expect(res.body.equals(CONTENT)).toBe(true);
+      expect(res.headers["cache-control"]).toBe("private, no-store");
+    });
+
+    it("keeps ordinary files cacheable for 5 minutes", async () => {
+      const res = await get(urlFor(PHOTO_KEY));
+      expect(res.headers["cache-control"]).toBe("private, max-age=300");
+    });
+
+    it("can't be downgraded: removing s=1 breaks the signature", async () => {
+      const res = await request(app).get(docUrl().replace("&s=1", ""));
+      expect(res.status).toBe(404);
+    });
+
+    it("can't be upgraded either: adding s=1 to an ordinary link breaks the signature", async () => {
+      const res = await request(app).get(`${urlFor(DOC_KEY)}&s=1`);
+      expect(res.status).toBe(404);
+    });
+
+    it("stops working once its 5 minutes are up", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const url = docUrl();
+        vi.setSystemTime(Date.now() + DOCUMENT_URL_TTL_MS + 1000);
+        const res = await request(app).get(url);
+        expect(res.status).toBe(404);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ignores ?v=thumb on a document link — documents are always served whole", async () => {
+      const res = await get(`${docUrl(PHOTO_KEY)}&v=thumb`);
+      expect(res.body.equals(original)).toBe(true);
+    });
+  });
+});

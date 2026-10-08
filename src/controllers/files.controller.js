@@ -2,6 +2,7 @@ import { pipeline } from "node:stream/promises";
 import { AppError } from "../middleware/errorHandler.js";
 import { env } from "../config/env.js";
 import { verifyFileSignature } from "../lib/signedFileUrl.js";
+import { getThumbnail } from "../lib/thumbnails.js";
 import { storageKeyFrom } from "../lib/fileStorage.js";
 import { getStorage } from "../storage/index.js";
 import { mimeFromKey } from "../storage/mimeTypes.js";
@@ -34,12 +35,20 @@ export async function getFile(req, res, next) {
     // Same generic "Not found" for a bad key, a bad/expired signature, or a
     // missing object — the response doesn't confirm to an attacker whether a
     // given filename ever existed.
-    if (!key || !verifyFileSignature(key, req.query.exp, req.query.sig)) {
+    // s=1 marks a document link. It is covered by the signature, so it can
+    // be neither added nor removed by whoever holds the link.
+    const sensitive = req.query.s === "1";
+    if (!key || !verifyFileSignature(key, req.query.exp, req.query.sig, sensitive)) {
       throw new AppError("Not found", 404);
     }
 
-    const object = await getStorage().get(key);
+    // ?v=thumb asks for a small version of an image (gallery tiles). Never
+    // for documents, which are always served whole. If no thumbnail can be
+    // made the original is served, so the picture still shows.
+    const thumbnail = !sensitive && req.query.v === "thumb" ? await getThumbnail(key) : null;
+    const object = thumbnail?.object ?? (await getStorage().get(key));
     if (!object) throw new AppError("Not found", 404);
+    const servedKey = thumbnail?.key ?? key;
 
     // Content-Type comes from the key's extension, which upload derived from
     // the verified file type — not from metadata stored with the object.
@@ -54,13 +63,14 @@ export async function getFile(req, res, next) {
     // Relaxed for this route only: access is already gated by the signed,
     // expiring URL, and every other endpoint keeps helmet's stricter default.
     res.set({
-      "Content-Type": mimeFromKey(key),
+      "Content-Type": mimeFromKey(servedKey),
       // Inline so a PDF previews the same way in every browser; the filename is
       // the validated storage key (a plain name), never client input.
-      "Content-Disposition": `inline; filename="${key.replace(/[^A-Za-z0-9._-]/g, "_")}"`,
+      "Content-Disposition": `inline; filename="${servedKey.replace(/[^A-Za-z0-9._-]/g, "_")}"`,
       // The URL carries the signature; don't leak it to other sites via Referer.
       "Referrer-Policy": "no-referrer",
-      "Cache-Control": "private, max-age=300",
+      // Documents are never kept by the browser: a link is for one viewing.
+      "Cache-Control": sensitive ? "private, no-store" : "private, max-age=300",
       "Cross-Origin-Resource-Policy": "cross-origin",
       "Content-Security-Policy": frameAncestorsPolicy(),
     });

@@ -23,6 +23,13 @@ export function storageKeyFrom(storedValue) {
   return KEY_PATTERN.test(name) ? name : null;
 }
 
+// "1758400000000-ab12.png" -> "thumb-1758400000000-ab12.jpg": where the cached
+// gallery thumbnail of an image lives (see lib/thumbnails.js). A plain
+// filename, so it passes the same key check as every other stored file.
+export function thumbnailKeyFor(key) {
+  return `thumb-${key.replace(/\.[^.]+$/, "")}.jpg`;
+}
+
 // Best-effort delete of stored objects whose rows no longer exist (or are
 // being replaced). Never throws: the database change has already succeeded by
 // the time this runs, and a leftover object must not turn a successful
@@ -35,6 +42,9 @@ export async function removeStoredFiles(...storedValues) {
       if (!key) return;
       try {
         await storage.remove(key);
+        // Remove the cached gallery thumbnail too — it's a copy of the same
+        // child's photo. Idempotent, so a file that never had one is fine.
+        await storage.remove(thumbnailKeyFor(key));
       } catch (err) {
         logger.warn({ err, key }, "Failed to delete stored object");
       }

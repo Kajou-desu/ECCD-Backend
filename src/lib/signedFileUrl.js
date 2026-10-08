@@ -5,6 +5,14 @@ const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour — long enough for a normal
 // viewing session, short enough to meaningfully limit exposure if a URL
 // leaks (browser history, logs, referrer headers, screenshots).
 
+// Student documents (birth certificates, IDs, medical papers) are far more
+// sensitive than photos, and a link to one is only ever needed for the moment
+// someone opens it. The app asks for a fresh link at that moment (see
+// GET /students/:id/documents/:documentId/link), so five minutes is plenty
+// and shrinks the window in which a leaked link — browser history, a pasted
+// URL, a screenshot — is useful from an hour to five minutes.
+export const DOCUMENT_URL_TTL_MS = 5 * 60 * 1000;
+
 // Expiry is rounded UP to a 5-minute boundary. With a raw Date.now() + ttl,
 // every API response minted a different exp/sig for the same file, so the
 // browser saw a new URL each time and its cache (Cache-Control: max-age=300)
@@ -36,13 +44,18 @@ function publicBase(req) {
   return `${req.protocol}://${req.get("host")}`;
 }
 
-function sign(filename, exp) {
+// `sensitive` is part of what is signed. A sensitive link therefore can't be
+// turned into an ordinary one by deleting `s=1` (the signature stops
+// matching), and an ordinary link can't be upgraded either — the file route
+// decides how to serve a file (no caching for documents) from a flag the
+// client cannot alter.
+function sign(filename, exp, sensitive = false) {
   // Namespaced (":file-url") so this reuses JWT_SECRET without letting a
   // signed file URL be replayed as, or forged from, a JWT — same secret,
   // different derivation context.
   return crypto
     .createHmac("sha256", `${process.env.JWT_SECRET}:file-url`)
-    .update(`${filename}:${exp}`)
+    .update(sensitive ? `${filename}:${exp}:s` : `${filename}:${exp}`)
     .digest("hex");
 }
 
@@ -54,24 +67,28 @@ function sign(filename, exp) {
 // Called at *read* time, every time an entity is serialized for a
 // response, so a copied/leaked link only works for a limited window
 // instead of forever, without changing what's stored in the database.
-export function signFileUrl(req, storedValue, ttlMs = DEFAULT_TTL_MS) {
+//
+// { sensitive: true } is for documents: exact expiry (no cache window, since
+// these responses are never cached) and a flag the file route uses to serve
+// them with Cache-Control: no-store.
+export function signFileUrl(req, storedValue, ttlMs = DEFAULT_TTL_MS, { sensitive = false } = {}) {
   if (!storedValue) return storedValue;
   const filename = path.basename(storedValue);
-  const exp = expiryFor(ttlMs);
-  const sig = sign(filename, exp);
-  return `${publicBase(req)}/api/files/${filename}?exp=${exp}&sig=${sig}`;
+  const exp = sensitive ? Date.now() + ttlMs : expiryFor(ttlMs);
+  const sig = sign(filename, exp, sensitive);
+  return `${publicBase(req)}/api/files/${filename}?exp=${exp}&sig=${sig}${sensitive ? "&s=1" : ""}`;
 }
 
 // Verifies the ?exp=&sig= query params attached by signFileUrl above.
 // filename must already be the sanitized path.basename() of the request
 // param — this function only checks the signature/expiry, not path safety.
-export function verifyFileSignature(filename, exp, sig) {
+export function verifyFileSignature(filename, exp, sig, sensitive = false) {
   if (typeof sig !== "string" || !sig) return false;
 
   const expNum = Number(exp);
   if (!Number.isFinite(expNum) || expNum < Date.now()) return false;
 
-  const expected = sign(filename, expNum);
+  const expected = sign(filename, expNum, sensitive);
   const provided = Buffer.from(sig);
   const wanted = Buffer.from(expected);
 
