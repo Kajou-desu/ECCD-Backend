@@ -478,6 +478,24 @@ export async function importStudents(req, res, next) {
           // self-assigns every row; an Admin's rows are left unassigned for
           // a teacher to be connected later via edit.
           data.teacherId = req.user.role === "Teacher" ? req.user.id : null;
+
+          // Re-uploading the same file (a double click, or a retry after a
+          // timeout) must not create every child twice. A row is a duplicate
+          // when the same teacher already has a student with this name and
+          // birthday; rows committed earlier in this same file count too.
+          const duplicate = await tx.student.findFirst({
+            where: {
+              firstName: { equals: data.firstName, mode: "insensitive" },
+              lastName: { equals: data.lastName, mode: "insensitive" },
+              birthday: data.birthday,
+              teacherId: data.teacherId,
+            },
+            select: { id: true },
+          });
+          if (duplicate) {
+            throw new AppError("Already exists (same name and birthday), skipped", 409);
+          }
+
           const created = await tx.student.create({
             data: { ...data, studentCode: temporaryStudentCode() },
             include: DETAIL_INCLUDE,

@@ -9,6 +9,7 @@ vi.mock("../src/lib/prisma.js", () => ({
       update: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
+      findFirst: vi.fn(),
       count: vi.fn(),
       delete: vi.fn(),
     },
@@ -421,6 +422,33 @@ describe("updateStudent parent/guardian linking", () => {
     await expect(
       updateStudent({ params: { id: "10" }, body: { address: "New address" } }, mockRes(), vi.fn()),
     ).resolves.not.toThrow();
+  });
+});
+
+describe("importStudents duplicate detection", () => {
+  it("skips a row whose name and birthday already exist for that teacher, and imports the rest", async () => {
+    stubStudentWrites();
+    prisma.user.findMany.mockResolvedValue([]);
+    prisma.student.findFirst.mockResolvedValueOnce({ id: 3 }).mockResolvedValueOnce(null);
+
+    const req = {
+      body: { students: [baseBody, { ...baseBody, firstName: "Ana" }] },
+      user: staff,
+    };
+    const res = mockRes();
+    await importStudents(req, res, vi.fn());
+
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.imported).toBe(1);
+    expect(payload.failed).toEqual([{ row: 2, message: expect.stringContaining("Already exists") }]);
+    expect(prisma.student.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          firstName: { equals: "Juan", mode: "insensitive" },
+          teacherId: 1,
+        }),
+      }),
+    );
   });
 });
 

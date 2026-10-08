@@ -136,6 +136,17 @@ describe("getChildAttendance — lateArrivals", () => {
     expect(res.json.mock.calls[0][0].stats.lateArrivals).toBe(1);
   });
 
+  it("reports how many days the attendance rate is based on", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    prisma.attendance.findMany.mockResolvedValue([
+      record(1, null),
+      { date: new Date(Date.UTC(2026, 8, 2)), status: "absent", arrivedAt: null },
+    ]);
+    const res = mockRes();
+    await getChildAttendance(req(), res, vi.fn());
+    expect(res.json.mock.calls[0][0].stats).toMatchObject({ attendanceRate: 50, recordedDays: 2 });
+  });
+
   it("never counts a present record with no arrivedAt as late", async () => {
     prisma.student.findUnique.mockResolvedValue({ session: "morning" });
     prisma.attendance.findMany.mockResolvedValue([record(1, null)]);
