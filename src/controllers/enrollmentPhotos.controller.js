@@ -8,6 +8,7 @@ import {
   fetchStudentEnrollmentPhoto,
   removeStudentEnrollment,
   RecognitionRejectedError,
+  RecognitionStaleError,
 } from "../services/recognitionClient.js";
 import { assertCanAccessStudent } from "../utils/ownership.js";
 
@@ -80,7 +81,8 @@ export async function uploadEnrollmentPhotos(req, res, next) {
   }
 }
 
-// GET /api/students/:id/enrollment-photos — how many photos are enrolled.
+// GET /api/students/:id/enrollment-photos — how many photos are enrolled, plus
+// a version of that set (see getEnrollmentPhoto).
 // Teacher/admin only (route level) + the same per-student check as uploading.
 export async function getEnrollmentPhotoCount(req, res, next) {
   try {
@@ -91,9 +93,10 @@ export async function getEnrollmentPhotoCount(req, res, next) {
     await assertCanAccessStudent(req.user, id);
 
     try {
-      const { count } = await countStudentEnrollmentPhotos(id);
+      const { count, version } = await countStudentEnrollmentPhotos(id);
       res.set("Cache-Control", "no-store");
-      return res.json({ count });
+      // `version` pins the per-photo requests that follow to this exact set.
+      return res.json(version ? { count, version } : { count });
     } catch (err) {
       logger.error({ err }, "Enrollment photo count failed");
       return res.status(502).json({ message: "Face recognition service unavailable" });
@@ -120,10 +123,21 @@ export async function getEnrollmentPhoto(req, res, next) {
       return res.status(400).json({ message: "Invalid photo index" });
     }
 
+    // Optional: the version returned by the count endpoint. When given, a photo
+    // is served only if the set is still the one that was listed; otherwise
+    // 409 and the client lists again, instead of showing a mix of two sets.
+    const version = req.query.v;
+    if (version !== undefined && (typeof version !== "string" || !/^[0-9a-f]{16}$/.test(version))) {
+      return res.status(400).json({ message: "Invalid version" });
+    }
+
     let photo;
     try {
-      photo = await fetchStudentEnrollmentPhoto(id, Number(req.params.index));
+      photo = await fetchStudentEnrollmentPhoto(id, Number(req.params.index), version);
     } catch (err) {
+      if (err instanceof RecognitionStaleError) {
+        return res.status(409).json({ message: "The photos changed. Reload and try again." });
+      }
       logger.error({ err }, "Enrollment photo fetch failed");
       return res.status(502).json({ message: "Face recognition service unavailable" });
     }

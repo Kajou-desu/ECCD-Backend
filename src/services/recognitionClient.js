@@ -14,6 +14,12 @@ const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // matches the service's MAX_ENROLL_IM
 const photoCountSchema = z.object({
   studentId: z.number().int().positive(),
   count: z.number().int().min(0).max(20), // service caps a student's folder at 20 images
+  // Fingerprint of the stored set. Optional: an older service build omits it.
+  version: z.string().regex(/^[0-9a-f]{16}$/).optional(),
+});
+
+const enrollmentListSchema = z.object({
+  studentIds: z.array(z.number().int().positive()).max(100_000),
 });
 
 const enrollResponseSchema = z.object({
@@ -52,6 +58,10 @@ export class RecognitionUnavailableError extends Error {}
 // The service understood the request and refused it (HTTP 422: no photo held
 // exactly one face). Not an outage, so callers answer 422, not 502.
 export class RecognitionRejectedError extends Error {}
+
+// The photo set changed between listing it and fetching one of its photos
+// (HTTP 409). Not an outage: the caller should list the photos again.
+export class RecognitionStaleError extends Error {}
 
 // `frame` is a Buffer holding a JPEG. Resolves to { width, height, faces }.
 // Every failure mode (not configured, network, timeout, non-2xx, bad shape)
@@ -183,13 +193,17 @@ export async function countStudentEnrollmentPhotos(studentId) {
 
 // One stored enrollment photo by position. Resolves to { buffer, contentType },
 // or null if that photo no longer exists. The caller must still check the bytes.
-export async function fetchStudentEnrollmentPhoto(studentId, index) {
+// `version` (from countStudentEnrollmentPhotos) pins the photo to the set the
+// caller listed; if the set changed since, this throws RecognitionStaleError.
+export async function fetchStudentEnrollmentPhoto(studentId, index, version) {
   if (!env.recognition) throw new RecognitionUnavailableError("Recognition service is not configured");
 
   let response;
   try {
     response = await fetch(
-      `${env.recognition.baseUrl}/enroll/${Number(studentId)}/photos/${Number(index)}`,
+      `${env.recognition.baseUrl}/enroll/${Number(studentId)}/photos/${Number(index)}${
+        version ? `?v=${encodeURIComponent(version)}` : ""
+      }`,
       {
         headers: { "X-Service-Key": env.recognition.key },
         redirect: "error",
@@ -200,6 +214,7 @@ export async function fetchStudentEnrollmentPhoto(studentId, index) {
     throw new RecognitionUnavailableError(`Photo request failed: ${cause?.name ?? "error"}`);
   }
   if (response.status === 404) return null;
+  if (response.status === 409) throw new RecognitionStaleError("Enrollment photo set changed");
   if (!response.ok) throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
 
   const contentType = response.headers.get("content-type")?.split(";")[0].trim();
@@ -220,4 +235,32 @@ export async function fetchStudentEnrollmentPhoto(studentId, index) {
     throw new RecognitionUnavailableError("Recognition service returned an oversized photo");
   }
   return { buffer, contentType };
+}
+
+// Ids of every student the service holds photos for. Used only by the
+// reconcile script, to find enrollments that outlived their student.
+export async function listEnrolledStudentIds() {
+  if (!env.recognition) throw new RecognitionUnavailableError("Recognition service is not configured");
+
+  let response;
+  try {
+    response = await fetch(`${env.recognition.baseUrl}/enrollments`, {
+      headers: { "X-Service-Key": env.recognition.key },
+      redirect: "error",
+      signal: AbortSignal.timeout(ENROLL_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new RecognitionUnavailableError(`Enrollment list request failed: ${cause?.name ?? "error"}`);
+  }
+  if (!response.ok) throw new RecognitionUnavailableError(`Recognition service returned ${response.status}`);
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new RecognitionUnavailableError("Recognition service returned invalid JSON");
+  }
+  const parsed = enrollmentListSchema.safeParse(body);
+  if (!parsed.success) throw new RecognitionUnavailableError("Recognition service returned an unexpected shape");
+  return parsed.data.studentIds;
 }

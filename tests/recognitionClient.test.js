@@ -6,7 +6,15 @@ vi.mock("../src/config/env.js", async (importOriginal) => {
   return { env: { ...mod.env, recognition: { baseUrl: "http://127.0.0.1:8001", key: "k".repeat(40) } } };
 });
 
-const { recognizeFrame, enrollStudentPhotos, RecognitionUnavailableError } = await import("../src/services/recognitionClient.js");
+const {
+  recognizeFrame,
+  enrollStudentPhotos,
+  countStudentEnrollmentPhotos,
+  fetchStudentEnrollmentPhoto,
+  listEnrolledStudentIds,
+  RecognitionUnavailableError,
+  RecognitionStaleError,
+} = await import("../src/services/recognitionClient.js");
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
 const okBody = {
@@ -103,5 +111,55 @@ describe("enrollStudentPhotos — response", () => {
     fetchMock.mockResolvedValue(jsonResponse({ studentId: 5, photosReceived: 1, enrolled: true }));
     const result = await enrollStudentPhotos(5, [photo]);
     expect(result.enrolled).toBe(true);
+  });
+});
+
+describe("enrollment photo set version", () => {
+  const VERSION = "0123456789abcdef";
+  const imageResponse = () => new Response(JPEG, { status: 200, headers: { "content-type": "image/jpeg" } });
+
+  it("passes the version through when counting", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ studentId: 5, count: 2, version: VERSION }));
+    expect(await countStudentEnrollmentPhotos(5)).toEqual({ studentId: 5, count: 2, version: VERSION });
+  });
+
+  it("still accepts a service that sends no version", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ studentId: 5, count: 2 }));
+    expect((await countStudentEnrollmentPhotos(5)).count).toBe(2);
+  });
+
+  it("rejects a malformed version", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ studentId: 5, count: 2, version: "../../etc" }));
+    await expect(countStudentEnrollmentPhotos(5)).rejects.toBeInstanceOf(RecognitionUnavailableError);
+  });
+
+  it("sends the version with the photo request, URL-encoded, only when given", async () => {
+    fetchMock.mockResolvedValue(imageResponse());
+    await fetchStudentEnrollmentPhoto(5, 1, VERSION);
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://127.0.0.1:8001/enroll/5/photos/1?v=${VERSION}`);
+    fetchMock.mockResolvedValue(imageResponse());
+    await fetchStudentEnrollmentPhoto(5, 1);
+    expect(fetchMock.mock.calls[1][0]).toBe("http://127.0.0.1:8001/enroll/5/photos/1");
+  });
+
+  it("turns a 409 into RecognitionStaleError, not an outage", async () => {
+    fetchMock.mockResolvedValue(new Response("{}", { status: 409 }));
+    await expect(fetchStudentEnrollmentPhoto(5, 0, VERSION)).rejects.toBeInstanceOf(RecognitionStaleError);
+  });
+});
+
+describe("listEnrolledStudentIds", () => {
+  it("returns the ids", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ studentIds: [3, 9] }));
+    expect(await listEnrolledStudentIds()).toEqual([3, 9]);
+    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8001/enrollments");
+    expect(fetchMock.mock.calls[0][1].headers["X-Service-Key"]).toBe("k".repeat(40));
+  });
+
+  it("rejects an unexpected shape and a failed request", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ studentIds: ["x"] }));
+    await expect(listEnrolledStudentIds()).rejects.toBeInstanceOf(RecognitionUnavailableError);
+    fetchMock.mockResolvedValue(new Response("", { status: 500 }));
+    await expect(listEnrolledStudentIds()).rejects.toBeInstanceOf(RecognitionUnavailableError);
   });
 });

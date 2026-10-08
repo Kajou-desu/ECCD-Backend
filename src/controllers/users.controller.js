@@ -181,6 +181,11 @@ export async function registerUser(req, res, next) {
     if (role === "Admin" && req.user.role !== "Admin") {
       return res.status(403).json({ message: "Only an Admin can grant the Admin role" });
     }
+    // A Teacher manages families (Parent/Guardian accounts); creating another
+    // staff login is an Admin decision.
+    if (!LINKABLE_ROLES.includes(role) && req.user.role !== "Admin") {
+      return res.status(403).json({ message: "Only an Admin can create a Teacher account" });
+    }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
@@ -261,11 +266,26 @@ export async function updateUser(req, res, next) {
       return res.status(403).json({ message: "Only an Admin can modify an Admin account" });
     }
 
+    // Changing a role moves an account between families and staff, so it is
+    // an Admin decision (a Teacher could otherwise turn any Parent into a Teacher).
+    if (req.user.role !== "Admin" && requestedRole !== existing.role) {
+      return res.status(403).json({ message: "Only an Admin can change an account's role" });
+    }
+
     const data = {};
     if (req.body.firstName !== undefined) data.firstName = requireNonEmptyString(req.body.firstName, "firstName", 100);
     if (req.body.lastName !== undefined) data.lastName = requireNonEmptyString(req.body.lastName, "lastName", 100);
     if (req.body.middleName !== undefined) data.middleName = optionalString(req.body.middleName, 100);
     if (req.body.email !== undefined) data.email = requireEmail(req.body.email);
+    // The email is where password-reset codes go, so changing someone's email
+    // without their password is the same as taking the account. Only an Admin
+    // may do it here; people change their own through Settings (which asks for
+    // their password). The edit form resends the unchanged email, which is fine.
+    if (data.email !== undefined && data.email !== existing.email && req.user.role !== "Admin") {
+      return res.status(403).json({
+        message: "Only an Admin can change an account's email address. The account owner can change it in Settings.",
+      });
+    }
     if (req.body.phone !== undefined) data.phone = phoneForRole(requestedRole, req.body.phone);
     if (req.body.address !== undefined) data.address = optionalString(req.body.address, 500);
     if (req.body.centerLocation !== undefined) data.centerLocation = optionalString(req.body.centerLocation, 200);

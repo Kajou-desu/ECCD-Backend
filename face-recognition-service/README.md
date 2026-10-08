@@ -185,3 +185,19 @@ On adult sample photos we measured 0.13–0.35 for the same person; **children w
 pip install -r requirements-dev.txt
 pytest
 ```
+
+## Orphaned and inactive enrollments
+
+Photos live on this service's disk, outside the database, so they can outlive
+their student (for example the service was down when the student was deleted).
+From the backend:
+
+```
+npm run faces:reconcile                      # report only, changes nothing
+npm run faces:reconcile -- --apply           # erase enrollments whose student no longer exists
+npm run faces:reconcile -- --apply --purge-inactive   # also erase INACTIVE students' photos
+```
+
+Inactive students are never matched at the door either way; `--purge-inactive`
+only decides whether their photos are kept. It is safe to run on a schedule with
+`--apply`. Only student ids are printed.

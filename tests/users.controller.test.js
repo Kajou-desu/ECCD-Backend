@@ -158,6 +158,27 @@ describe("registerUser", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("rejects a Teacher creating a Teacher account, before anything is written", async () => {
+    const res = mockRes();
+    await registerUser({ body: { ...baseBody, role: "Teacher" }, user: { id: 1, role: "Teacher" } }, res, vi.fn());
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({ message: "Only an Admin can create a Teacher account" });
+    expect(prisma.user.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["Parent", "Guardian"])("still lets a Teacher create a %s account", async (role) => {
+    prisma.user.create.mockResolvedValue({ id: 2, role });
+    prisma.user.findUnique.mockResolvedValue({ id: 2, role, children: [] });
+    prisma.student.findMany.mockResolvedValue([]);
+    const res = mockRes();
+    await registerUser(
+      { body: { ...baseBody, role, phone: "09171234567" }, user: { id: 1, role: "Teacher" } },
+      res,
+      vi.fn(),
+    );
+    expect(res.status).toHaveBeenCalledWith(201);
+  });
+
   it("rejects a non-Admin trying to grant the Admin role", async () => {
     const req = {
       body: { ...baseBody, role: "Admin" },
@@ -252,11 +273,9 @@ describe("updateUser", () => {
       lastName: "Name",
     });
     prisma.user.update.mockResolvedValue({ id: 5, firstName: "New", lastName: "Name", role: "Parent" });
-    // The email change makes updateUser look for students listing that email.
-    prisma.student.findMany.mockResolvedValue([]);
 
     const req = {
-      body: { userId: 5, firstName: "New", lastName: "Name", email: "new@example.com" },
+      body: { userId: 5, firstName: "New", lastName: "Name" },
       user: { id: 1, role: "Teacher" },
     };
     const res = mockRes();
@@ -271,6 +290,70 @@ describe("updateUser", () => {
       }),
     );
     expect(res.json).toHaveBeenCalled();
+  });
+
+  describe("who may change an email or a role (M40)", () => {
+    const teacher = { id: 1, role: "Teacher" };
+    const admin = { id: 2, role: "Admin" };
+    const existingParent = { id: 5, role: "Parent", email: "maria@example.com", firstName: "M", lastName: "C", middleName: null };
+
+    const run = async (body, user) => {
+      const res = mockRes();
+      const next = vi.fn();
+      await updateUser({ body: { userId: 5, ...body }, user }, res, next);
+      return { res, next };
+    };
+
+    beforeEach(() => {
+      prisma.user.findUnique.mockResolvedValueOnce(existingParent).mockResolvedValue({ id: 5, children: [] });
+      prisma.user.update.mockResolvedValue({ id: 5 });
+      prisma.student.findMany.mockResolvedValue([]);
+    });
+
+    it("blocks a Teacher from changing another account's email, and writes nothing", async () => {
+      const { res } = await run({ email: "attacker@example.com" }, teacher);
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith({ message: expect.stringMatching(/Only an Admin can change an account's email/) });
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it("blocks a Teacher from changing their own email here too (Settings asks for their password)", async () => {
+      prisma.user.findUnique.mockReset();
+      prisma.user.findUnique.mockResolvedValueOnce({ id: 1, role: "Teacher", email: "t@example.com" });
+      const { res } = await run({ userId: 1, email: "new@example.com" }, teacher);
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it("allows the edit form to resend the unchanged email (any casing)", async () => {
+      const { res, next } = await run({ email: "Maria@Example.com", firstName: "Maria" }, teacher);
+      expect(res.status).not.toHaveBeenCalledWith(403);
+      expect(next).not.toHaveBeenCalled();
+      expect(prisma.user.update).toHaveBeenCalledOnce();
+    });
+
+    it("allows an Admin to change an email", async () => {
+      await run({ email: "new@example.com" }, admin);
+      expect(prisma.user.update.mock.calls[0][0].data.email).toBe("new@example.com");
+    });
+
+    it("blocks a Teacher from moving a Parent to Teacher, and writes nothing", async () => {
+      const { res } = await run({ role: "Teacher" }, teacher);
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith({ message: "Only an Admin can change an account's role" });
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it("allows a Teacher to resend the role the account already has", async () => {
+      const { res } = await run({ role: "Parent", firstName: "Maria" }, teacher);
+      expect(res.status).not.toHaveBeenCalledWith(403);
+      expect(prisma.user.update).toHaveBeenCalledOnce();
+    });
+
+    it("allows an Admin to change a role", async () => {
+      await run({ role: "Guardian" }, admin);
+      expect(prisma.user.update.mock.calls[0][0].data.role).toBe("Guardian");
+    });
   });
 
   it("blocks a Teacher from editing another Teacher account", async () => {

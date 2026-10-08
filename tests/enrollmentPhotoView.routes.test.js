@@ -20,7 +20,7 @@ vi.mock("../src/services/recognitionClient.js", async (importOriginal) => ({
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { isRecognitionConfigured, countStudentEnrollmentPhotos, fetchStudentEnrollmentPhoto } = await import(
+const { isRecognitionConfigured, countStudentEnrollmentPhotos, fetchStudentEnrollmentPhoto, RecognitionStaleError } = await import(
   "../src/services/recognitionClient.js"
 );
 const { signToken } = await import("../src/utils/jwt.js");
@@ -93,7 +93,7 @@ describe("GET /students/:id/enrollment-photos/:index (one photo)", () => {
     expect(res.headers["content-type"]).toBe("image/jpeg");
     expect(res.headers["cache-control"]).toMatch(/no-store/);
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
-    expect(fetchStudentEnrollmentPhoto).toHaveBeenCalledWith(5, 1);
+    expect(fetchStudentEnrollmentPhoto).toHaveBeenCalledWith(5, 1, undefined);
   });
 
   it.each(["-1", "abc", "1.5", "20", "100", "../0"])("400 for a bad index %s, before the service is called", async (bad) => {
@@ -119,5 +119,45 @@ describe("GET /students/:id/enrollment-photos/:index (one photo)", () => {
     const res = await request(app).get(`${LIST}/0`).set("Authorization", auth());
     expect(res.status).toBe(502);
     expect(JSON.stringify(res.body)).not.toMatch(/boom|10\.1\.2\.3/);
+  });
+});
+
+describe("enrollment photo set version", () => {
+  const V = "0123456789abcdef";
+
+  it("the count includes the version when the service sends one", async () => {
+    countStudentEnrollmentPhotos.mockResolvedValue({ studentId: 5, count: 3, version: V });
+    const res = await request(app).get(LIST).set("Authorization", auth());
+    expect(res.body).toEqual({ count: 3, version: V });
+  });
+
+  it("the count stays {count} for a service without versions", async () => {
+    const res = await request(app).get(LIST).set("Authorization", auth());
+    expect(res.body).toEqual({ count: 3 });
+  });
+
+  it("a photo request passes ?v= to the service", async () => {
+    const res = await request(app).get(`${LIST}/1?v=${V}`).set("Authorization", auth());
+    expect(res.status).toBe(200);
+    expect(fetchStudentEnrollmentPhoto).toHaveBeenCalledWith(5, 1, V);
+  });
+
+  it("a stale set is a 409 so the client lists again", async () => {
+    fetchStudentEnrollmentPhoto.mockRejectedValue(new RecognitionStaleError("changed"));
+    const res = await request(app).get(`${LIST}/1?v=${V}`).set("Authorization", auth());
+    expect(res.status).toBe(409);
+  });
+
+  it.each(["abc", "../../x", "0123456789ABCDEF", `${V}${V}`])("rejects the malformed version %s with a 400", async (bad) => {
+    const res = await request(app).get(`${LIST}/1?v=${encodeURIComponent(bad)}`).set("Authorization", auth());
+    expect(res.status).toBe(400);
+    expect(fetchStudentEnrollmentPhoto).not.toHaveBeenCalled();
+  });
+
+  it("still enforces ownership before anything is asked of the service", async () => {
+    prisma.student.findUnique.mockResolvedValue({ id: 5, teacherId: 77 });
+    const res = await request(app).get(`${LIST}/1?v=${V}`).set("Authorization", auth("Teacher", 9));
+    expect(res.status).toBe(403);
+    expect(fetchStudentEnrollmentPhoto).not.toHaveBeenCalled();
   });
 });

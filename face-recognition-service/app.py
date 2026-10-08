@@ -16,6 +16,7 @@ Security posture:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import io
 import logging
@@ -266,16 +267,48 @@ def _enrolled_photo_paths(student_id: str) -> list[str]:
     ]
 
 
+def _photo_set_version(paths: list[str]) -> str:
+    """Fingerprint of the stored photo set (names, sizes, modification times).
+    It changes whenever a re-enrollment or removal replaces the set, so a client
+    that listed the photos and then fetches them one by one can tell that it
+    would be mixing two different sets."""
+    digest = hashlib.sha256()
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        digest.update(f"{os.path.basename(path)}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+    return digest.hexdigest()[:16]
+
+
 @app.get("/enroll/{student_id}/photos")
 def list_enrolled_photos(student_id: str):
-    """How many photos are stored for this student (no image data)."""
+    """How many photos are stored for this student, and the set's version (no image data)."""
     if not recognizer.STUDENT_DIR_RE.match(student_id):
         return _error(400, "Invalid student id")
-    return {"studentId": int(student_id), "count": len(_enrolled_photo_paths(student_id))}
+    paths = _enrolled_photo_paths(student_id)
+    return {"studentId": int(student_id), "count": len(paths), "version": _photo_set_version(paths)}
+
+
+@app.get("/enrollments")
+def list_enrollments():
+    """Ids of every student that has at least one stored photo. Used by the
+    backend's reconcile script to find enrollments whose student no longer exists."""
+    ids = []
+    try:
+        with os.scandir(KNOWN_FACES_DIR) as it:
+            for entry in it:
+                if entry.is_dir(follow_symlinks=False) and recognizer.STUDENT_DIR_RE.match(entry.name):
+                    if _enrolled_photo_paths(entry.name):
+                        ids.append(int(entry.name))
+    except FileNotFoundError:
+        pass
+    return {"studentIds": sorted(ids)}
 
 
 @app.get("/enroll/{student_id}/photos/{index}")
-def get_enrolled_photo(student_id: str, index: str):
+def get_enrolled_photo(student_id: str, index: str, v: str | None = None):
     """One stored photo by position. `index` is a number, never a file name, so
     a caller cannot steer the read outside this student's own folder."""
     if not recognizer.STUDENT_DIR_RE.match(student_id):
@@ -283,6 +316,11 @@ def get_enrolled_photo(student_id: str, index: str):
     if not re.fullmatch(r"\d{1,2}", index):
         return _error(400, "Invalid photo index")
     paths = _enrolled_photo_paths(student_id)
+    # `v` is the version the caller got when it listed the photos. If the set
+    # was replaced since, say so (409) instead of serving a photo from a
+    # different set than the rest of the list.
+    if v is not None and not hmac.compare_digest(v, _photo_set_version(paths)):
+        return _error(409, "Photo set changed")
     position = int(index)
     if position >= len(paths):
         return _error(404, "Not found")

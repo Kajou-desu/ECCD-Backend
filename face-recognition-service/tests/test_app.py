@@ -1,3 +1,6 @@
+import os
+import re
+
 import cv2
 import numpy as np
 import pytest
@@ -390,7 +393,10 @@ class TestViewEnrolledPhotos:
 
     def test_count_lists_images_only(self, client, store):
         r = client.get("/enroll/5/photos", headers=AUTH)
-        assert r.status_code == 200 and r.json() == {"studentId": 5, "count": 2}
+        assert r.status_code == 200
+        body = r.json()
+        assert body["studentId"] == 5 and body["count"] == 2
+        assert re.fullmatch(r"[0-9a-f]{16}", body["version"])
 
     def test_unknown_student_has_zero_photos(self, client, store):
         assert client.get("/enroll/9/photos", headers=AUTH).json()["count"] == 0
@@ -418,3 +424,68 @@ class TestViewEnrolledPhotos:
     def test_a_non_image_file_is_never_served(self, client, store):
         (store / "5" / "0.jpg").write_text("<html>not a jpeg</html>")
         assert client.get("/enroll/5/photos/0", headers=AUTH).status_code == 404
+
+
+class TestPhotoSetVersion:
+    """The version lets a client detect that the set was replaced between listing and fetching."""
+
+    @pytest.fixture()
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        student = tmp_path / "5"
+        student.mkdir()
+        (student / "0.jpg").write_bytes(jpeg())
+        return tmp_path
+
+    def version(self, client):
+        return client.get("/enroll/5/photos", headers=AUTH).json()["version"]
+
+    def test_is_stable_while_nothing_changes(self, client, store):
+        assert self.version(client) == self.version(client)
+
+    def test_changes_when_the_set_is_replaced(self, client, store):
+        before = self.version(client)
+        (store / "5" / "1.jpg").write_bytes(jpeg())
+        assert self.version(client) != before
+
+    def test_changes_when_a_photo_is_replaced_in_place(self, client, store):
+        before = self.version(client)
+        os.utime(store / "5" / "0.jpg", ns=(1, 1))
+        assert self.version(client) != before
+
+    def test_a_current_version_serves_the_photo(self, client, store):
+        r = client.get(f"/enroll/5/photos/0?v={self.version(client)}", headers=AUTH)
+        assert r.status_code == 200 and r.content == jpeg()
+
+    def test_a_stale_version_is_a_409_not_a_photo_from_another_set(self, client, store):
+        stale = self.version(client)
+        (store / "5" / "1.jpg").write_bytes(jpeg())
+        r = client.get(f"/enroll/5/photos/0?v={stale}", headers=AUTH)
+        assert r.status_code == 409 and r.content != jpeg()
+
+    def test_the_version_is_optional(self, client, store):
+        assert client.get("/enroll/5/photos/0", headers=AUTH).status_code == 200
+
+
+class TestListEnrollments:
+    @pytest.fixture()
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path))
+        for name in ("5", "12"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "0.jpg").write_bytes(jpeg())
+        (tmp_path / "7").mkdir()  # no photos: not an enrollment
+        (tmp_path / "5.tmp").mkdir()  # leftover working folder
+        (tmp_path / "abc").mkdir()
+        (tmp_path / "stray.jpg").write_bytes(jpeg())
+        return tmp_path
+
+    def test_requires_the_service_key(self, client, store):
+        assert client.get("/enrollments").status_code == 401
+
+    def test_lists_only_students_with_photos(self, client, store):
+        assert client.get("/enrollments", headers=AUTH).json() == {"studentIds": [5, 12]}
+
+    def test_empty_when_the_folder_does_not_exist(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "KNOWN_FACES_DIR", str(tmp_path / "missing"))
+        assert client.get("/enrollments", headers=AUTH).json() == {"studentIds": []}
