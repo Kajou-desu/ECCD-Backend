@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const tx = {
   user: { create: vi.fn(), update: vi.fn(), findUnique: vi.fn() },
-  parentChild: { deleteMany: vi.fn(), createMany: vi.fn() },
+  parentChild: { deleteMany: vi.fn(), createMany: vi.fn(), findFirst: vi.fn(), findMany: vi.fn() },
   student: { findMany: vi.fn() },
 };
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     user: { findUnique: vi.fn(), update: vi.fn() },
+    center: { findUnique: vi.fn() },
     $transaction: vi.fn((cb) => cb(tx)),
   },
 }));
@@ -36,13 +37,16 @@ beforeEach(() => {
   tx.user.update.mockResolvedValue(savedUser);
   tx.user.findUnique.mockResolvedValue(savedUser);
   tx.student.findMany.mockResolvedValue([]);
+  tx.parentChild.findFirst.mockResolvedValue({ id: 1 });
+  tx.parentChild.findMany.mockResolvedValue([]);
+  prisma.center.findUnique.mockResolvedValue({ id: 3 });
   prisma.user.update.mockResolvedValue(savedUser);
 });
 
 function registerReq(role, phone) {
   return {
     user: { id: 1, role: "Admin" },
-    body: { firstName: "A", lastName: "B", email: "a@example.com", password: "Str0ng!Passw0rd#1", role, phone },
+    body: { firstName: "A", lastName: "B", email: "a@example.com", password: "Str0ng!Passw0rd#1", role, phone, centerId: 3 },
   };
 }
 
@@ -80,7 +84,7 @@ describe("registerUser phone rule", () => {
 describe("updateUser phone rule", () => {
   it("validates against the role the account will have after the update", async () => {
     // A Teacher being converted to a Parent must already have an SMS-capable number.
-    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Teacher", email: "t@example.com" });
+    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Teacher", centerId: 3, email: "t@example.com" });
     const next = vi.fn();
 
     await updateUser(
@@ -94,7 +98,7 @@ describe("updateUser phone rule", () => {
   });
 
   it("rejects a landline when editing an existing Parent's phone", async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Parent", email: "p@example.com" });
+    prisma.user.findUnique.mockResolvedValue({ id: 5, role: "Parent", centerId: 3, email: "p@example.com" });
     const next = vi.fn();
 
     await updateUser({ user: { id: 1, role: "Admin" }, body: { userId: 5, phone: LANDLINE } }, mockRes(), next);

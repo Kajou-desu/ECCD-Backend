@@ -18,6 +18,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import { sendOtpEmail } from "../lib/mailer.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
 import { otpMatches, hashOtp, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
+import { assertCanAccessStudents, teacherAccountScope } from "../utils/ownership.js";
 
 const ROLES = ["Teacher", "Parent", "Guardian", "Admin"];
 
@@ -40,10 +41,10 @@ const MAX_STUDENT_IDS = 100;
 // coercion), at most MAX_STUDENT_IDS entries; duplicates collapse.
 function parseStudentIds(raw) {
   if (raw.length > MAX_STUDENT_IDS) {
-    throw new AppError(`studentIds must have at most ${MAX_STUDENT_IDS} entries`, 400);
+    throw new AppError(`You can connect at most ${MAX_STUDENT_IDS} students to one account.`, 400);
   }
   if (!raw.every((id) => Number.isInteger(id) && id > 0)) {
-    throw new AppError("Invalid studentIds, expected positive integers", 400);
+    throw new AppError("One of the selected students is not valid. Reload the page and try again.", 400);
   }
   return [...new Set(raw)];
 }
@@ -106,7 +107,8 @@ const PUBLIC_SELECT = {
   email: true,
   phone: true,
   address: true,
-  centerLocation: true,
+  centerId: true,
+  center: { select: { id: true, name: true } },
   role: true,
   isActive: true,
   createdAt: true,
@@ -120,27 +122,115 @@ const PUBLIC_SELECT = {
 function toUserResponse(req, user) {
   return {
     ...user,
+    // The center's name under the old field name too, for clients that still read it.
+    centerLocation: user.center?.name ?? null,
     profilePicture: user.profilePicture ? signFileUrl(req, user.profilePicture) : null,
     studentIds: user.children?.map((child) => child.studentId) ?? [],
   };
 }
 
+// toUserResponse for the account a Teacher just created or changed: its
+// studentIds list only that Teacher's own students, like listUsers does. (An
+// email match can connect a new account to other classes' students too.)
+async function toScopedResponse(req, user) {
+  if (req.user.role !== "Teacher" || !user.children?.length) return toUserResponse(req, user);
+  const own = await prisma.student.findMany({
+    where: { id: { in: user.children.map((c) => c.studentId) }, teacherId: req.user.id },
+    select: { id: true },
+  });
+  const ownIds = new Set(own.map((s) => s.id));
+  return toUserResponse(req, { ...user, children: user.children.filter((c) => ownIds.has(c.studentId)) });
+}
+
 function requireRoleValue(value) {
   if (!ROLES.includes(value)) {
-    throw new AppError(`Invalid role, expected one of: ${ROLES.join(", ")}`, 400);
+    throw new AppError(`Choose a role: ${ROLES.join(", ")}.`, 400);
   }
   return value;
 }
 
 const LINKABLE_ROLES = ["Parent", "Guardian"];
 
+// The raw validators say things like "Invalid firstName". These keep the same
+// checks but give the person filling in the form a message they can act on.
+function friendly(message, check) {
+  try {
+    return check();
+  } catch (err) {
+    if (err instanceof AppError && err.status === 400) throw new AppError(message, 400);
+    throw err;
+  }
+}
+const requireNamePart = (value, label) =>
+  friendly(`${label} is required (up to 100 characters).`, () => requireNonEmptyString(value, label, 100));
+const optionalNamePart = (value, label) =>
+  friendly(`${label} must be 100 characters or fewer.`, () => optionalString(value, 100));
+const accountEmail = (value) =>
+  friendly("Enter a valid email address, for example name@example.com.", () => requireEmail(value));
+const accountPhone = (role, value) =>
+  friendly(
+    SMS_ROLES.includes(role)
+      ? "Enter a Philippine mobile number, for example 09171234567."
+      : "Enter a valid phone number.",
+    () => phoneForRole(role, value),
+  );
+
+const NO_STUDENT_MESSAGE =
+  "A Parent or Guardian account must be connected to at least one student. Select a student for this account.";
+const NO_CENTER_TEACHER_MESSAGE =
+  "Your account is not assigned to a center yet. Ask an Admin to assign your center first.";
+const NOT_IN_CENTER_MESSAGE = "This account could not be found in your center.";
+
+// The Teacher's own center, or a clear refusal if an Admin has not set one:
+// without it there is nothing to match accounts against.
+function teacherCenterId(req) {
+  if (req.user.centerId == null) throw new AppError(NO_CENTER_TEACHER_MESSAGE, 403);
+  return req.user.centerId;
+}
+
+// An Admin picks the center of an account; it must exist.
+async function requireExistingCenter(value) {
+  const id = friendly("Choose the center for this account.", () => parseId(value, "centerId"));
+  const center = await prisma.center.findUnique({ where: { id }, select: { id: true } });
+  if (!center) throw new AppError("The selected center no longer exists. Reload the page and choose again.", 400);
+  return id;
+}
+
+// Students being connected by an Admin must belong to the account's center
+// (through their Teacher). A Teacher can only pick their own students, which
+// are in their own center by definition (assertCanAccessStudents).
+async function assertStudentsInCenter(studentIds, centerId) {
+  const students = await prisma.student.findMany({
+    where: { id: { in: studentIds } },
+    select: { id: true, name: true, teacher: { select: { centerId: true } } },
+  });
+  if (students.length !== studentIds.length) {
+    throw new AppError("One or more of the selected students no longer exist. Reload the page and try again.", 400);
+  }
+  const elsewhere = students.filter((student) => student.teacher?.centerId !== centerId);
+  if (elsewhere.length) {
+    throw new AppError(
+      `These students are not at this account's center (or have no teacher yet): ${elsewhere
+        .map((student) => student.name)
+        .join(", ")}.`,
+      400,
+    );
+  }
+}
+
 // Reverse of the student-side linking: connects a Parent/Guardian account to
-// students whose registration lists its email. Only called from the admin
-// flows (register/update), never from self-service email changes, which are
-// not verified. Adds links only; existing ones are kept.
-async function linkStudentsByEmail(tx, userId, email) {
+// students whose registration lists its email AND whose Teacher is at the
+// account's center (the same email at another center is not the same family
+// record). Only called from the admin flows (register/update), never from
+// self-service email changes, which are not verified. Adds links only;
+// existing ones are kept.
+async function linkStudentsByEmail(tx, userId, email, centerId) {
+  if (centerId == null) return;
   const students = await tx.student.findMany({
-    where: { OR: [{ motherEmail: email }, { fatherEmail: email }, { guardianEmail: email }] },
+    where: {
+      OR: [{ motherEmail: email }, { fatherEmail: email }, { guardianEmail: email }],
+      teacher: { centerId },
+    },
     select: { id: true },
   });
   if (!students.length) return;
@@ -150,15 +240,58 @@ async function linkStudentsByEmail(tx, userId, email) {
   });
 }
 
+// A Parent/Guardian account is only useful (and only safe to leave around) if
+// it reaches at least one student. Run inside the transaction so a failure
+// rolls the whole save back.
+async function requireStudentLink(tx, userId) {
+  const link = await tx.parentChild.findFirst({ where: { parentId: userId }, select: { id: true } });
+  if (!link) throw new AppError(NO_STUDENT_MESSAGE, 400);
+}
+
+// After an Admin moves an account to another center, every student it is
+// connected to must be at that center.
+async function requireLinksInCenter(tx, userId, centerId) {
+  const links = await tx.parentChild.findMany({
+    where: { parentId: userId },
+    select: { student: { select: { name: true, teacher: { select: { centerId: true } } } } },
+  });
+  const elsewhere = links.filter((link) => link.student.teacher?.centerId !== centerId);
+  if (elsewhere.length) {
+    throw new AppError(
+      `This account is connected to students at another center (${elsewhere
+        .map((link) => link.student.name)
+        .join(", ")}). Choose students from the new center for it first.`,
+      400,
+    );
+  }
+}
+
 // GET /api/users/all — Teacher/Admin only (enforced at route level).
+// An Admin sees every account. A Teacher sees the Teachers and Parent/Guardian
+// accounts of their own center only, and only their own students in each
+// account's studentIds.
 export async function listUsers(req, res, next) {
   try {
-    const users = await prisma.user.findMany({
-      select: PUBLIC_SELECT,
-      where: req.user.role === "Admin" ? undefined : { role: { not: "Admin" } },
-      orderBy: { name: "asc" },
-    });
-    res.json(users.map((u) => toUserResponse(req, u)));
+    if (req.user.role === "Admin") {
+      const users = await prisma.user.findMany({ select: PUBLIC_SELECT, orderBy: { name: "asc" } });
+      return res.json(users.map((u) => toUserResponse(req, u)));
+    }
+
+    const centerId = teacherCenterId(req);
+    const [users, ownStudents] = await Promise.all([
+      prisma.user.findMany({
+        select: PUBLIC_SELECT,
+        where: { role: { in: ["Teacher", ...LINKABLE_ROLES] }, centerId },
+        orderBy: { name: "asc" },
+      }),
+      prisma.student.findMany({ where: { teacherId: req.user.id }, select: { id: true } }),
+    ]);
+    const ownIds = new Set(ownStudents.map((s) => s.id));
+    res.json(
+      users.map((u) =>
+        toUserResponse(req, { ...u, children: u.children?.filter((c) => ownIds.has(c.studentId)) }),
+      ),
+    );
   } catch (err) {
     next(err);
   }
@@ -169,12 +302,16 @@ export async function listUsers(req, res, next) {
 // account with role "Admin" is rejected here even if the request were
 // crafted directly against the API, bypassing the frontend's own
 // role-dropdown restriction (getAssignableRoles).
+//
+// Every non-Admin account belongs to a center. A Teacher's new account is
+// always at the Teacher's own center (any centerId in the body is ignored); an
+// Admin chooses it. A Parent/Guardian must end up connected to a student.
 export async function registerUser(req, res, next) {
   try {
-    const firstName = requireNonEmptyString(req.body.firstName, "firstName", 100);
-    const lastName = requireNonEmptyString(req.body.lastName, "lastName", 100);
-    const middleName = optionalString(req.body.middleName, 100);
-    const email = requireEmail(req.body.email);
+    const firstName = requireNamePart(req.body.firstName, "First name");
+    const lastName = requireNamePart(req.body.lastName, "Last name");
+    const middleName = optionalNamePart(req.body.middleName, "Middle name");
+    const email = accountEmail(req.body.email);
     const password = requirePassword(req.body.password);
     const role = requireRoleValue(req.body.role);
 
@@ -187,12 +324,22 @@ export async function registerUser(req, res, next) {
       return res.status(403).json({ message: "Only an Admin can create a Teacher account" });
     }
 
+    let centerId = null;
+    if (req.user.role === "Teacher") centerId = teacherCenterId(req);
+    else if (role !== "Admin") centerId = await requireExistingCenter(req.body.centerId);
+
+    const phone = accountPhone(role, req.body.phone);
+    const address = friendly("Address must be 500 characters or fewer.", () => optionalString(req.body.address, 500));
     const passwordHash = await bcrypt.hash(password, 10);
 
     const studentIds = Array.isArray(req.body.studentIds) ? parseStudentIds(req.body.studentIds) : [];
 
-    if (studentIds.length && !["Parent", "Guardian"].includes(role)) {
+    if (studentIds.length && !LINKABLE_ROLES.includes(role)) {
       return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
+    }
+    if (studentIds.length) {
+      if (req.user.role === "Teacher") await assertCanAccessStudents(req.user, studentIds);
+      else await assertStudentsInCenter(studentIds, centerId);
     }
 
     const user = await prisma.$transaction(async (tx) => {
@@ -205,11 +352,9 @@ export async function registerUser(req, res, next) {
           email,
           passwordHash,
           role,
-          phone: phoneForRole(role, req.body.phone),
-          address: optionalString(req.body.address, 500),
-          // Which ECCD center this account is based at; only meaningful
-          // for a Teacher, but stored as a plain optional field for any role.
-          centerLocation: optionalString(req.body.centerLocation, 200),
+          phone,
+          address,
+          centerId,
         },
         select: PUBLIC_SELECT,
       });
@@ -220,18 +365,23 @@ export async function registerUser(req, res, next) {
           skipDuplicates: true,
         });
       }
-      if (LINKABLE_ROLES.includes(role)) await linkStudentsByEmail(tx, created.id, email);
+      if (LINKABLE_ROLES.includes(role)) {
+        await linkStudentsByEmail(tx, created.id, email, centerId);
+        await requireStudentLink(tx, created.id);
+      }
 
       return tx.user.findUnique({ where: { id: created.id }, select: PUBLIC_SELECT });
     });
 
-    res.status(201).json(toUserResponse(req, user));
+    res.status(201).json(await toScopedResponse(req, user));
   } catch (err) {
     if (err.code === "P2002") {
-      return res.status(409).json({ message: "An account with this email already exists" });
+      return res.status(409).json({
+        message: "An account with this email address already exists. If it belongs to another center, ask an Admin to move it.",
+      });
     }
     if (err.code === "P2003") {
-      return res.status(400).json({ message: "One or more selected students do not exist" });
+      return res.status(400).json({ message: "One or more of the selected students no longer exist. Reload the page and try again." });
     }
     next(err);
   }
@@ -250,9 +400,17 @@ export async function updateUser(req, res, next) {
     if (
       req.user.role === "Teacher" &&
       id !== req.user.id &&
-      !["Parent", "Guardian"].includes(existing.role)
+      !LINKABLE_ROLES.includes(existing.role)
     ) {
       return res.status(403).json({ message: "Teachers can only modify their own or parent/guardian accounts" });
+    }
+
+    // ...and of those, only the ones at their own center. Answered like a
+    // missing account, so a Teacher can't probe which accounts exist elsewhere.
+    if (req.user.role === "Teacher" && id !== req.user.id) {
+      if (existing.centerId !== teacherCenterId(req)) {
+        return res.status(404).json({ message: NOT_IN_CENTER_MESSAGE });
+      }
     }
 
     // Only an Admin may modify an existing Admin account, or promote any
@@ -273,10 +431,10 @@ export async function updateUser(req, res, next) {
     }
 
     const data = {};
-    if (req.body.firstName !== undefined) data.firstName = requireNonEmptyString(req.body.firstName, "firstName", 100);
-    if (req.body.lastName !== undefined) data.lastName = requireNonEmptyString(req.body.lastName, "lastName", 100);
-    if (req.body.middleName !== undefined) data.middleName = optionalString(req.body.middleName, 100);
-    if (req.body.email !== undefined) data.email = requireEmail(req.body.email);
+    if (req.body.firstName !== undefined) data.firstName = requireNamePart(req.body.firstName, "First name");
+    if (req.body.lastName !== undefined) data.lastName = requireNamePart(req.body.lastName, "Last name");
+    if (req.body.middleName !== undefined) data.middleName = optionalNamePart(req.body.middleName, "Middle name");
+    if (req.body.email !== undefined) data.email = accountEmail(req.body.email);
     // The email is where password-reset codes go, so changing someone's email
     // without their password is the same as taking the account. Only an Admin
     // may do it here; people change their own through Settings (which asks for
@@ -286,10 +444,28 @@ export async function updateUser(req, res, next) {
         message: "Only an Admin can change an account's email address. The account owner can change it in Settings.",
       });
     }
-    if (req.body.phone !== undefined) data.phone = phoneForRole(requestedRole, req.body.phone);
-    if (req.body.address !== undefined) data.address = optionalString(req.body.address, 500);
-    if (req.body.centerLocation !== undefined) data.centerLocation = optionalString(req.body.centerLocation, 200);
+    if (req.body.phone !== undefined) data.phone = accountPhone(requestedRole, req.body.phone);
+    if (req.body.address !== undefined) {
+      data.address = friendly("Address must be 500 characters or fewer.", () => optionalString(req.body.address, 500));
+    }
     if (req.body.role !== undefined) data.role = requestedRole;
+
+    // The center: an Admin sets it (a Teacher's account and every Parent/
+    // Guardian need one); nobody else can move an account between centers.
+    let centerId = existing.centerId;
+    if (req.body.centerId !== undefined && req.body.centerId !== existing.centerId) {
+      if (req.user.role !== "Admin") {
+        // The edit form resends the unchanged value, which is fine; anything else is not.
+        return res.status(403).json({ message: "Only an Admin can change an account's center" });
+      }
+      centerId = requestedRole === "Admin" ? null : await requireExistingCenter(req.body.centerId);
+    }
+    if (requestedRole === "Admin") centerId = null;
+    else if (centerId == null) {
+      return res.status(400).json({ message: "Choose a center for this account." });
+    }
+    const centerChanged = centerId !== existing.centerId;
+    if (centerChanged) data.centerId = centerId;
 
     if (data.firstName !== undefined || data.middleName !== undefined || data.lastName !== undefined) {
       data.name = composeUserName({
@@ -301,15 +477,26 @@ export async function updateUser(req, res, next) {
 
     const studentIds = Array.isArray(req.body.studentIds) ? parseStudentIds(req.body.studentIds) : null;
 
-    if (studentIds && !["Parent", "Guardian"].includes(requestedRole) && studentIds.length) {
+    if (studentIds && !LINKABLE_ROLES.includes(requestedRole) && studentIds.length) {
       return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
+    }
+
+    // A Teacher may only connect their own students, and replaces only their own
+    // part of the list: links to another Teacher's students are not theirs to
+    // remove (the form never shows them, so it never sends them).
+    const teacherScoped = req.user.role === "Teacher";
+    if (studentIds?.length) {
+      if (teacherScoped) await assertCanAccessStudents(req.user, studentIds);
+      else await assertStudentsInCenter(studentIds, centerId);
     }
 
     const user = await prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({ where: { id }, data, select: PUBLIC_SELECT });
 
       if (studentIds) {
-        await tx.parentChild.deleteMany({ where: { parentId: id } });
+        await tx.parentChild.deleteMany({
+          where: teacherScoped ? { parentId: id, student: { teacherId: req.user.id } } : { parentId: id },
+        });
         if (studentIds.length) {
           await tx.parentChild.createMany({
             data: studentIds.map((studentId) => ({ parentId: id, studentId })),
@@ -322,24 +509,48 @@ export async function updateUser(req, res, next) {
         await tx.parentChild.deleteMany({ where: { parentId: id } });
       }
 
-      // Match by email only when the email or role change could create a
-      // new match; a plain edit must not restore links removed on purpose.
-      const becameLinkable = !LINKABLE_ROLES.includes(existing.role) && LINKABLE_ROLES.includes(requestedRole);
-      if (LINKABLE_ROLES.includes(requestedRole) && (becameLinkable || (data.email && data.email !== existing.email))) {
-        await linkStudentsByEmail(tx, id, data.email ?? existing.email);
+      // Moving a Teacher to another center moves their students with them; the
+      // Parent/Guardian accounts connected to those students must follow first.
+      if (centerChanged && existing.role === "Teacher" && requestedRole === "Teacher") {
+        const stranded = await tx.user.count({
+          where: {
+            role: { in: LINKABLE_ROLES },
+            OR: [{ centerId: null }, { centerId: { not: centerId } }],
+            children: { some: { student: { teacherId: id } } },
+          },
+        });
+        if (stranded > 0) {
+          throw new AppError(
+            `${stranded} parent/guardian account${stranded === 1 ? " is" : "s are"} connected to this Teacher's students at their current center. Move ${stranded === 1 ? "it" : "them"} to the new center, or reassign the students, before changing this Teacher's center.`,
+            400,
+          );
+        }
+      }
+
+      if (LINKABLE_ROLES.includes(requestedRole)) {
+        // Match by email only when the email, role or center change could create
+        // a new match; a plain edit must not restore links removed on purpose.
+        const becameLinkable = !LINKABLE_ROLES.includes(existing.role);
+        if (becameLinkable || centerChanged || (data.email && data.email !== existing.email)) {
+          await linkStudentsByEmail(tx, id, data.email ?? existing.email, centerId);
+        }
+        if (centerChanged) await requireLinksInCenter(tx, id, centerId);
+        await requireStudentLink(tx, id);
       }
 
       return tx.user.findUnique({ where: { id }, select: PUBLIC_SELECT });
     });
 
-    res.json(toUserResponse(req, user));
+    res.json(await toScopedResponse(req, user));
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Account not found" });
     if (err.code === "P2002") {
-      return res.status(409).json({ message: "An account with this email already exists" });
+      return res.status(409).json({
+        message: "An account with this email address already exists. If it belongs to another center, ask an Admin to move it.",
+      });
     }
     if (err.code === "P2003") {
-      return res.status(400).json({ message: "One or more selected students do not exist" });
+      return res.status(400).json({ message: "One or more of the selected students no longer exist. Reload the page and try again." });
     }
     next(err);
   }
@@ -351,12 +562,14 @@ export async function updateUser(req, res, next) {
 export async function updateMyProfile(req, res, next) {
   try {
     const data = {};
-    if (req.body.firstName !== undefined) data.firstName = requireNonEmptyString(req.body.firstName, "firstName", 100);
-    if (req.body.lastName !== undefined) data.lastName = requireNonEmptyString(req.body.lastName, "lastName", 100);
-    if (req.body.middleName !== undefined) data.middleName = optionalString(req.body.middleName, 100);
-    if (req.body.email !== undefined) data.email = requireEmail(req.body.email);
-    if (req.body.phone !== undefined) data.phone = phoneForRole(req.user.role, req.body.phone);
-    if (req.body.address !== undefined) data.address = optionalString(req.body.address, 500);
+    if (req.body.firstName !== undefined) data.firstName = requireNamePart(req.body.firstName, "First name");
+    if (req.body.lastName !== undefined) data.lastName = requireNamePart(req.body.lastName, "Last name");
+    if (req.body.middleName !== undefined) data.middleName = optionalNamePart(req.body.middleName, "Middle name");
+    if (req.body.email !== undefined) data.email = accountEmail(req.body.email);
+    if (req.body.phone !== undefined) data.phone = accountPhone(req.user.role, req.body.phone);
+    if (req.body.address !== undefined) {
+      data.address = friendly("Address must be 500 characters or fewer.", () => optionalString(req.body.address, 500));
+    }
 
     // The email is where password-reset codes go, so changing it is as
     // sensitive as changing the password. Without this check, anyone holding
@@ -567,6 +780,21 @@ export async function deleteUser(req, res, next) {
 
     if (existing.role === "Admin" && req.user.role !== "Admin") {
       return res.status(403).json({ message: "Only an Admin can delete an Admin account" });
+    }
+
+    // A Teacher can delete only an account at their own center whose connected
+    // students are all their own (or that has none). One that also reaches
+    // another Teacher's student keeps that access, so only an Admin may remove it.
+    if (req.user.role === "Teacher") {
+      if (existing.centerId !== teacherCenterId(req)) {
+        return res.status(404).json({ message: NOT_IN_CENTER_MESSAGE });
+      }
+      const scope = await teacherAccountScope(req.user.id, id);
+      if (!scope.canDelete) {
+        return res.status(403).json({
+          message: "This account is also connected to students of another teacher, so only an Admin can delete it.",
+        });
+      }
     }
 
     await prisma.user.delete({ where: { id } }); // cascades to parent_children/notifications

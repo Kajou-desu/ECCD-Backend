@@ -57,3 +57,25 @@ export async function assertCanAccessStudents(user, studentIds) {
   // Default deny
   throw new AppError("Forbidden", 403);
 }
+
+/**
+ * Where a Teacher stands with a Parent/Guardian account, by its student links:
+ * `own` links to this Teacher's students, `other` links to anyone else's
+ * (another Teacher's, or a student with no Teacher yet).
+ *
+ * - Seeing and editing an account is decided by its center, not by links.
+ * - May delete: other === 0. A parent who also has a child in another
+ *   Teacher's class keeps that access; only an Admin can remove the account.
+ */
+export async function teacherAccountScope(teacherId, accountId) {
+  const [own, other] = await Promise.all([
+    prisma.parentChild.count({ where: { parentId: accountId, student: { teacherId } } }),
+    prisma.parentChild.count({
+      where: {
+        parentId: accountId,
+        student: { OR: [{ teacherId: null }, { teacherId: { not: teacherId } }] },
+      },
+    }),
+  ]);
+  return { own, other, canDelete: other === 0 };
+}

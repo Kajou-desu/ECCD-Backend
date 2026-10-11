@@ -13,8 +13,8 @@ vi.mock("../src/lib/prisma.js", () => ({
       count: vi.fn(),
       delete: vi.fn(),
     },
-    user: { findMany: vi.fn() },
-    parentChild: { createMany: vi.fn() },
+    user: { findMany: vi.fn(), findUnique: vi.fn() },
+    parentChild: { createMany: vi.fn(), count: vi.fn() },
     // Controllers run inside prisma.$transaction((tx) => ...); passing the
     // mocked prisma as `tx` keeps every assertion below working unchanged.
     $transaction: vi.fn((callback) => callback(prisma)),
@@ -22,7 +22,7 @@ vi.mock("../src/lib/prisma.js", () => ({
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { createStudent, getStudent, updateStudent, importStudents } = await import(
+const { createStudent, getStudent, getStudents, updateStudent, importStudents } = await import(
   "../src/controllers/students.controller.js"
 );
 
@@ -48,7 +48,7 @@ describe("student detail teacher center", () => {
       birthday: new Date("2023-03-04T00:00:00.000Z"),
       photo: null,
       documents: [],
-      teacher: { id: 2, name: "Taylor Reed", centerLocation: "North ECCD Center" },
+      teacher: { id: 2, name: "Taylor Reed", center: { name: "North ECCD Center" } },
     });
     const res = mockRes();
 
@@ -62,7 +62,7 @@ describe("student detail teacher center", () => {
       expect.objectContaining({
         where: { id: 7 },
         include: expect.objectContaining({
-          teacher: { select: { id: true, name: true, centerLocation: true } },
+          teacher: { select: { id: true, name: true, center: { select: { name: true } } } },
         }),
       }),
     );
@@ -216,6 +216,8 @@ function stubStudentWrites() {
   prisma.student.create.mockResolvedValue({ id: 10, documents: [] });
   prisma.student.update.mockResolvedValue({ id: 10, birthday: new Date("2021-03-04"), documents: [] });
   prisma.parentChild.createMany.mockResolvedValue({ count: 1 });
+  // The student's Teacher is at center 3; accounts are only linked within it.
+  prisma.student.findUnique.mockResolvedValue({ teacher: { centerId: 3 } });
 }
 
 describe("createStudent parent/guardian linking", () => {
@@ -237,7 +239,7 @@ describe("createStudent parent/guardian linking", () => {
     // Emails are canonicalized (lowercased) before lookup, and only these
     // two roles can ever be matched.
     expect(prisma.user.findMany).toHaveBeenCalledWith({
-      where: { role: { in: ["Parent", "Guardian"] }, email: { in: ["maria@example.com", "juan@example.com"] } },
+      where: { role: { in: ["Parent", "Guardian"] }, email: { in: ["maria@example.com", "juan@example.com"] }, centerId: 3 },
       select: { id: true },
     });
     expect(prisma.parentChild.createMany).toHaveBeenCalledWith({
@@ -314,7 +316,7 @@ describe("createStudent parent/guardian linking", () => {
 describe("updateStudent parent/guardian linking", () => {
   // teacherId: 1 matches `staff.id` so assertCanAccessStudent's ownership
   // check (Teacher only manages their own connected students) allows these.
-  const before = { motherEmail: "maria@example.com", fatherEmail: null, guardianEmail: null, teacherId: 1 };
+  const before = { motherEmail: "maria@example.com", fatherEmail: null, guardianEmail: null, teacherId: 1, teacher: { centerId: 3 } };
 
   it("links only emails that changed", async () => {
     stubStudentWrites();
@@ -474,5 +476,110 @@ describe("importStudents parent/guardian linking", () => {
     expect(payload.imported).toBe(1);
     expect(payload.failed).toHaveLength(1);
     expect(prisma.parentChild.createMany).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("linking by email stays inside a center", () => {
+  it("links nothing when the student's Teacher has no center", async () => {
+    stubStudentWrites();
+    prisma.student.findUnique.mockResolvedValue({ teacher: { centerId: null } });
+    prisma.user.findMany.mockClear();
+    prisma.parentChild.createMany.mockClear();
+
+    await createStudent({ body: { ...baseBody, motherEmail: "maria@example.com" }, user: staff }, mockRes(), vi.fn());
+
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+    expect(prisma.parentChild.createMany).not.toHaveBeenCalled();
+  });
+
+  it("links nothing when the student has no Teacher", async () => {
+    stubStudentWrites();
+    prisma.student.findUnique.mockResolvedValue({ teacher: null });
+    prisma.user.findMany.mockClear();
+
+    await createStudent({ body: { ...baseBody, motherEmail: "maria@example.com" }, user: staff }, mockRes(), vi.fn());
+
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("student list: the center of each student", () => {
+  it("returns teacherCenterId and not the nested teacher", async () => {
+    prisma.student.findMany.mockResolvedValue([
+      { id: 1, name: "Kai", photo: null, birthday: new Date("2022-01-02"), teacher: { centerId: 3 } },
+      { id: 2, name: "Ana", photo: null, birthday: new Date("2022-01-02"), teacher: null },
+    ]);
+    const res = mockRes();
+
+    await getStudents({ query: {}, user: { id: 9, role: "Admin" } }, res, vi.fn());
+
+    const [kai, ana] = res.json.mock.calls[0][0];
+    expect(kai.teacherCenterId).toBe(3);
+    expect(ana.teacherCenterId).toBeNull();
+    expect("teacher" in kai).toBe(false);
+  });
+});
+
+describe("handing a student to a Teacher at another center", () => {
+  const admin = { id: 1, role: "Admin" };
+  const stubUpdate = (beforeTeacherId = 5) => {
+    prisma.student.update.mockResolvedValue({ id: 10, birthday: new Date("2021-03-04"), documents: [] });
+    prisma.student.findUnique.mockResolvedValue({ teacherId: beforeTeacherId, teacher: { centerId: 3 } });
+  };
+  const reassign = (teacherId) => updateStudent({ params: { id: "10" }, body: { teacherId }, user: admin }, mockRes(), vi.fn());
+
+  beforeEach(() => {
+    prisma.user.findUnique.mockReset();
+  });
+
+  it("is refused while a Parent/Guardian account is at a different center, and the change is rolled back", async () => {
+    stubUpdate();
+    // resolveTeacherId checks the new teacher's role; the guard then reads their center
+    prisma.user.findUnique.mockResolvedValueOnce({ role: "Teacher" }).mockResolvedValueOnce({ centerId: 4 });
+    prisma.parentChild.count.mockResolvedValue(2);
+    const next = vi.fn();
+
+    await updateStudent({ params: { id: "10" }, body: { teacherId: 6 }, user: admin }, mockRes(), next);
+
+    expect(prisma.parentChild.count).toHaveBeenCalledWith({
+      where: { studentId: 10, parent: { OR: [{ centerId: null }, { centerId: { not: 4 } }] } },
+    });
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 400, message: expect.stringMatching(/connected to 2 parent\/guardian accounts at another center/) }),
+    );
+  });
+
+  it("counts every linked account when the new Teacher has no center", async () => {
+    stubUpdate();
+    prisma.user.findUnique.mockResolvedValueOnce({ role: "Teacher" }).mockResolvedValueOnce({ centerId: null });
+    prisma.parentChild.count.mockResolvedValue(1);
+    const next = vi.fn();
+
+    await updateStudent({ params: { id: "10" }, body: { teacherId: 6 }, user: admin }, mockRes(), next);
+
+    expect(prisma.parentChild.count).toHaveBeenCalledWith({ where: { studentId: 10, parent: {} } });
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+  });
+
+  it("goes through when every connected account is at the new Teacher's center", async () => {
+    stubUpdate();
+    prisma.user.findUnique.mockResolvedValueOnce({ role: "Teacher" }).mockResolvedValueOnce({ centerId: 4 });
+    prisma.parentChild.count.mockResolvedValue(0);
+    const next = vi.fn();
+    const res = mockRes();
+
+    await updateStudent({ params: { id: "10" }, body: { teacherId: 6 }, user: admin }, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalled();
+  });
+
+  it("is not checked when the teacher stays the same", async () => {
+    stubUpdate(6);
+    prisma.user.findUnique.mockResolvedValueOnce({ role: "Teacher" });
+
+    await reassign(6);
+
+    expect(prisma.parentChild.count).not.toHaveBeenCalled();
   });
 });

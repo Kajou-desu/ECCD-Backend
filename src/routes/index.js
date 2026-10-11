@@ -14,6 +14,7 @@ import weeklyGoalsRoutes from "./weeklyGoals.routes.js";
 import fileRoutes from "./files.routes.js";
 import userRoutes from "./users.routes.js";
 import profileRoutes from "./profile.routes.js";
+import centerRoutes from "./centers.routes.js";
 import notificationRoutes from "./notifications.routes.js";
 
 const router = Router();
@@ -36,6 +37,7 @@ router.use("/dashboard", dashboardRoutes); // /api/dashboard/*
 router.use("/weekly-goals", weeklyGoalsRoutes); // /api/weekly-goals/*
 router.use("/files", fileRoutes); // /api/files/:filename (public - see files.routes.js)
 router.use("/users", userRoutes); // /api/users/all, /api/users/register, /api/users/delete/:id
+router.use("/centers", centerRoutes); // /api/centers (list: Teacher/Admin; create/rename: Admin)
 router.use("/profile", profileRoutes); // /api/profile/update
 router.use("/notifications", notificationRoutes); // /api/notifications/*
 

@@ -20,7 +20,7 @@ export async function requireAuth(req, res, next) {
     //   the old token happens to expire
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { id: true, email: true, role: true, isActive: true, tokenVersion: true },
+      select: { id: true, email: true, role: true, centerId: true, isActive: true, tokenVersion: true },
     });
 
     if (!user || !user.isActive || user.tokenVersion !== decoded.tokenVersion) {
@@ -28,7 +28,7 @@ export async function requireAuth(req, res, next) {
     }
 
     // req.user reflects the CURRENT database state, not stale token claims.
-    req.user = { id: user.id, email: user.email, role: user.role };
+    req.user = { id: user.id, email: user.email, role: user.role, centerId: user.centerId };
     next();
   } catch {
     return res.status(401).json({ message: "Invalid or expired token" });

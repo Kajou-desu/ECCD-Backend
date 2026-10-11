@@ -27,6 +27,8 @@ import { schoolDateString } from "../utils/schoolDate.js";
 // UploadStudentWork picker, useStudents search).
 const LIST_SELECT = {
   id: true,
+  // Only to tell which center a student is at (see teacherCenterId below).
+  teacher: { select: { centerId: true } },
   studentCode: true,
   name: true,
   photo: true,
@@ -47,7 +49,7 @@ const LIST_SELECT = {
 // plus embedded documents and the connected teacher.
 const DETAIL_INCLUDE = {
   documents: true,
-  teacher: { select: { id: true, name: true, centerLocation: true } },
+  teacher: { select: { id: true, name: true, center: { select: { name: true } } } },
 };
 
 // Prisma DateTime -> plain YYYY-MM-DD. Needed because StudentForm.jsx feeds
@@ -70,10 +72,10 @@ function toStudentDetailResponse(req, student) {
   return {
     ...rest,
     teacher: teacher?.name ?? null,
-    teacherCenterLocation: teacher?.centerLocation ?? null,
+    teacherCenterLocation: teacher?.center?.name ?? null,
     // StudentProfileHeader.jsx reads `student.school`. There is no school column;
     // the school/center is the assigned teacher's center, so derive it here.
-    school: teacher?.centerLocation ?? null,
+    school: teacher?.center?.name ?? null,
     photo: signFileUrl(req, student.photo),
     birthday: toDateOnly(student.birthday),
     documents: (student.documents || []).map((doc) => toDocumentResponse(req, doc)),
@@ -105,16 +107,25 @@ function parsePrimaryGuardianType(value) {
   return value;
 }
 
-// Links existing Parent/Guardian accounts whose email matches any of `emails`.
-// Emails are lowercased on every write path (requireEmail/optionalEmail), so an
-// exact match is correct. Never creates accounts, only adds links, and logs
-// ids only, never emails.
+// Links existing Parent/Guardian accounts whose email matches any of `emails`
+// AND that are at the same center as the student's Teacher (the same email at
+// another center is not this family's account). A student with no Teacher, or
+// a Teacher with no center, links nothing. Emails are lowercased on every write
+// path (requireEmail/optionalEmail), so an exact match is correct. Never creates
+// accounts, only adds links, and logs ids only, never emails.
 async function linkAccountsByEmail(tx, studentId, emails, actorId) {
   const unique = [...new Set(emails.filter(Boolean))];
   if (!unique.length) return;
 
+  const student = await tx.student.findUnique({
+    where: { id: studentId },
+    select: { teacher: { select: { centerId: true } } },
+  });
+  const centerId = student?.teacher?.centerId;
+  if (centerId == null) return;
+
   const accounts = await tx.user.findMany({
-    where: { role: { in: ["Parent", "Guardian"] }, email: { in: unique } },
+    where: { role: { in: ["Parent", "Guardian"] }, email: { in: unique }, centerId },
     select: { id: true },
   });
   if (!accounts.length) return;
@@ -124,6 +135,24 @@ async function linkAccountsByEmail(tx, studentId, emails, actorId) {
     skipDuplicates: true,
   });
   if (count) logger.info({ actorId, studentId, count }, "Linked parent accounts to student");
+}
+
+// A student's Parent/Guardian accounts must be at the same center as the
+// student's Teacher. Handing the student to a Teacher at another center would
+// leave those accounts at a center that no longer teaches the child, so it is
+// refused until they are moved (or disconnected). Throws inside the
+// transaction, which rolls the reassignment back.
+async function requireParentsAtCenterOf(tx, studentId, teacherId) {
+  const teacher = await tx.user.findUnique({ where: { id: teacherId }, select: { centerId: true } });
+  const centerId = teacher?.centerId ?? null;
+  const parent = centerId == null ? {} : { OR: [{ centerId: null }, { centerId: { not: centerId } }] };
+  const elsewhere = await tx.parentChild.count({ where: { studentId, parent } });
+  if (elsewhere > 0) {
+    throw new AppError(
+      `This student is connected to ${elsewhere} parent/guardian account${elsewhere === 1 ? "" : "s"} at another center. Move ${elsewhere === 1 ? "it" : "them"} to the new teacher's center, or disconnect ${elsewhere === 1 ? "it" : "them"}, before changing the teacher.`,
+      400,
+    );
+  }
 }
 
 function buildCreateData(body) {
@@ -203,8 +232,11 @@ export async function getStudents(req, res, next) {
     if (pagination) res.set("X-Total-Count", String(total));
 
     res.json(
-      students.map((s) => ({
+      students.map(({ teacher, ...s }) => ({
         ...s,
+        // The center of the student's Teacher: lets an Admin's account form offer
+        // only the students of the account's center.
+        teacherCenterId: teacher?.centerId ?? null,
         photo: signFileUrl(req, s.photo),
         birthday: toDateOnly(s.birthday),
       }))
@@ -379,9 +411,12 @@ export async function updateStudent(req, res, next) {
     const student = await prisma.$transaction(async (tx) => {
       const before = await tx.student.findUnique({
         where: { id },
-        select: { motherEmail: true, fatherEmail: true, guardianEmail: true },
+        select: { motherEmail: true, fatherEmail: true, guardianEmail: true, teacherId: true },
       });
       const updated = await tx.student.update({ where: { id }, data, include: DETAIL_INCLUDE });
+      if (data.teacherId !== undefined && data.teacherId !== before?.teacherId) {
+        await requireParentsAtCenterOf(tx, id, data.teacherId);
+      }
       const changed = EMAIL_FIELDS.filter((f) => data[f] !== undefined && data[f] !== before?.[f]);
       await linkAccountsByEmail(tx, id, changed.map((f) => data[f]), req.user?.id);
       return updated;
