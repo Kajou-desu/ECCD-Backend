@@ -4,7 +4,7 @@ import {
   getAttendance,
   updateAttendance,
   recordAttendance,
-  markDeparted,
+  markPickedUp,
 } from "../controllers/attendance.controller.js";
 import { getAttendanceRange, importAttendance } from "../controllers/attendanceBulk.controller.js";
 
@@ -17,7 +17,7 @@ router.get("/", requireRole("Teacher", "Admin"), getAttendance);
 router.get("/range", requireRole("Teacher", "Admin"), getAttendanceRange);
 router.post("/import", requireRole("Teacher", "Admin"), importAttendance);
 router.put("/:studentId", requireRole("Teacher", "Admin"), updateAttendance);
-router.patch("/:studentId/depart", requireRole("Teacher", "Admin"), markDeparted);
+router.patch("/:studentId/pickup", requireRole("Teacher", "Admin"), markPickedUp);
 router.post("/", requireRole("Teacher", "Admin"), recordAttendance);
 
 export default router;

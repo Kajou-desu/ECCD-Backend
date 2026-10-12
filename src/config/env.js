@@ -83,6 +83,29 @@ const verification = {
   minHits: numberEnv("VERIFY_MIN_HITS", 2, 1, 10),
 };
 
+// Automatic pickup (services/pickupWatch.service.js). Start times are school-
+// local "HH:MM"; a bad value fails closed at startup like every other setting.
+function clockEnv(name, fallback) {
+  const raw = process.env[name] || fallback;
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(raw);
+  if (!match) {
+    console.error(`${name} must be a 24-hour time like "10:30" (got "${raw}").`);
+    process.exit(1);
+  }
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+const pickup = {
+  // Tracking starts at these school-local times (minutes since midnight), per
+  // the student's session, and runs for windowMinutes.
+  morningStartMin: clockEnv("PICKUP_MORNING_START", "10:30"),
+  afternoonStartMin: clockEnv("PICKUP_AFTERNOON_START", "14:30"),
+  windowMs: numberEnv("PICKUP_WINDOW_HOURS", 2, 0.5, 4) * 60 * 60 * 1000,
+  // Neither the face nor the tag seen for this long, with no "still here" from
+  // the teacher, and the student is marked picked up.
+  absentMs: numberEnv("PICKUP_ABSENT_MIN", 5, 2, 60) * 60 * 1000,
+};
+
 // Optional face-recognition microservice (face-recognition-service/). When
 // unset, the frame endpoint answers 503 and the rest of the app is unaffected.
 // When set it must be complete and safe: a real http(s) URL, plain http only for
@@ -264,6 +287,7 @@ export const env = {
   redisUrl: process.env.REDIS_URL || null,
   schoolTimezone,
   verification,
+  pickup,
   recognition,
   semaphore,
   smsProvider,

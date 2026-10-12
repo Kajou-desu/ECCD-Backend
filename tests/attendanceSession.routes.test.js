@@ -9,6 +9,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     $queryRaw: vi.fn(),
     user: { findUnique: vi.fn() },
     attendanceSession: { findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
+    pickupCheck: { findMany: vi.fn().mockResolvedValue([]), findUnique: vi.fn(), updateMany: vi.fn() },
   },
 }));
 
@@ -50,10 +51,12 @@ describe("attendance session routes — access control (default deny)", () => {
       ["post", "/api/attendance/session/start"],
       ["post", "/api/attendance/session/stop"],
       ["get", "/api/attendance/session/monitor"],
+      ["post", "/api/attendance/session/pickup-checks/1/answer"],
     ]) {
       const res = await request(app)[method](url).set("Authorization", auth);
       expect(res.status).toBe(403);
     }
+    expect(prisma.pickupCheck.updateMany).not.toHaveBeenCalled();
     expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
     expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled();
   });
@@ -63,7 +66,8 @@ describe("attendance session routes — access control (default deny)", () => {
     for (const prefix of ["/api", "/api/v1"]) {
       const res = await request(app).get(`${prefix}/attendance/session/current`).set("Authorization", auth);
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ session: null });
+      expect(res.body).toMatchObject({ session: null, pickupChecks: [] });
+      expect(typeof res.body.pickupWindow.active).toBe("boolean"); // depends on the real clock, so only the shape
     }
   });
 
@@ -80,6 +84,39 @@ describe("attendance session routes — access control (default deny)", () => {
 
     expect(res.status).toBe(201);
     expect(prisma.attendanceSession.create.mock.calls[0][0].data.startedById).toBe(42);
+  });
+
+  describe("pickup check answers", () => {
+    const answer = (auth, body, id = 9) =>
+      request(app).post(`/api/attendance/session/pickup-checks/${id}/answer`).set("Authorization", auth).send(body);
+
+    it("401 without a token", async () => {
+      const res = await request(app).post("/api/attendance/session/pickup-checks/9/answer").send({ stillHere: true });
+      expect(res.status).toBe(401);
+      expect(prisma.pickupCheck.findUnique).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{}],
+      [{ stillHere: "yes" }],
+      [{ stillHere: true, studentId: 1 }], // a client may not name a student
+    ])("400 for an invalid body %j, touching nothing", async (body) => {
+      const res = await answer(loginAs("Teacher"), body);
+      expect(res.status).toBe(400);
+      expect(prisma.pickupCheck.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("400 for a malformed id", async () => {
+      const res = await answer(loginAs("Teacher"), { stillHere: true }, "1e3");
+      expect(res.status).toBe(400);
+    });
+
+    it("404 (generic) for a prompt that doesn't exist", async () => {
+      prisma.pickupCheck.findUnique.mockResolvedValue(null);
+      const res = await answer(loginAs("Teacher"), { stillHere: true });
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ message: "Not found" });
+    });
   });
 
   it("does not shadow the existing attendance routes", async () => {

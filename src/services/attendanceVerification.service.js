@@ -59,7 +59,7 @@ async function markVerified({ sessionId, sessionDate, studentId, face, ble, now 
     if (count === 0) {
       const { count: overridden } = await tx.attendance.updateMany({
         where: { studentId, date: sessionDate, status: "absent" },
-        data: { status: "present", arrivedAt: now, departedAt: null },
+        data: { status: "present", arrivedAt: now, pickedUpAt: null, pickedUpAuto: false },
       });
       if (overridden === 0) return { state: "already_recorded" };
     }

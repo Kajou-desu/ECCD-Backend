@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
 import { findActiveSession } from "../lib/activeSession.js";
+import { touchCamera } from "../lib/hardwareStatus.js";
 import { recordSignal } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured, recognizeFrame } from "../services/recognitionClient.js";
 
@@ -46,6 +47,7 @@ export async function processFrame(req, res, next) {
       logger.error({ err }, "Face recognition request failed");
       return res.status(502).json({ message: "Recognition unavailable" });
     }
+    touchCamera(); // the pickup watch only trusts "not seen" while frames are flowing
 
     // One student appearing as two faces in the same frame is impossible, so
     // it means at least one is a mis-match: trust neither.

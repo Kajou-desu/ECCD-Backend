@@ -195,7 +195,7 @@ describe("recordSignal (full flow against the in-memory tables)", () => {
   });
 
   it("overrides a manual absent mark when face and tag are both seen, with audit evidence", async () => {
-    db.state.attendance.push({ id: 98, studentId: 5, date: DATE, status: "absent", arrivedAt: null, departedAt: null });
+    db.state.attendance.push({ id: 98, studentId: 5, date: DATE, status: "absent", arrivedAt: null, pickedUpAt: null });
     await send(5, "ble", -50, 0);
     await send(5, "ble", -50, 1);
     await send(5, "face", 0.3, 2);

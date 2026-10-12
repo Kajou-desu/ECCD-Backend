@@ -17,14 +17,14 @@ vi.mock("../src/utils/ownership.js", () => ({
 }));
 vi.mock("../src/services/attendanceNotification.service.js", () => ({
   notifyArrival: vi.fn().mockResolvedValue(undefined),
-  notifyDeparture: vi.fn().mockResolvedValue(undefined),
+  notifyPickup: vi.fn().mockResolvedValue(undefined),
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { getAttendance, updateAttendance, recordAttendance, getChildAttendance, markDeparted } = await import(
+const { getAttendance, updateAttendance, recordAttendance, getChildAttendance, markPickedUp } = await import(
   "../src/controllers/attendance.controller.js"
 );
-const { notifyArrival, notifyDeparture } = await import("../src/services/attendanceNotification.service.js");
+const { notifyArrival, notifyPickup } = await import("../src/services/attendanceNotification.service.js");
 const { schoolDateString } = await import("../src/utils/schoolDate.js");
 
 // Fire-and-forget notifications run on a microtask; let them settle before asserting.
@@ -220,11 +220,11 @@ describe("updateAttendance — arrival notification", () => {
   });
 });
 
-describe("re-marking a status resets departure", () => {
-  it("updateAttendance clears departedAt on update", async () => {
+describe("re-marking a status resets pickup", () => {
+  it("updateAttendance clears pickedUpAt on update", async () => {
     prisma.attendance.upsert.mockResolvedValue({ id: 55, studentId: 5, status: "present", arrivedAt: new Date() });
     await updateAttendance({ params: { studentId: "5" }, body: { date: "2026-09-20", status: "present" } }, mockRes(), vi.fn());
-    expect(prisma.attendance.upsert.mock.calls[0][0].update.departedAt).toBeNull();
+    expect(prisma.attendance.upsert.mock.calls[0][0].update.pickedUpAt).toBeNull();
   });
 });
 
@@ -241,15 +241,15 @@ describe("recordAttendance — bulk entry", () => {
   });
 });
 
-describe("markDeparted", () => {
+describe("markPickedUp", () => {
   const call = (studentId = "5") => {
     const res = mockRes();
     const next = vi.fn();
-    return markDeparted({ params: { studentId } }, res, next).then(() => ({ res, next }));
+    return markPickedUp({ params: { studentId } }, res, next).then(() => ({ res, next }));
   };
-  const present = (over = {}) => ({ id: 55, studentId: 5, status: "present", arrivedAt: new Date(), departedAt: null, ...over });
+  const present = (over = {}) => ({ id: 55, studentId: 5, status: "present", arrivedAt: new Date(), pickedUpAt: null, ...over });
 
-  it("stamps departedAt on today's record and notifies parents", async () => {
+  it("stamps pickedUpAt on today's record and notifies parents", async () => {
     prisma.attendance.findUnique.mockResolvedValue(present());
     prisma.attendance.update.mockImplementation(async ({ data }) => ({ ...present(), ...data }));
 
@@ -258,9 +258,9 @@ describe("markDeparted", () => {
 
     const { where, data } = prisma.attendance.update.mock.calls[0][0];
     expect(where).toEqual({ id: 55 });
-    expect(data.departedAt).toBeInstanceOf(Date);
+    expect(data.pickedUpAt).toBeInstanceOf(Date);
     expect(res.json).toHaveBeenCalled();
-    expect(notifyDeparture).toHaveBeenCalledWith(5, data.departedAt);
+    expect(notifyPickup).toHaveBeenCalledWith(5, data.pickedUpAt);
   });
 
   it("looks up today's record only (school-local date)", async () => {
@@ -280,15 +280,15 @@ describe("markDeparted", () => {
     const { res } = await call();
     expect(res.status).toHaveBeenCalledWith(400);
     expect(prisma.attendance.update).not.toHaveBeenCalled();
-    expect(notifyDeparture).not.toHaveBeenCalled();
+    expect(notifyPickup).not.toHaveBeenCalled();
   });
 
-  it("rejects with 400 (and does not re-notify) if already departed", async () => {
-    prisma.attendance.findUnique.mockResolvedValue(present({ departedAt: new Date() }));
+  it("rejects with 400 (and does not re-notify) if already picked up", async () => {
+    prisma.attendance.findUnique.mockResolvedValue(present({ pickedUpAt: new Date() }));
     const { res } = await call();
     expect(res.status).toHaveBeenCalledWith(400);
     expect(prisma.attendance.update).not.toHaveBeenCalled();
-    expect(notifyDeparture).not.toHaveBeenCalled();
+    expect(notifyPickup).not.toHaveBeenCalled();
   });
 
   it("passes an invalid student id to the error handler without touching the DB", async () => {
@@ -298,16 +298,16 @@ describe("markDeparted", () => {
   });
 });
 
-describe("departedAt in responses", () => {
-  it("getAttendance includes departedAt per student", async () => {
-    const departedAt = new Date();
+describe("pickedUpAt in responses", () => {
+  it("getAttendance includes pickedUpAt per student", async () => {
+    const pickedUpAt = new Date();
     prisma.student.findMany.mockResolvedValue([{ id: 1, name: "S1", session: "morning", photo: null }]);
     prisma.attendance.findMany.mockResolvedValue([
-      { id: 1, studentId: 1, status: "present", arrivedAt: new Date(), departedAt, verification: null },
+      { id: 1, studentId: 1, status: "present", arrivedAt: new Date(), pickedUpAt, verification: null },
     ]);
     const res = mockRes();
     await getAttendance({ user: admin, query: { date: "2026-09-20" } }, res, vi.fn());
-    expect(res.json.mock.calls[0][0][0].departedAt).toBe(departedAt);
+    expect(res.json.mock.calls[0][0][0].pickedUpAt).toBe(pickedUpAt);
   });
 });
 
@@ -444,7 +444,7 @@ describe("getChildAttendance — log dates", () => {
   it("formats the stored UTC-midnight date in UTC, so a server west of UTC can't show the previous day", async () => {
     prisma.student.findUnique.mockResolvedValue({ session: "morning" });
     prisma.attendance.findMany.mockResolvedValue([
-      { date: new Date("2026-10-01T00:00:00.000Z"), status: "absent", arrivedAt: null, departedAt: null },
+      { date: new Date("2026-10-01T00:00:00.000Z"), status: "absent", arrivedAt: null, pickedUpAt: null },
     ]);
     const spy = vi.spyOn(Date.prototype, "toLocaleDateString");
     const res = mockRes();

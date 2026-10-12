@@ -31,7 +31,7 @@
 
 // SCAN_ONLY = 1: no Wi-Fi, no server. Prints every BLE device heard with its
 // signal strength. Use it to (a) find a tag's address to register in the app and
-// (b) measure RSSI at 0.5 m / 1 m / 2 m / the doorway to choose BLE_MIN_RSSI.
+// (b) measure RSSI at 0.5 m / 1 m / 2 m / the farthest seat to choose BLE_MIN_RSSI.
 #define SCAN_ONLY 0
 
 #if !SCAN_ONLY

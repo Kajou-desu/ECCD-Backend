@@ -23,7 +23,7 @@ const { sendAttendanceEmail } = await import("../src/lib/mailer.js");
 const { sendSms } = await import("../src/lib/sms.js");
 const { sendPush } = await import("../src/lib/push.js");
 const { logger } = await import("../src/lib/logger.js");
-const { notifyArrival, notifyDeparture } = await import(
+const { notifyArrival, notifyPickup } = await import(
   "../src/services/attendanceNotification.service.js"
 );
 
@@ -172,7 +172,7 @@ describe("notifyArrival", () => {
     prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
     prisma.parentChild.findMany.mockResolvedValue([parent({ notifyByEmail: false, notifyBySms: false })]);
 
-    await notifyDeparture(5, NOW);
+    await notifyPickup(5, NOW);
 
     expect(prisma.notification.create).toHaveBeenCalledTimes(1);
     expect(sendAttendanceEmail).not.toHaveBeenCalled();
@@ -263,21 +263,21 @@ describe("notifyArrival", () => {
   });
 });
 
-describe("notifyDeparture", () => {
-  it("sends a departure-worded message on every channel", async () => {
+describe("notifyPickup", () => {
+  it("sends a pickup-worded message on every channel", async () => {
     prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
     prisma.parentChild.findMany.mockResolvedValue([parent()]);
 
-    await notifyDeparture(5, NOW);
+    await notifyPickup(5, NOW);
 
     expect(prisma.notification.create).toHaveBeenCalledWith({
-      data: { userId: 1, title: "Departure", message: expect.stringContaining("Ana Cruz has departed from school") },
+      data: { userId: 1, title: "Pickup", message: expect.stringContaining("Ana Cruz was picked up from school") },
     });
     expect(sendAttendanceEmail).toHaveBeenCalledWith(
       "mom@example.com",
-      expect.stringContaining("Ana Cruz has departed"),
-      expect.stringContaining("Ana Cruz has departed from school")
+      expect.stringContaining("Ana Cruz was picked up"),
+      expect.stringContaining("Ana Cruz was picked up from school")
     );
-    expect(sendSms).toHaveBeenCalledWith("09171234567", expect.stringContaining("Ana Cruz has departed from school"));
+    expect(sendSms).toHaveBeenCalledWith("09171234567", expect.stringContaining("Ana Cruz was picked up from school"));
   });
 });

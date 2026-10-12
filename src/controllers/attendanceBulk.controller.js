@@ -50,7 +50,7 @@ export async function getAttendanceRange(req, res, next) {
         date: true,
         status: true,
         arrivedAt: true,
-        departedAt: true,
+        pickedUpAt: true,
         student: { select: { name: true, studentCode: true, session: true } },
       },
       orderBy: [{ date: "asc" }, { student: { name: "asc" } }],
@@ -71,7 +71,7 @@ export async function getAttendanceRange(req, res, next) {
         date: dayKey(r.date),
         status: r.status,
         arrivedAt: r.arrivedAt,
-        departedAt: r.departedAt,
+        pickedUpAt: r.pickedUpAt,
       })),
     });
   } catch (err) {
@@ -163,7 +163,7 @@ export async function importAttendance(req, res, next) {
         toWrite.map(({ studentId, date, dateString, status }) =>
           prisma.attendance.upsert({
             where: { studentId_date: { studentId, date } },
-            update: { status, arrivedAt: arrivedAtFor(status, dateString), departedAt: null },
+            update: { status, arrivedAt: arrivedAtFor(status, dateString), pickedUpAt: null, pickedUpAuto: false },
             create: { studentId, date, status, arrivedAt: arrivedAtFor(status, dateString) },
           }),
         ),

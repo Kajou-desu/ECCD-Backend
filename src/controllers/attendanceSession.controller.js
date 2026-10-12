@@ -4,6 +4,8 @@ import { findActiveSession } from "../lib/activeSession.js";
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 import { isSignalPresent } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured } from "../services/recognitionClient.js";
+import { isGatewayOnline } from "../lib/hardwareStatus.js";
+import { listOpenPickupChecks, pickupWindowStatus } from "../services/pickupWatch.service.js";
 
 // Teacher/admin only (enforced at route level). None of these read anything
 // from the request body: the session's date comes from the server clock in the
@@ -26,10 +28,21 @@ function toResponse(session) {
 
 const findActive = () => findActiveSession(SELECT);
 
-// GET /attendance/session/current -> { session: {...} | null }
-export async function getCurrentSession(_req, res, next) {
+// GET /attendance/session/current
+//   -> { session: {...} | null, pickupChecks: [...], pickupWindow: { active, endsAt } }
+// pickupChecks are the "is this student still in the center?" prompts open for
+// this user right now; pickupWindow says whether automatic pickup tracking is
+// running (the page uses it to start the camera). They ride on this response
+// because the header already polls it every few seconds, which keeps a
+// 15-second prompt timely without another poller eating into the rate limit.
+export async function getCurrentSession(req, res, next) {
   try {
-    res.json({ session: toResponse(await findActive()) });
+    const session = await findActive();
+    res.json({
+      session: toResponse(session),
+      pickupChecks: session ? await listOpenPickupChecks(req.user) : [],
+      pickupWindow: pickupWindowStatus(),
+    });
   } catch (err) {
     next(err);
   }
@@ -93,9 +106,6 @@ export async function stopSession(req, res, next) {
   }
 }
 
-// A gateway that has been heard from this recently counts as online.
-const GATEWAY_ONLINE_MS = 30_000;
-
 // GET /attendance/session/monitor — everything the live monitor screen needs in
 // one call: who is verified, who has only one of the two signals so far, and
 // whether the hardware side is alive. Students appear once they have at least
@@ -125,10 +135,7 @@ export async function getMonitor(_req, res, next) {
           attendance: { select: { studentId: true, student: { select: { name: true } } } },
         },
       }),
-      prisma.bleGateway.findFirst({
-        where: { enabled: true, lastSeenAt: { gt: new Date(now.getTime() - GATEWAY_ONLINE_MS) } },
-        select: { id: true },
-      }),
+      isGatewayOnline(now),
     ]);
 
     const byStudent = new Map();
@@ -163,7 +170,7 @@ export async function getMonitor(_req, res, next) {
     const count = (status) => students.filter((s) => s.status === status).length;
     res.json({
       session: toResponse(session),
-      gatewayOnline: Boolean(gateway),
+      gatewayOnline: gateway,
       recognitionAvailable: isRecognitionConfigured(),
       counts: { verified: count("verified"), faceOnly: count("face_only"), bleOnly: count("ble_only") },
       students,

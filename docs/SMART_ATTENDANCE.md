@@ -1,7 +1,7 @@
 # Smart attendance: face recognition + BLE
 
 A student is marked present **automatically** only when **both** of these are seen
-at the door within a short window:
+in the classroom within a short window:
 
 1. their **face**, matched by a camera; and
 2. their **BLE tag**, heard by an ESP32.
@@ -51,7 +51,7 @@ Nothing is auto-marked **absent**; a blank stays blank until a teacher decides.
 ## Setup order
 
 1. **Backend**: `npx prisma migrate deploy`, then set the environment variables below.
-2. **Gateway record**: `npm run gateway:create -- "Front door"` and keep the printed key.
+2. **Gateway record**: `npm run gateway:create -- "Classroom"` and keep the printed key.
 3. **Recognition service**: see `face-recognition-service/README.md`. Enrol photos (with consent).
 4. **ESP32**: see `esp32-ble-gateway/README.md`. Find tag addresses and calibrate first.
 5. **App**: on each student's page, add their **Attendance tag** address.
@@ -117,7 +117,7 @@ The defaults are starting points, not measurements.
 - Face templates are biometric data of children. Get guardian consent, restrict access
   to `Images/`, and delete on leaving. Ask your data-protection officer what local law requires.
 
-## Arrival / departure notifications
+## Arrival / pickup notifications
 
 When a student is marked present **for today** (automatic face + BLE
 verification, or a teacher's single-record edit via `PUT /attendance/:studentId`),
@@ -125,11 +125,41 @@ every linked parent/guardian is notified (once — re-saving an already-present 
 `Notification`, an email, and an SMS. Bulk entry (`POST /attendance`) and edits to
 past dates never notify.
 
-Departure is **manual**: a teacher/admin calls `PATCH /attendance/:studentId/depart`,
-which stamps `departedAt` on today's record (only if the student arrived and
-hasn't already departed) and sends the same three notifications. The teacher
-dashboard and Attendance page show a confirmed **Mark departed** button for
-present students only; re-marking a student's status clears a prior departure.
+Pickup (formerly "departure") can be **manual or automatic**. Manually, a
+teacher/admin calls `PATCH /attendance/:studentId/pickup`, which stamps
+`pickedUpAt` on today's record (only if the student arrived and hasn't already
+been picked up) and sends the same three notifications. The teacher dashboard
+and Attendance page show a confirmed **Mark picked up** button for present
+students only; re-marking a student's status clears a prior pickup.
+
+### Automatic pickup
+
+`services/pickupWatch.service.js`, run every 10 s by `lib/pickupJob.js`. Morning
+students are watched from `PICKUP_MORNING_START` (10:30) and afternoon students
+from `PICKUP_AFTERNOON_START` (14:30), for `PICKUP_WINDOW_HOURS` (2).
+
+- No teacher has to press Start: the job starts an attendance session itself
+  (`autoStarted`), because the ESP32 only scans and the camera only sends frames
+  while one is active. If a teacher presses Stop on it, it is not restarted in
+  that window. It closes itself once every watched student is picked up;
+  otherwise teachers get an in-app reminder when the window ends.
+- A present student with an enabled tag whose **face and tag have both gone
+  unseen** gets an in-app prompt for the teacher after 1 minute: "is this
+  student still in the center?" It lasts 15 s (`pickup_checks`). *Still here*
+  restarts the clock; *Picked up* marks the student at once (a manual pickup).
+  Unanswered, a new prompt comes a minute later.
+- After `PICKUP_ABSENT_MIN` (5) minutes unseen with no "still here", the student
+  is marked picked up (`pickedUpAuto = true`) and parents get the same
+  notification as a manual pickup.
+- An auto-marked student whose face and tag both reappear inside the window is
+  put back. After the window the pickup stands. Manual pickups are never undone.
+- Silence is weak evidence, so nothing happens unless the ESP32 gateway is
+  online **and** the camera has sent a frame in the last 30 s, and the unseen
+  clock restarts after any outage. This means the teacher must keep the Live
+  attendance page open (it owns the camera) during the window.
+- Assumes a single API instance (the job and the camera heartbeat are in-process).
+- The ESP32 only reports tags at or above -70 dBm: check the whole room is
+  covered from the teacher's table, or students will look "gone".
 
 - **Email** goes through Resend's HTTPS API when `RESEND_API_KEY` is set (use a
   sender on the verified `eccdsmarttrack.app` domain in `SMTP_FROM`), and falls

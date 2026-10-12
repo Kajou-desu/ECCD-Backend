@@ -8,7 +8,7 @@ import { listEnrolledStudentIds, removeStudentEnrollment } from "./recognitionCl
 //
 //   orphans  - enrolled, but no student row exists any more. Always safe to erase.
 //   inactive - enrolled, student exists but is "inactive". These are NOT matched
-//              at the door (the frame endpoint ignores inactive students) but the
+//              in the classroom (the frame endpoint ignores inactive students) but the
 //              photos are still held. Reported by default, erased only on request,
 //              because "inactive" can be temporary (a school break).
 

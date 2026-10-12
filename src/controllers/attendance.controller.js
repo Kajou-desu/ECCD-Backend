@@ -3,7 +3,7 @@ import { assertCanAccessStudent, assertCanAccessStudents } from "../utils/owners
 import { AppError } from "../middleware/errorHandler.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { schoolMinutesOfDay, schoolDateString } from "../utils/schoolDate.js";
-import { notifyArrival, notifyDeparture } from "../services/attendanceNotification.service.js";
+import { notifyArrival, notifyPickup } from "../services/attendanceNotification.service.js";
 import {
   parseId,
   parsePagination,
@@ -86,7 +86,7 @@ export async function getAttendance(req, res, next) {
       photo: signFileUrl(req, s.photo),
       status: attendanceByStudentId.get(s.id)?.status ?? null,
       arrivedAt: attendanceByStudentId.get(s.id)?.arrivedAt ?? null,
-      departedAt: attendanceByStudentId.get(s.id)?.departedAt ?? null,
+      pickedUpAt: attendanceByStudentId.get(s.id)?.pickedUpAt ?? null,
       // true only for a "present" the system recorded itself (face + BLE); a
       // record a teacher entered or changed by hand is never "verified".
       verified:
@@ -131,9 +131,10 @@ export async function updateAttendance(req, res, next) {
         status,
         arrivedAt: arrivedAtFor(status, date),
         // Re-marking a status re-asserts the day from scratch: a stale
-        // departure must not survive (e.g. present -> departed -> absent ->
-        // present would otherwise show as already departed).
-        departedAt: null,
+        // pickup must not survive (e.g. present -> picked up -> absent ->
+        // present would otherwise show as already picked up).
+        pickedUpAt: null,
+        pickedUpAuto: false,
       },
       create: {
         studentId,
@@ -163,10 +164,10 @@ export async function updateAttendance(req, res, next) {
 }
 
 // Teacher/admin only (enforced at route level). Marks TODAY's record as
-// departed. There is no hardware "left the building" signal (BLE only
-// proves nearness at the door, not an exit), so — unlike arrival — this is
-// always a deliberate, manual action.
-export async function markDeparted(req, res, next) {
+// picked up. This is the manual path; the pickup watch
+// (services/pickupWatch.service.js) does the same automatically when neither
+// the face nor the BLE tag has been seen for a while.
+export async function markPickedUp(req, res, next) {
   try {
     const studentId = parseId(req.params.studentId, "studentId");
     await assertCanAccessStudent(req.user, studentId);
@@ -179,19 +180,19 @@ export async function markDeparted(req, res, next) {
     if (!existing || existing.status !== "present" || !existing.arrivedAt) {
       return res.status(400).json({ message: "Student has no arrival recorded for today" });
     }
-    if (existing.departedAt) {
-      return res.status(400).json({ message: "Student is already marked departed for today" });
+    if (existing.pickedUpAt) {
+      return res.status(400).json({ message: "Student is already marked picked up for today" });
     }
 
-    const departedAt = new Date();
+    const pickedUpAt = new Date();
     const record = await prisma.attendance.update({
       where: { id: existing.id },
-      data: { departedAt },
+      data: { pickedUpAt, pickedUpAuto: false },
     });
 
     // Fire-and-forget, same reasoning as the arrival notification above.
     Promise.resolve()
-      .then(() => notifyDeparture(studentId, departedAt))
+      .then(() => notifyPickup(studentId, pickedUpAt))
       .catch(() => {});
 
     res.json(record);
@@ -237,7 +238,7 @@ export async function recordAttendance(req, res, next) {
     await assertCanAccessStudents(req.user, validated.map((e) => e.studentId));
 
     // Idempotent: re-posting a record whose status already matches changes
-    // nothing. Previously it reset arrivedAt to now, cleared departedAt and
+    // nothing. Previously it reset arrivedAt to now, cleared pickedUpAt and
     // deleted the verification row — downgrading a face/BLE "verified"
     // present to a manual one just because the form was submitted twice.
     const existing = await prisma.attendance.findMany({
@@ -254,7 +255,8 @@ export async function recordAttendance(req, res, next) {
           update: {
             status,
             arrivedAt: arrivedAtFor(status, dateString),
-            departedAt: null,
+            pickedUpAt: null,
+            pickedUpAuto: false,
           },
           create: {
             studentId,
@@ -347,7 +349,7 @@ export async function getChildAttendance(req, res, next) {
         }),
         status: r.status,
         arrivedAt: r.arrivedAt,
-        departedAt: r.departedAt,
+        pickedUpAt: r.pickedUpAt,
       };
     });
     logs.reverse(); // most recent first, matching "Recent Logs"

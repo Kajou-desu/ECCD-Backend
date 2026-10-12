@@ -9,7 +9,7 @@
 // http:// because the device key would travel in clear text.
 #define API_BASE_URL "https://<YOUR_BACKEND_HOST>"
 
-// Printed once by:  npm run gateway:create -- "Front door"   (in ECCD-Backend)
+// Printed once by:  npm run gateway:create -- "Classroom"   (in ECCD-Backend)
 // Looks like "3.<64 hex characters>". Lost it? Disable the gateway and create a new one.
 #define DEVICE_KEY "<YOUR_DEVICE_KEY>"
 

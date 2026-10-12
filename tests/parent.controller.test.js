@@ -6,6 +6,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     attendance: { findMany: vi.fn() },
     submission: { findMany: vi.fn() },
     weeklyGoal: { findMany: vi.fn() },
+    studentGoalProgress: { count: vi.fn(), findMany: vi.fn() },
     parentChild: { findMany: vi.fn(), findUnique: vi.fn() },
   },
 }));
@@ -22,6 +23,8 @@ function mockRes() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prisma.studentGoalProgress.count.mockResolvedValue(0);
+  prisma.studentGoalProgress.findMany.mockResolvedValue([]);
 });
 
 describe("getChildren", () => {
@@ -87,6 +90,47 @@ describe("getChildProgress", () => {
         ],
       }),
     );
+  });
+
+  it("moves a completed goal out of this week's goals and into the milestones", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.weeklyGoal.findMany.mockResolvedValue([
+      { id: 1, title: "Counting to 10", progress: [{ progress: 100, status: "Mastered" }] },
+      { id: 2, title: "Fine motor skills", progress: [{ progress: 95, status: "Almost there" }] },
+    ].map((g) => ({ ...g })));
+    prisma.studentGoalProgress.count.mockResolvedValue(4);
+    prisma.studentGoalProgress.findMany.mockResolvedValue([
+      { id: 31, goal: { title: "Counting to 10", category: "Numeracy", weekStart: new Date("2026-10-05T00:00:00.000Z") } },
+      { id: 22, goal: { title: "Shapes", category: null, weekStart: new Date("2026-09-28T00:00:00.000Z") } },
+    ]);
+
+    const res = mockRes();
+    await getChildProgress({ params: { childId: "5" }, user: { id: 1, role: "Admin" }, protocol: "https", get: () => "x" }, res, vi.fn());
+
+    const body = res.json.mock.calls[0][0];
+    expect(body.weeklyGoals.map((g) => g.title)).toEqual(["Fine motor skills"]); // completed one moved out
+    expect(body.weeklyGoalsTotal).toBe(2);
+    expect(body.milestones).toBe(4); // the real total, not just the 2 listed
+    expect(body.milestoneList).toEqual([
+      { id: 31, title: "Counting to 10", category: "Numeracy", weekStart: "2026-10-05" },
+      { id: 22, title: "Shapes", category: null, weekStart: "2026-09-28" },
+    ]);
+  });
+
+  it("only counts and lists this child's completed goals, newest week first", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.weeklyGoal.findMany.mockResolvedValue([]);
+    await getChildProgress({ params: { childId: "5" }, user: { id: 1, role: "Admin" } }, mockRes(), vi.fn());
+
+    expect(prisma.studentGoalProgress.count).toHaveBeenCalledWith({ where: { studentId: 5, progress: 100 } });
+    const query = prisma.studentGoalProgress.findMany.mock.calls[0][0];
+    expect(query.where).toEqual({ studentId: 5, progress: 100 });
+    expect(query.orderBy[0]).toEqual({ goal: { weekStart: "desc" } });
+    expect(query.take).toBe(50);
   });
 
   it("returns recent activities with submittedAt and a signed fileUrl, without notes", async () => {

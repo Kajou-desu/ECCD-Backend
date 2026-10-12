@@ -198,6 +198,6 @@ npm run faces:reconcile -- --apply           # erase enrollments whose student n
 npm run faces:reconcile -- --apply --purge-inactive   # also erase INACTIVE students' photos
 ```
 
-Inactive students are never matched at the door either way; `--purge-inactive`
+Inactive students are never matched in the classroom either way; `--purge-inactive`
 only decides whether their photos are kept. It is safe to run on a schedule with
 `--apply`. Only student ids are printed.

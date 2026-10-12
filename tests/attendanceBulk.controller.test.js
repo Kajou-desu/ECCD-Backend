@@ -15,7 +15,7 @@ vi.mock("../src/utils/ownership.js", () => ({
 }));
 vi.mock("../src/services/attendanceNotification.service.js", () => ({
   notifyArrival: vi.fn(),
-  notifyDeparture: vi.fn(),
+  notifyPickup: vi.fn(),
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
@@ -54,7 +54,7 @@ describe("getAttendanceRange", () => {
         date: new Date("2026-09-02T00:00:00.000Z"),
         status: "present",
         arrivedAt: new Date("2026-09-02T00:05:00.000Z"),
-        departedAt: null,
+        pickedUpAt: null,
         student: { name: "Ana Cruz", studentCode: "ECCD-2026-3", session: "morning" },
       },
     ]);

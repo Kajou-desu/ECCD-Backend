@@ -169,6 +169,7 @@ model Student {
 
   parents     ParentChild[]
   attendance  Attendance[]
+  pickupChecks PickupCheck[]
   submissions Submission[]
   documents   StudentDocument[]
   bleDevices  StudentBleDevice[]
@@ -211,11 +212,14 @@ model Attendance {
   date      DateTime         @db.Date
   status    AttendanceStatus
   arrivedAt DateTime?
-  // Set once, manually, via PATCH /attendance/:studentId/depart (Teacher/Admin).
-  // There is no automatic "left the building" signal (BLE only proves nearness
-  // at the door, not an exit), so this is teacher-asserted, same as a manual
-  // arrival — see attendance.controller.js.
-  departedAt DateTime?
+  // When the student was picked up. Set either manually via
+  // PATCH /attendance/:studentId/pickup (Teacher/Admin), or automatically by
+  // the pickup watch (services/pickupWatch.service.js) once neither the face
+  // nor the BLE tag has been seen for a while and the teacher hasn't said the
+  // student is still here. pickedUpAuto marks the automatic case: only those
+  // are undone if the student is seen again.
+  pickedUpAt   DateTime?
+  pickedUpAuto Boolean   @default(false)
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
@@ -226,6 +230,30 @@ model Attendance {
   @@index([date])
   @@index([status])
   @@map("attendance")
+}
+
+enum PickupCheckAnswer {
+  still_here
+  picked_up
+}
+
+// One "is this student still in the center?" prompt shown to the teacher by the
+// pickup watch. Unanswered prompts simply expire (expiresAt, 15 s after they
+// are created); the next one is only created a minute later. Kept as history.
+model PickupCheck {
+  id         Int                @id @default(autoincrement())
+  studentId  Int
+  date       DateTime           @db.Date // school-timezone day
+  createdAt  DateTime           @default(now())
+  expiresAt  DateTime
+  answeredAt DateTime?
+  answer     PickupCheckAnswer?
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, date])
+  @@index([date])
+  @@map("pickup_checks")
 }
 
 enum AttendanceSessionStatus {
@@ -245,6 +273,11 @@ model AttendanceSession {
   // Nullable + SetNull: deleting a teacher account must not be blocked by, or
   // erase, the history of sessions they ran.
   startedById Int?
+  // Started by the pickup watch (no teacher pressed Start): only these are
+  // closed automatically once every student has been picked up.
+  autoStarted        Boolean   @default(false)
+  // Set once when the "pickup window is over, stop the camera" reminder is sent.
+  stopReminderSentAt DateTime?
 
   startedBy   User? @relation(fields: [startedById], references: [id], onDelete: SetNull)
   signals       AttendanceSignal[]

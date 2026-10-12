@@ -104,21 +104,22 @@ export async function notifyArrival(studentId, arrivedAt) {
   }
 }
 
-// Called after a teacher/admin marks a student departed. Never throws, for
-// the same reason as notifyArrival.
-export async function notifyDeparture(studentId, departedAt) {
+// Called after a student is marked picked up — by a teacher/admin, or
+// automatically by the pickup watch. Never throws, for the same reason as
+// notifyArrival.
+export async function notifyPickup(studentId, pickedUpAt) {
   try {
-    const time = formatSchoolTime(departedAt);
+    const time = formatSchoolTime(pickedUpAt);
     await notifyParents(studentId, (name) => {
-      const message = `${name} has departed from school at ${time}.`;
+      const message = `${name} was picked up from school at ${time}.`;
       return {
-        title: "Departure",
+        title: "Pickup",
         message,
-        emailSubject: `ECCD SmartTrack — ${name} has departed`,
+        emailSubject: `ECCD SmartTrack — ${name} was picked up`,
         smsText: `ECCD SmartTrack: ${message}`,
       };
     });
   } catch (err) {
-    logger.error({ err, studentId }, "notifyDeparture failed");
+    logger.error({ err, studentId }, "notifyPickup failed");
   }
 }

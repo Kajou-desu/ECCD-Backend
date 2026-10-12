@@ -7,7 +7,7 @@ thresholds. See `docs/SMART_ATTENDANCE.md` for the whole system.
 
 ## What you need
 
-- An ESP32 board, powered near the door (USB power is fine).
+- An ESP32 board, powered where it can hear every tag in the room, e.g. on the teacher's table (USB power is fine).
 - Arduino IDE with the **ESP32 board package**.
 - The **ArduinoJson** library by Benoit Blanchon, v7.x (Library Manager).
 - A BLE tag per child that advertises a fixed address (a beacon or tracker tag,
@@ -32,9 +32,12 @@ D7:40:47:15:14:90   -52 dBm  MyTag
 - Hold a tag next to the board to find its address; register that address on the
   student's page in the app (**Attendance tag**).
 - Measure calibration numbers with the board **where it will be mounted**: note
-  the RSSI with a tag at 0.5 m, 1 m, 2 m, and at the doorway, several readings each
-  (it fluctuates by 10 dB or more). Choose the backend's `BLE_MIN_RSSI` so
-  "at the door" passes and "down the hall" does not. The old sketch's `-30` means
+  the RSSI with a tag at 0.5 m, 1 m, 2 m, at the farthest seat in the room and
+  outside the door, several readings each (it fluctuates by 10 dB or more). Choose
+  the backend's `BLE_MIN_RSSI` so the farthest seat passes and "down the hall" does
+  not. Automatic pickup treats a student the board can't hear as gone, so a corner
+  of the room that falls below the threshold will cause false "still in the center?"
+  prompts. The old sketch's `-30` means
   "touching the board" — far stricter than you likely want.
 
 ## 2. Configure
@@ -49,7 +52,7 @@ Fill in `secrets.h`:
 | --- | --- |
 | `WIFI_SSID` / `WIFI_PASSWORD` | the school's 2.4 GHz network (ESP32 has no 5 GHz) |
 | `API_BASE_URL` | `https://your-backend-host` — HTTPS only; the firmware halts on `http://` |
-| `DEVICE_KEY` | printed once by `npm run gateway:create -- "Front door"` in the backend |
+| `DEVICE_KEY` | printed once by `npm run gateway:create -- "Classroom"` in the backend |
 | `ROOT_CA_PEM` | the root certificate that signed the backend's TLS certificate |
 
 Getting the root certificate: `openssl s_client -showcerts -connect HOST:443 </dev/null`
@@ -81,7 +84,7 @@ during a session.
 | `Rate limited (429)` | too many requests; it slows itself down automatically |
 | `Listening for 0 tag(s)` | no tags registered yet, or all paused |
 
-The app's live screen shows **Door tag reader: Online / Not connected**.
+The app's live screen shows **Tag reader: Online / Not connected**.
 
 ## Security notes
 

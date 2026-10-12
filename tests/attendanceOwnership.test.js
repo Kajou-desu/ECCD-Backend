@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Uses the REAL ownership.js (only prisma and the notification side effects
-// are stubbed), so these prove a Teacher genuinely cannot mark, depart, bulk-
+// are stubbed), so these prove a Teacher genuinely cannot mark, pick up, bulk-
 // write or list another teacher's students — and that a denied request causes
 // no write and no parent alert.
 vi.mock("../src/lib/prisma.js", () => ({
@@ -16,14 +16,14 @@ vi.mock("../src/lib/prisma.js", () => ({
 vi.mock("../src/lib/signedFileUrl.js", () => ({ signFileUrl: vi.fn(() => null) }));
 vi.mock("../src/services/attendanceNotification.service.js", () => ({
   notifyArrival: vi.fn().mockResolvedValue(undefined),
-  notifyDeparture: vi.fn().mockResolvedValue(undefined),
+  notifyPickup: vi.fn().mockResolvedValue(undefined),
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { getAttendance, updateAttendance, recordAttendance, markDeparted } = await import(
+const { getAttendance, updateAttendance, recordAttendance, markPickedUp } = await import(
   "../src/controllers/attendance.controller.js"
 );
-const { notifyArrival, notifyDeparture } = await import(
+const { notifyArrival, notifyPickup } = await import(
   "../src/services/attendanceNotification.service.js"
 );
 const { schoolDateString } = await import("../src/utils/schoolDate.js");
@@ -51,7 +51,7 @@ function expectNoWritesOrAlerts() {
   expect(prisma.$transaction).not.toHaveBeenCalled();
   expect(prisma.attendanceVerification.deleteMany).not.toHaveBeenCalled();
   expect(notifyArrival).not.toHaveBeenCalled();
-  expect(notifyDeparture).not.toHaveBeenCalled();
+  expect(notifyPickup).not.toHaveBeenCalled();
 }
 
 beforeEach(() => {
@@ -106,12 +106,12 @@ describe("updateAttendance — ownership", () => {
   });
 });
 
-describe("markDeparted — ownership", () => {
-  it("forbids a Teacher departing another teacher's student", async () => {
+describe("markPickedUp — ownership", () => {
+  it("forbids a Teacher picking up another teacher's student", async () => {
     prisma.student.findUnique.mockResolvedValue({ teacherId: 99 });
     const next = vi.fn();
 
-    await markDeparted({ user: teacher, params: { studentId: "5" } }, mockRes(), next);
+    await markPickedUp({ user: teacher, params: { studentId: "5" } }, mockRes(), next);
     await flush();
 
     expectForbidden(next);
@@ -119,19 +119,19 @@ describe("markDeparted — ownership", () => {
     expect(prisma.attendance.findUnique).not.toHaveBeenCalled();
   });
 
-  it("allows a Teacher to depart their own student", async () => {
+  it("allows a Teacher to pick up their own student", async () => {
     prisma.student.findUnique.mockResolvedValue({ teacherId: 7 });
     prisma.attendance.findUnique.mockResolvedValue({
-      id: 3, status: "present", arrivedAt: new Date(), departedAt: null,
+      id: 3, status: "present", arrivedAt: new Date(), pickedUpAt: null,
     });
     prisma.attendance.update.mockResolvedValue({ id: 3 });
     const next = vi.fn();
 
-    await markDeparted({ user: teacher, params: { studentId: "5" } }, mockRes(), next);
+    await markPickedUp({ user: teacher, params: { studentId: "5" } }, mockRes(), next);
     await flush();
 
     expect(next).not.toHaveBeenCalled();
-    expect(notifyDeparture).toHaveBeenCalledTimes(1);
+    expect(notifyPickup).toHaveBeenCalledTimes(1);
   });
 });
 
