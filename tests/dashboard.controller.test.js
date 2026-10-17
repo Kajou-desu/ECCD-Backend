@@ -128,11 +128,42 @@ describe("getDashboardStats", () => {
     prisma.material.count.mockResolvedValue(3);
 
     const res = mockRes();
-    await getDashboardStats({}, res, vi.fn());
+    await getDashboardStats({ user: { id: 1, role: "Admin" } }, res, vi.fn());
 
     const day = new Date("2026-09-30T00:00:00.000Z");
-    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "present" } });
-    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "absent" } });
+    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "present", student: {} } });
+    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "absent", student: {} } });
     expect(res.json).toHaveBeenCalledWith({ totalStudents: 10, presentToday: 4, absentToday: 1, totalMaterials: 3 });
+  });
+
+  it("counts a Teacher's whole center, so two teachers there get the same numbers", async () => {
+    prisma.student.count.mockResolvedValue(3);
+    prisma.attendance.count.mockResolvedValue(2);
+    prisma.material.count.mockResolvedValue(1);
+    for (const id of [7, 8]) {
+      vi.clearAllMocks();
+      prisma.student.count.mockResolvedValue(3);
+      prisma.attendance.count.mockResolvedValue(2);
+      await getDashboardStats({ user: { id, role: "Teacher", centerId: 4 } }, mockRes(), vi.fn());
+      expect(prisma.student.count).toHaveBeenCalledWith({ where: { teacher: { centerId: 4 } } });
+      for (const status of ["present", "absent"]) {
+        expect(prisma.attendance.count).toHaveBeenCalledWith({
+          where: { date: expect.any(Date), status, student: { teacher: { centerId: 4 } } },
+        });
+      }
+    }
+  });
+
+  it("falls back to a Teacher's own students while they have no center", async () => {
+    prisma.student.count.mockResolvedValue(1);
+    await getDashboardStats({ user: { id: 7, role: "Teacher", centerId: null } }, mockRes(), vi.fn());
+    expect(prisma.student.count).toHaveBeenCalledWith({ where: { teacherId: 7 } });
+  });
+
+  it("refuses any other role without querying", async () => {
+    const res = mockRes();
+    await getDashboardStats({ user: { id: 9, role: "Parent" } }, res, vi.fn());
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(prisma.student.count).not.toHaveBeenCalled();
   });
 });

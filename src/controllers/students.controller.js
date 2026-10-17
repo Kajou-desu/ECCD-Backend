@@ -1,6 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import crypto from "node:crypto";
-import { assertCanAccessStudent } from "../utils/ownership.js";
+import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 import { composeStudentName } from "../utils/studentName.js";
 import {
   parseId,
@@ -8,7 +8,7 @@ import {
   requireNonEmptyString,
   optionalString,
   optionalEmail,
-  optionalPhone,
+  optionalMobile10,
   requireSession,
   requireStudentStatus,
   requireBirthday,
@@ -135,6 +135,13 @@ async function linkAccountsByEmail(tx, studentId, emails, actorId) {
     skipDuplicates: true,
   });
   if (count) logger.info({ actorId, studentId, count }, "Linked parent accounts to student");
+
+  // An account deactivated when its last child was deleted (see
+  // deactivateParentsWithoutChildren) comes back once it has a child again.
+  await tx.user.updateMany({
+    where: { id: { in: accounts.map((a) => a.id) }, isActive: false },
+    data: { isActive: true },
+  });
 }
 
 // A student's Parent/Guardian accounts must be at the same center as the
@@ -174,7 +181,7 @@ function buildCreateData(body) {
   if (!motherName && !fatherName && !guardianName) {
     throw new AppError("At least one parent or guardian name is required", 400);
   }
-  const guardianPhone = optionalPhone(body.guardianPhone, "guardianPhone");
+  const guardianPhone = optionalMobile10(body.guardianPhone, "guardianPhone");
 
   return {
     firstName,
@@ -189,11 +196,11 @@ function buildCreateData(body) {
     status,
     motherName,
     motherAddress: optionalString(body.motherAddress, 500),
-    motherPhone: optionalPhone(body.motherPhone, "motherPhone"),
+    motherPhone: optionalMobile10(body.motherPhone, "motherPhone"),
     motherEmail: optionalEmail(body.motherEmail),
     fatherName,
     fatherAddress: optionalString(body.fatherAddress, 500),
-    fatherPhone: optionalPhone(body.fatherPhone, "fatherPhone"),
+    fatherPhone: optionalMobile10(body.fatherPhone, "fatherPhone"),
     fatherEmail: optionalEmail(body.fatherEmail),
     guardianName,
     guardianAddress: optionalString(body.guardianAddress, 500),
@@ -207,9 +214,9 @@ function buildCreateData(body) {
 }
 
 // Teacher/admin only (enforced at route level).
-// Admin sees the full roster; a Teacher sees only students connected to
-// them (Student.teacherId), so a teacher's "Student Info" list matches who
-// they actually manage.
+// Admin sees the full roster; a Teacher sees the students of their own center
+// (teachers at one center share their students), so the "Student Info" list
+// matches who the center actually manages.
 // ?page & ?pageSize are optional; omitting both returns the full roster
 // exactly as before (see parsePagination), so existing callers are
 // unaffected. When paginated, total roster size is sent via X-Total-Count
@@ -217,7 +224,7 @@ function buildCreateData(body) {
 export async function getStudents(req, res, next) {
   try {
     const pagination = parsePagination(req.query);
-    const where = req.user.role === "Teacher" ? { teacherId: req.user.id } : undefined;
+    const where = studentScopeFor(req.user) ?? { id: -1 }; // the route allows Teacher/Admin only; anything else sees nothing
 
     const [students, total] = await Promise.all([
       prisma.student.findMany({
@@ -346,15 +353,15 @@ export async function updateStudent(req, res, next) {
     if (body.status !== undefined) data.status = requireStudentStatus(body.status);
     if (body.motherName !== undefined) data.motherName = optionalString(body.motherName, 200);
     if (body.motherAddress !== undefined) data.motherAddress = optionalString(body.motherAddress, 500);
-    if (body.motherPhone !== undefined) data.motherPhone = optionalPhone(body.motherPhone, "motherPhone");
+    if (body.motherPhone !== undefined) data.motherPhone = optionalMobile10(body.motherPhone, "motherPhone");
     if (body.motherEmail !== undefined) data.motherEmail = optionalEmail(body.motherEmail);
     if (body.fatherName !== undefined) data.fatherName = optionalString(body.fatherName, 200);
     if (body.fatherAddress !== undefined) data.fatherAddress = optionalString(body.fatherAddress, 500);
-    if (body.fatherPhone !== undefined) data.fatherPhone = optionalPhone(body.fatherPhone, "fatherPhone");
+    if (body.fatherPhone !== undefined) data.fatherPhone = optionalMobile10(body.fatherPhone, "fatherPhone");
     if (body.fatherEmail !== undefined) data.fatherEmail = optionalEmail(body.fatherEmail);
     if (body.guardianName !== undefined) data.guardianName = optionalString(body.guardianName, 200);
     if (body.guardianAddress !== undefined) data.guardianAddress = optionalString(body.guardianAddress, 500);
-    if (body.guardianPhone !== undefined) data.guardianPhone = optionalPhone(body.guardianPhone, "guardianPhone");
+    if (body.guardianPhone !== undefined) data.guardianPhone = optionalMobile10(body.guardianPhone, "guardianPhone");
     if (body.guardianEmail !== undefined) data.guardianEmail = optionalEmail(body.guardianEmail);
     if (body.primaryGuardianType !== undefined) {
       data.primaryGuardianType = parsePrimaryGuardianType(body.primaryGuardianType);
@@ -459,6 +466,35 @@ export async function uploadStudentPhoto(req, res, next) {
 }
 
 // Teacher/admin only (enforced at route level).
+// A Parent/Guardian account exists to follow their children. When the last
+// child they are linked to is deleted it has nothing left to show, so it is
+// deactivated (not deleted: an Admin can reactivate it, and its history stays).
+// Bumping tokenVersion signs out any session they still have open. An account
+// that still has another child is untouched. The student is already gone by
+// now, so a failure here is logged rather than failing the request.
+async function parentIdsOf(studentId) {
+  try {
+    const links = await prisma.parentChild.findMany({ where: { studentId }, select: { parentId: true } });
+    return links.map((l) => l.parentId);
+  } catch (err) {
+    logger.error({ err, studentId }, "Could not list a deleted student's parent accounts");
+    return [];
+  }
+}
+
+async function deactivateParentsWithoutChildren(parentIds, studentId) {
+  if (parentIds.length === 0) return;
+  try {
+    const { count } = await prisma.user.updateMany({
+      where: { id: { in: parentIds }, role: { in: ["Parent", "Guardian"] }, isActive: true, children: { none: {} } },
+      data: { isActive: false, tokenVersion: { increment: 1 } },
+    });
+    if (count > 0) logger.info({ studentId, deactivated: count }, "Parent accounts deactivated: their last student was deleted");
+  } catch (err) {
+    logger.error({ err, studentId }, "Could not deactivate parent accounts of a deleted student");
+  }
+}
+
 export async function deleteStudent(req, res, next) {
   try {
     const id = parseId(req.params.id, "id");
@@ -471,7 +507,9 @@ export async function deleteStudent(req, res, next) {
       prisma.submission.findMany({ where: { studentId: id }, select: { fileUrl: true } }),
     ]);
 
-    const deleted = await prisma.student.delete({ where: { id } }); // cascades to documents/attendance/submissions
+    const parentIds = await parentIdsOf(id);
+    const deleted = await prisma.student.delete({ where: { id } }); // cascades to documents/attendance/submissions/parent links
+    await deactivateParentsWithoutChildren(parentIds, id);
     await removeStoredFiles(
       deleted.photo,
       documents.map((d) => d.fileUrl),

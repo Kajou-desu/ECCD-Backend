@@ -18,7 +18,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import { sendOtpEmail } from "../lib/mailer.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
 import { otpMatches, hashOtp, MAX_OTP_ATTEMPTS } from "../utils/otp.js";
-import { assertCanAccessStudents, teacherAccountScope } from "../utils/ownership.js";
+import { assertCanAccessStudents, studentScopeFor, teacherAccountScope } from "../utils/ownership.js";
 
 const ROLES = ["Teacher", "Parent", "Guardian", "Admin"];
 
@@ -135,7 +135,7 @@ function toUserResponse(req, user) {
 async function toScopedResponse(req, user) {
   if (req.user.role !== "Teacher" || !user.children?.length) return toUserResponse(req, user);
   const own = await prisma.student.findMany({
-    where: { id: { in: user.children.map((c) => c.studentId) }, teacherId: req.user.id },
+    where: { id: { in: user.children.map((c) => c.studentId) }, ...studentScopeFor(req.user) },
     select: { id: true },
   });
   const ownIds = new Set(own.map((s) => s.id));
@@ -284,7 +284,7 @@ export async function listUsers(req, res, next) {
         where: { role: { in: ["Teacher", ...LINKABLE_ROLES] }, centerId },
         orderBy: { name: "asc" },
       }),
-      prisma.student.findMany({ where: { teacherId: req.user.id }, select: { id: true } }),
+      prisma.student.findMany({ where: studentScopeFor(req.user) ?? { id: -1 }, select: { id: true } }),
     ]);
     const ownIds = new Set(ownStudents.map((s) => s.id));
     res.json(
@@ -495,13 +495,15 @@ export async function updateUser(req, res, next) {
 
       if (studentIds) {
         await tx.parentChild.deleteMany({
-          where: teacherScoped ? { parentId: id, student: { teacherId: req.user.id } } : { parentId: id },
+          where: teacherScoped ? { parentId: id, student: studentScopeFor(req.user) } : { parentId: id },
         });
         if (studentIds.length) {
           await tx.parentChild.createMany({
             data: studentIds.map((studentId) => ({ parentId: id, studentId })),
             skipDuplicates: true,
           });
+          // Deactivated when its last child was deleted; a child again, so it works again.
+          await tx.user.updateMany({ where: { id, isActive: false }, data: { isActive: true } });
         }
       } else if (LINKABLE_ROLES.includes(existing.role) && !LINKABLE_ROLES.includes(requestedRole)) {
         // Leaving Parent/Guardian: drop links so a Teacher/Admin never keeps
@@ -789,7 +791,7 @@ export async function deleteUser(req, res, next) {
       if (existing.centerId !== teacherCenterId(req)) {
         return res.status(404).json({ message: NOT_IN_CENTER_MESSAGE });
       }
-      const scope = await teacherAccountScope(req.user.id, id);
+      const scope = await teacherAccountScope(req.user, id);
       if (!scope.canDelete) {
         return res.status(403).json({
           message: "This account is also connected to students of another teacher, so only an Admin can delete it.",

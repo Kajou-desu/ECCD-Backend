@@ -10,6 +10,7 @@ import {
   optionalString,
   optionalEmail,
   requirePhone,
+  optionalMobile10,
   requirePhMobile,
   optionalPhMobile,
   requireSession,
@@ -222,5 +223,31 @@ describe("parsePagination", () => {
   it("rejects non-integer or missing page/pageSize when the other is present", () => {
     expect(() => parsePagination({ page: "1" })).toThrow(AppError); // pageSize missing
     expect(() => parsePagination({ page: "abc", pageSize: "10" })).toThrow(AppError);
+  });
+});
+
+describe("optionalMobile10", () => {
+  it("keeps the 10 digits after the 0 / +63 prefix", () => {
+    expect(optionalMobile10("9171234567")).toBe("9171234567");
+    expect(optionalMobile10("0917 123 4567")).toBe("9171234567");
+    expect(optionalMobile10("+63 917-123-4567")).toBe("9171234567");
+    expect(optionalMobile10("(0917) 123 4567")).toBe("9171234567");
+  });
+
+  it("treats blank as no phone", () => {
+    expect(optionalMobile10("")).toBeNull();
+    expect(optionalMobile10(undefined)).toBeNull();
+    expect(optionalMobile10(null)).toBeNull();
+    expect(optionalMobile10("   ")).toBeNull();
+  });
+
+  it("rejects letters, landlines, wrong lengths and non-strings", () => {
+    for (const bad of ["call me", "123-4567", "(02) 8123-4567", "917123456", "91712345678", "8171234567", 9171234567, {}]) {
+      expect(() => optionalMobile10(bad, "motherPhone")).toThrow(AppError);
+    }
+  });
+
+  it("names the field in the error", () => {
+    expect(() => optionalMobile10("12", "motherPhone")).toThrow(/motherPhone.*10-digit/);
   });
 });

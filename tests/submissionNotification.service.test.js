@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     student: { findUnique: vi.fn() },
+    user: { findMany: vi.fn() },
     notification: { create: vi.fn() },
   },
 }));
@@ -34,6 +35,20 @@ describe("notifyTeacherOfSubmission", () => {
         message: 'Ana Cruz submitted work for "Color the Shapes".',
       },
     });
+  });
+
+  it("also notifies the other teachers at the student's center, once each", async () => {
+    prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz", teacherId: 7, teacher: { centerId: 3 } });
+    prisma.user.findMany.mockResolvedValue([{ id: 7 }, { id: 8 }, { id: 9 }]);
+
+    await notifyTeacherOfSubmission(5, "Color the Shapes");
+
+    expect(prisma.user.findMany).toHaveBeenCalledWith({
+      where: { role: "Teacher", centerId: 3, isActive: true },
+      select: { id: true },
+    });
+    const recipients = prisma.notification.create.mock.calls.map((c) => c[0].data.userId).sort();
+    expect(recipients).toEqual([7, 8, 9]);
   });
 
   it("does nothing when the student has no teacher assigned", async () => {

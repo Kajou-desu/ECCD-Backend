@@ -1,8 +1,9 @@
 import { prisma } from "../lib/prisma.js";
-import { assertCanAccessStudent, assertCanAccessStudents } from "../utils/ownership.js";
+import { assertCanAccessStudent, assertCanAccessStudents, studentScopeFor } from "../utils/ownership.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { schoolMinutesOfDay, schoolDateString } from "../utils/schoolDate.js";
+import { isLateArrival } from "../utils/late.js";
 import { notifyArrival, notifyPickup } from "../services/attendanceNotification.service.js";
 import {
   parseId,
@@ -11,12 +12,6 @@ import {
   requireMonthString,
   requireAttendanceStatus,
 } from "../utils/validate.js";
-
-// A student is "late" if they arrive after their session's start-of-day
-// cutoff, in the school's own timezone (not the server's/UTC's) — see
-// schoolMinutesOfDay. Morning session: after 8:00 AM. Afternoon session:
-// after 1:00 PM (13:00). Keyed by the Session enum values in validate.js.
-const LATE_CUTOFF_MINUTES = { morning: 8 * 60, afternoon: 13 * 60 };
 
 export function toDate(dateString) {
   return new Date(`${dateString}T00:00:00.000Z`);
@@ -53,13 +48,11 @@ export async function getAttendance(req, res, next) {
     const dateObj = toDate(date);
     const pagination = parsePagination(req.query);
 
-    // Same rule as the Student Info list: a Teacher sees only the students
-    // connected to them (Student.teacherId), an Admin sees everyone. Anything
-    // else is denied rather than defaulting to the full roster.
-    if (req.user.role !== "Teacher" && req.user.role !== "Admin") {
-      throw new AppError("Forbidden", 403);
-    }
-    const where = req.user.role === "Teacher" ? { teacherId: req.user.id } : undefined;
+    // Same rule as the Student Info list: a Teacher sees their center's
+    // students, an Admin sees everyone. Anything else is denied rather than
+    // defaulting to the full roster.
+    const where = studentScopeFor(req.user);
+    if (!where) throw new AppError("Forbidden", 403);
 
     const [students, total] = await Promise.all([
       prisma.student.findMany({
@@ -87,6 +80,11 @@ export async function getAttendance(req, res, next) {
       status: attendanceByStudentId.get(s.id)?.status ?? null,
       arrivedAt: attendanceByStudentId.get(s.id)?.arrivedAt ?? null,
       pickedUpAt: attendanceByStudentId.get(s.id)?.pickedUpAt ?? null,
+      late: isLateArrival(
+        attendanceByStudentId.get(s.id)?.status,
+        attendanceByStudentId.get(s.id)?.arrivedAt,
+        s.session,
+      ),
       // true only for a "present" the system recorded itself (face + BLE); a
       // record a teacher entered or changed by hand is never "verified".
       verified:
@@ -301,13 +299,11 @@ export async function getChildAttendance(req, res, next) {
 
     // Which cutoff applies depends on the student's own session (morning vs
     // afternoon), not the server's clock or a fixed cutoff for everyone.
-    // Falls back to the "morning" cutoff for a student row that somehow has
-    // no session set, matching the Session enum's own default.
     const student = await prisma.student.findUnique({
       where: { id: childId },
       select: { session: true },
     });
-    const lateCutoffMinutes = LATE_CUTOFF_MINUTES[student?.session] ?? LATE_CUTOFF_MINUTES.morning;
+    const session = student?.session;
 
     const [year, mon] = month.split("-").map(Number);
     const start = new Date(Date.UTC(year, mon - 1, 1));
@@ -330,11 +326,7 @@ export async function getChildAttendance(req, res, next) {
 
       if (r.status === "present") {
         presentDays += 1;
-        // A manually-marked "present" with no arrivedAt (e.g. bulk entry)
-        // has no arrival time to judge, so it's never counted as late.
-        if (r.arrivedAt && schoolMinutesOfDay(r.arrivedAt) > lateCutoffMinutes) {
-          lateArrivals += 1;
-        }
+        if (isLateArrival(r.status, r.arrivedAt, session)) lateArrivals += 1;
       } else if (r.status === "absent") absentDays += 1;
       else if (r.status === "excused") excusedDays += 1;
 

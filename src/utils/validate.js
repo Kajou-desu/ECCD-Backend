@@ -176,6 +176,28 @@ export function optionalPhMobile(value, label = "phone") {
   return requirePhMobile(value, label);
 }
 
+// Parent/guardian phones on a student record: one Philippine mobile number,
+// kept as the 10 digits after the 0 / +63 prefix (9XXXXXXXXX) — the same form
+// the account Contact Phone uses, and what the SMS provider needs. Anything a
+// person might type ("0917 123 4567", "+63 917 123 4567") is accepted and
+// stored as those 10 digits; letters, a landline or a wrong length is rejected.
+export const MOBILE_DIGITS = 10;
+
+export function optionalMobile10(value, label = "phone") {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > 20 || !/^[0-9+\-\s()]*$/.test(value)) {
+    throw new AppError(`Invalid ${label}: use a 10-digit mobile number, e.g. 9171234567`, 400);
+  }
+  let digits = value.replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("63") && digits.length > MOBILE_DIGITS) digits = digits.slice(2);
+  else if (digits.startsWith("0")) digits = digits.slice(1);
+  if (!/^9\d{9}$/.test(digits)) {
+    throw new AppError(`Invalid ${label}: use a 10-digit mobile number, e.g. 9171234567`, 400);
+  }
+  return digits;
+}
+
 export function requireSession(value) {
   const v = value ?? "morning";
   if (!SESSIONS.includes(v)) {

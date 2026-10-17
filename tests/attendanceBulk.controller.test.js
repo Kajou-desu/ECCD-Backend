@@ -9,7 +9,8 @@ vi.mock("../src/lib/prisma.js", () => ({
   },
 }));
 vi.mock("../src/lib/signedFileUrl.js", () => ({ signFileUrl: vi.fn(() => null) }));
-vi.mock("../src/utils/ownership.js", () => ({
+vi.mock("../src/utils/ownership.js", async (importOriginal) => ({
+  ...(await importOriginal()), // the real studentScopeFor
   assertCanAccessStudent: vi.fn(),
   assertCanAccessStudents: vi.fn(),
 }));
@@ -46,6 +47,24 @@ describe("getAttendanceRange", () => {
     await getAttendanceRange({ query, user }, res, next);
     return { res, next };
   };
+
+  it("flags a present arrival after the session cutoff as late", async () => {
+    const row = (studentId, arrivedAt, session = "morning") => ({
+      studentId,
+      date: new Date("2026-09-02T00:00:00.000Z"),
+      status: "present",
+      arrivedAt,
+      pickedUpAt: null,
+      student: { name: `S${studentId}`, studentCode: `C${studentId}`, session },
+    });
+    prisma.attendance.findMany.mockResolvedValue([
+      row(1, new Date("2026-09-01T23:55:00.000Z")), // 7:55 AM
+      row(2, new Date("2026-09-02T00:30:00.000Z")), // 8:30 AM
+      row(3, null),
+    ]);
+    const { res } = await call({ from: "2026-09-02", to: "2026-09-02" });
+    expect(res.json.mock.calls[0][0].records.map((r) => r.late)).toEqual([false, true, false]);
+  });
 
   it("returns recorded days in the range as flat rows", async () => {
     prisma.attendance.findMany.mockResolvedValue([

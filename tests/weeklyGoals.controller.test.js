@@ -205,6 +205,34 @@ describe("updateGoalProgress", () => {
     ]);
   });
 
+  it("saves a Mastered student at 100% whatever progress was sent", async () => {
+    prisma.weeklyGoal.findUnique.mockResolvedValue({ id: 1 });
+    prisma.studentGoalProgress.upsert.mockResolvedValue({ studentId: 5, progress: 100, status: "Mastered" });
+
+    await updateGoalProgress(
+      { params: { id: "1" }, body: { updates: [{ studentId: 5, progress: 40, status: " mastered".trim() }] } },
+      mockRes(),
+      vi.fn(),
+    );
+
+    const call = prisma.studentGoalProgress.upsert.mock.calls.at(-1)[0];
+    expect(call.create.progress).toBe(100);
+    expect(call.update.progress).toBe(100);
+  });
+
+  it("leaves progress alone for every other status", async () => {
+    prisma.weeklyGoal.findUnique.mockResolvedValue({ id: 1 });
+    prisma.studentGoalProgress.upsert.mockResolvedValue({ studentId: 5, progress: 40, status: "In progress" });
+
+    await updateGoalProgress(
+      { params: { id: "1" }, body: { updates: [{ studentId: 5, progress: 40, status: "In progress" }] } },
+      mockRes(),
+      vi.fn(),
+    );
+
+    expect(prisma.studentGoalProgress.upsert.mock.calls.at(-1)[0].create.progress).toBe(40);
+  });
+
   it("rejects an out-of-range progress value before touching the database", async () => {
     prisma.weeklyGoal.findUnique.mockResolvedValue({ id: 1 });
 

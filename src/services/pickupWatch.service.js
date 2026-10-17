@@ -6,7 +6,7 @@ import { isCameraAlive, isGatewayOnline } from "../lib/hardwareStatus.js";
 import { schoolDateAsUtcMidnight, schoolMinutesOfDay } from "../utils/schoolDate.js";
 import { evaluate } from "./attendanceVerification.service.js";
 import { notifyPickup } from "./attendanceNotification.service.js";
-import { assertCanAccessStudent } from "../utils/ownership.js";
+import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 
 // Automatic pickup.
 //
@@ -169,9 +169,20 @@ async function sendStopReminder(session, today, now, nowMinutes) {
 
     const rows = await prisma.attendance.findMany({
       where: { date: today, status: "present", student: { session: type, teacherId: { not: null } } },
-      select: { student: { select: { teacherId: true } } },
+      select: { student: { select: { teacherId: true, teacher: { select: { centerId: true } } } } },
     });
-    const teacherIds = [...new Set(rows.map((r) => r.student.teacherId))];
+    // The teachers of those students and their colleagues at the same center
+    // (a center's teachers share its attendance and live monitor).
+    const teacherSet = new Set(rows.map((r) => r.student.teacherId));
+    const centerIds = [...new Set(rows.map((r) => r.student.teacher?.centerId).filter((c) => c != null))];
+    if (centerIds.length > 0) {
+      const colleagues = await prisma.user.findMany({
+        where: { role: "Teacher", centerId: { in: centerIds }, isActive: true },
+        select: { id: true },
+      });
+      colleagues.forEach((t) => teacherSet.add(t.id));
+    }
+    const teacherIds = [...teacherSet];
     if (teacherIds.length > 0) {
       await prisma.notification.createMany({
         data: teacherIds.map((userId) => ({
@@ -311,7 +322,14 @@ export async function runPickupWatch(now = new Date()) {
 
 // ---- the teacher's side (called by the controller) --------------------------
 
-// Open prompts the user may see: their own students' (a Teacher), or all (Admin).
+// `{ student: scope }` for a Teacher, nothing for an Admin (sees all), and a
+// filter that matches nothing for any other role.
+function studentFilterFor(user) {
+  const scope = studentScopeFor(user) ?? { id: -1 };
+  return Object.keys(scope).length > 0 ? { student: scope } : {};
+}
+
+// Open prompts the user may see: their center's students' (a Teacher), or all (Admin).
 export async function listOpenPickupChecks(user, now = new Date()) {
   const today = schoolDateAsUtcMidnight(now);
   const rows = await prisma.pickupCheck.findMany({
@@ -319,7 +337,7 @@ export async function listOpenPickupChecks(user, now = new Date()) {
       date: today,
       answeredAt: null,
       expiresAt: { gt: now },
-      ...(user.role === "Admin" ? {} : { student: { teacherId: user.id } }),
+      ...studentFilterFor(user),
     },
     orderBy: { createdAt: "asc" },
     select: { id: true, studentId: true, expiresAt: true, student: { select: { name: true } } },

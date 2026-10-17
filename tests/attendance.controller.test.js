@@ -11,7 +11,8 @@ vi.mock("../src/lib/prisma.js", () => ({
 vi.mock("../src/lib/signedFileUrl.js", () => ({ signFileUrl: vi.fn(() => null) }));
 // Ownership itself is covered against the real implementation in
 // attendanceOwnership.test.js; here it is stubbed to "allowed".
-vi.mock("../src/utils/ownership.js", () => ({
+vi.mock("../src/utils/ownership.js", async (importOriginal) => ({
+  ...(await importOriginal()), // the real studentScopeFor
   assertCanAccessStudent: vi.fn(),
   assertCanAccessStudents: vi.fn(),
 }));
@@ -71,6 +72,31 @@ describe("getAttendance — verified flag", () => {
     prisma.attendance.findMany.mockResolvedValue([]);
     await getAttendance({ user: admin, query: { date: "2026-09-20" } }, mockRes(), vi.fn());
     expect(prisma.attendance.findMany.mock.calls[0][0].include).toEqual({ verification: { select: { id: true } } });
+  });
+});
+
+describe("getAttendance — late flag", () => {
+  it("is true only for a present student who arrived after their session's cutoff", async () => {
+    prisma.student.findMany.mockResolvedValueOnce([
+      { id: 1, name: "Early", session: "morning", photo: null },
+      { id: 2, name: "Late", session: "morning", photo: null },
+      { id: 3, name: "Manual", session: "morning", photo: null },
+      { id: 4, name: "Absent", session: "morning", photo: null },
+      { id: 5, name: "Pm", session: "afternoon", photo: null },
+    ]);
+    prisma.attendance.findMany.mockResolvedValueOnce([
+      { studentId: 1, status: "present", arrivedAt: new Date("2026-09-19T23:50:00Z"), verification: null }, // 7:50
+      { studentId: 2, status: "present", arrivedAt: new Date("2026-09-20T00:30:00Z"), verification: null }, // 8:30
+      { studentId: 3, status: "present", arrivedAt: null, verification: null }, // marked by hand
+      { studentId: 4, status: "absent", arrivedAt: new Date("2026-09-20T00:30:00Z"), verification: null },
+      { studentId: 5, status: "present", arrivedAt: new Date("2026-09-20T00:30:00Z"), verification: null }, // 8:30 AM, pm session
+    ]);
+    const res = mockRes();
+    await getAttendance({ user: admin, query: { date: "2026-09-20" } }, res, vi.fn());
+
+    expect(res.json.mock.calls[0][0].map((s) => [s.id, s.late])).toEqual([
+      [1, false], [2, true], [3, false], [4, false], [5, false],
+    ]);
   });
 });
 

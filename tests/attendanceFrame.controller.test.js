@@ -17,6 +17,8 @@ const { processFrame, isJpeg, isConfidentMatch } = await import("../src/controll
 const CFG = { faceMaxDistance: 0.5, faceMinMargin: 0.05 };
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
 const SESSION = { id: 3, date: new Date("2026-09-20T00:00:00.000Z") };
+const ADMIN = { id: 1, role: "Admin" };
+const TEACHER = { id: 7, role: "Teacher" };
 const face = (over = {}) => ({ box: [1, 2, 3, 4], studentId: 5, distance: 0.4, margin: 0.2, ...over });
 
 function mockRes() {
@@ -28,7 +30,7 @@ function mockRes() {
 const run = async (over = {}) => {
   const res = mockRes();
   const next = vi.fn();
-  await processFrame({ file: { buffer: JPEG }, ...over }, res, next);
+  await processFrame({ file: { buffer: JPEG }, user: ADMIN, ...over }, res, next);
   return { res, next, body: res.json.mock.calls[0]?.[0] };
 };
 
@@ -164,5 +166,36 @@ describe("processFrame — recognition outcomes", () => {
     findActiveSession.mockRejectedValue(err);
     const { next } = await run();
     expect(next).toHaveBeenCalledWith(err);
+  });
+});
+
+describe("processFrame — whose students can be recognised", () => {
+  it("an Admin can match any active student", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    await run({ user: ADMIN });
+    expect(prisma.student.findMany.mock.calls[0][0].where).toEqual({ id: { in: [5] }, status: "active" });
+  });
+
+  it("a Teacher can only match students connected to them", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    await run({ user: TEACHER });
+    expect(prisma.student.findMany.mock.calls[0][0].where).toEqual({ id: { in: [5] }, status: "active", teacherId: 7 });
+  });
+
+  it("a face of another teacher's student is an unnamed box and records no signal", async () => {
+    prisma.student.findMany.mockResolvedValue([]); // the teacherId filter removed them
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    const { body } = await run({ user: TEACHER });
+    expect(recordSignal).not.toHaveBeenCalled();
+    expect(body.faces).toEqual([{ box: [1, 2, 3, 4], student: null, verified: false }]);
+    expect(body.verified).toEqual([]);
+  });
+
+  it("denies any other role, or no user, before reading anything", async () => {
+    for (const user of [undefined, { id: 3, role: "Parent" }]) {
+      const { next } = await run({ user });
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
+    }
+    expect(recognizeFrame).not.toHaveBeenCalled();
   });
 });

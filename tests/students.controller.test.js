@@ -13,7 +13,7 @@ vi.mock("../src/lib/prisma.js", () => ({
       count: vi.fn(),
       delete: vi.fn(),
     },
-    user: { findMany: vi.fn(), findUnique: vi.fn() },
+    user: { findMany: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     parentChild: { createMany: vi.fn(), count: vi.fn() },
     // Controllers run inside prisma.$transaction((tx) => ...); passing the
     // mocked prisma as `tx` keeps every assertion below working unchanged.
@@ -221,6 +221,18 @@ function stubStudentWrites() {
 }
 
 describe("createStudent parent/guardian linking", () => {
+  it("reactivates a linked parent account that was deactivated when its last child was deleted", async () => {
+    stubStudentWrites();
+    prisma.user.findMany.mockResolvedValue([{ id: 7 }, { id: 8 }]);
+
+    await createStudent({ body: { ...baseBody, motherEmail: "maria@example.com" }, user: staff }, mockRes(), vi.fn());
+
+    expect(prisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: [7, 8] }, isActive: false },
+      data: { isActive: true },
+    });
+  });
+
   it("links existing Parent and Guardian accounts for every listed email", async () => {
     stubStudentWrites();
     prisma.user.findMany.mockResolvedValue([{ id: 7 }, { id: 8 }]);
@@ -581,5 +593,32 @@ describe("handing a student to a Teacher at another center", () => {
     await reassign(6);
 
     expect(prisma.parentChild.count).not.toHaveBeenCalled();
+  });
+});
+
+describe("createStudent parent phones", () => {
+  it("stores each phone as its 10-digit mobile number", async () => {
+    stubStudentWrites();
+    const res = mockRes();
+    await createStudent(
+      { body: { ...baseBody, motherName: "Ana", motherPhone: "+63 917 000 1111", guardianPhone: "0917-123-4567" }, user: staff },
+      res,
+      vi.fn(),
+    );
+
+    expect(res.status).toHaveBeenCalledWith(201);
+    const data = prisma.student.create.mock.calls.at(-1)[0].data;
+    expect(data.motherPhone).toBe("9170001111");
+    expect(data.guardianPhone).toBe("9171234567");
+  });
+
+  it("rejects a phone that isn't a 10-digit mobile number", async () => {
+    stubStudentWrites();
+    prisma.student.create.mockClear();
+    const next = vi.fn();
+    await createStudent({ body: { ...baseBody, motherName: "Ana", motherPhone: "123-4567" }, user: staff }, mockRes(), next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    expect(prisma.student.create).not.toHaveBeenCalled();
   });
 });

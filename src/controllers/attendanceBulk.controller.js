@@ -1,8 +1,9 @@
 import { prisma } from "../lib/prisma.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { assertCanAccessStudent } from "../utils/ownership.js";
+import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 import { parseId, requireDateString, requireAttendanceStatus } from "../utils/validate.js";
 import { toDate, assertNotFutureDate, arrivedAtFor } from "./attendance.controller.js";
+import { isLateArrival } from "../utils/late.js";
 
 // Ranged reads and CSV import for attendance. Both are Teacher/Admin only
 // (enforced at route level) and scoped the same way as the daily roster: a
@@ -16,9 +17,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const dayKey = (date) => date.toISOString().slice(0, 10);
 
 function studentScope(user) {
-  if (user.role === "Admin") return {};
-  if (user.role === "Teacher") return { teacherId: user.id };
-  throw new AppError("Forbidden", 403); // default deny
+  const scope = studentScopeFor(user);
+  if (!scope) throw new AppError("Forbidden", 403); // default deny
+  return scope;
 }
 
 // GET /api/attendance/range?from=YYYY-MM-DD&to=YYYY-MM-DD[&studentId=N]
@@ -72,6 +73,7 @@ export async function getAttendanceRange(req, res, next) {
         status: r.status,
         arrivedAt: r.arrivedAt,
         pickedUpAt: r.pickedUpAt,
+        late: isLateArrival(r.status, r.arrivedAt, r.student.session),
       })),
     });
   } catch (err) {

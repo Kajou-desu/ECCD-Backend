@@ -199,9 +199,14 @@ describe("getAttendance — roster scoping", () => {
     expect(prisma.student.count).toHaveBeenCalledWith({ where: { teacherId: 7 } });
   });
 
+  it("gives a Teacher the roster of their whole center, not only their own students", async () => {
+    await getAttendance(req({ id: 7, role: "Teacher", centerId: 4 }), mockRes(), vi.fn());
+    expect(prisma.student.findMany.mock.calls[0][0].where).toEqual({ teacher: { centerId: 4 } });
+  });
+
   it("gives an Admin the full roster", async () => {
     await getAttendance(req(admin), mockRes(), vi.fn());
-    expect(prisma.student.findMany.mock.calls[0][0].where).toBeUndefined();
+    expect(prisma.student.findMany.mock.calls[0][0].where).toEqual({}); // no filter: everyone
   });
 
   it.each(["Parent", "Guardian", undefined])("denies role %s rather than defaulting to everyone", async (role) => {

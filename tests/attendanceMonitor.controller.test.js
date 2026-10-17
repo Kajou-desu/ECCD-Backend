@@ -30,10 +30,10 @@ function mockRes() {
   res.json = vi.fn().mockReturnValue(res);
   return res;
 }
-async function monitor() {
+async function monitor(user = { id: 1, role: "Admin" }) {
   const res = mockRes();
   const next = vi.fn();
-  await getMonitor({}, res, next);
+  await getMonitor({ user }, res, next);
   return { body: res.json.mock.calls[0]?.[0], next };
 }
 
@@ -128,8 +128,8 @@ describe("getMonitor", () => {
 
   it("only reads the ACTIVE session's signals and verifications", async () => {
     await monitor();
-    expect(prisma.attendanceSignal.findMany.mock.calls[0][0].where).toEqual({ sessionId: 3 });
-    expect(prisma.attendanceVerification.findMany.mock.calls[0][0].where).toEqual({ sessionId: 3 });
+    expect(prisma.attendanceSignal.findMany.mock.calls[0][0].where).toEqual({ sessionId: 3, student: {} });
+    expect(prisma.attendanceVerification.findMany.mock.calls[0][0].where).toEqual({ sessionId: 3, attendance: { student: {} } });
   });
 
   it("passes database errors to next()", async () => {
@@ -137,5 +137,22 @@ describe("getMonitor", () => {
     prisma.attendanceSignal.findMany.mockRejectedValue(err);
     const { next } = await monitor();
     expect(next).toHaveBeenCalledWith(err);
+  });
+});
+
+describe("getMonitor — whose students are shown", () => {
+  it("a Teacher's monitor only reads signals and verifications of their own students", async () => {
+    await monitor({ id: 7, role: "Teacher" });
+    expect(prisma.attendanceSignal.findMany.mock.calls[0][0].where).toEqual({ sessionId: 3, student: { teacherId: 7 } });
+    expect(prisma.attendanceVerification.findMany.mock.calls[0][0].where).toEqual({
+      sessionId: 3,
+      attendance: { student: { teacherId: 7 } },
+    });
+  });
+
+  it("denies any other role", async () => {
+    const { body, next } = await monitor({ id: 3, role: "Parent" });
+    expect(body).toBeUndefined();
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 });

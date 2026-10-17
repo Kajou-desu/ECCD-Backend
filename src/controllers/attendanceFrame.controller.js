@@ -5,6 +5,7 @@ import { findActiveSession } from "../lib/activeSession.js";
 import { touchCamera } from "../lib/hardwareStatus.js";
 import { recordSignal } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured, recognizeFrame } from "../services/recognitionClient.js";
+import { liveStudentScope } from "../utils/studentScope.js";
 
 // POST /attendance/session/frame — Teacher/Admin only, multipart field "frame".
 // The frame lives in memory only (multer memoryStorage); it is never written to
@@ -27,6 +28,8 @@ export function isConfidentMatch(face, cfg = env.verification) {
 
 export async function processFrame(req, res, next) {
   try {
+    const scope = liveStudentScope(req.user);
+
     if (!isRecognitionConfigured()) {
       return res.status(503).json({ message: "Recognition unavailable" });
     }
@@ -59,7 +62,9 @@ export async function processFrame(req, res, next) {
 
     const students = candidates.length
       ? await prisma.student.findMany({
-          where: { id: { in: candidates.map((f) => f.studentId) }, status: "active" },
+          // Faces of students outside the caller's own list are dropped here, so
+          // they show up as an unnamed box and never get a signal recorded.
+          where: { id: { in: candidates.map((f) => f.studentId) }, status: "active", ...scope },
           select: { id: true, name: true },
         })
       : [];

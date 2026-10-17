@@ -8,6 +8,7 @@ const db = vi.hoisted(() => ({
     pickupCheck: { findMany: vi.fn(), create: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     notification: { createMany: vi.fn() },
     student: { findUnique: vi.fn() },
+    user: { findMany: vi.fn() },
   },
 }));
 
@@ -359,6 +360,21 @@ describe("runPickupWatch — stop reminder", () => {
       where: { id: 1, stopReminderSentAt: null },
       data: { stopReminderSentAt: afterWindow },
     });
+  });
+
+  it("also reaches the other teachers at the affected students' center", async () => {
+    prisma.attendance.findMany.mockResolvedValue([
+      { student: { teacherId: 3, teacher: { centerId: 2 } } },
+      { student: { teacherId: 4, teacher: { centerId: 2 } } },
+    ]);
+    prisma.user.findMany.mockResolvedValue([{ id: 3 }, { id: 4 }, { id: 5 }]);
+    await runPickupWatch(afterWindow);
+    expect(prisma.user.findMany).toHaveBeenCalledWith({
+      where: { role: "Teacher", centerId: { in: [2] }, isActive: true },
+      select: { id: true },
+    });
+    const { data } = prisma.notification.createMany.mock.calls[0][0];
+    expect(data.map((d) => d.userId).sort()).toEqual([3, 4, 5]);
   });
 
   it("does not repeat itself", async () => {

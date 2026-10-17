@@ -140,6 +140,8 @@ export async function deleteWeeklyGoal(req, res, next) {
   }
 }
 
+export const MASTERED_STATUS = "Mastered";
+
 // PUT /api/weekly-goals/:id/progress — Teacher/Admin only. Upserts one or
 // more students' progress against a single goal in one request, since a
 // teacher realistically grades a whole session roster at once.
@@ -161,10 +163,14 @@ export async function updateGoalProgress(req, res, next) {
       if (u === null || typeof u !== "object" || Array.isArray(u)) {
         throw new AppError(`Invalid update at position ${index + 1}`, 400);
       }
+      const status = requireNonEmptyString(u.status ?? "In progress", "status", 100);
+      const progress = requireProgress(u.progress);
       return {
         studentId: parseId(u.studentId, "studentId"),
-        progress: requireProgress(u.progress),
-        status: requireNonEmptyString(u.status ?? "In progress", "status", 100),
+        // "Mastered" means the goal is done, so it is always 100% — and 100%
+        // is what turns it into a milestone on the parent's dashboard.
+        progress: status.toLowerCase() === MASTERED_STATUS.toLowerCase() ? 100 : progress,
+        status,
       };
     });
 

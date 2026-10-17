@@ -10,6 +10,7 @@ vi.mock("../src/lib/prisma.js", () => ({
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
       count: vi.fn(),
     },
@@ -135,7 +136,7 @@ describe("listUsers", () => {
       expect(prisma.user.findMany).not.toHaveBeenCalled();
     });
 
-    it("shows a Teacher only their own students in each account's studentIds", async () => {
+    it("shows a Teacher only their center's students in each account's studentIds", async () => {
       prisma.user.findMany.mockResolvedValue([
         { id: 5, role: "Parent", name: "Maria", children: [{ studentId: 1 }, { studentId: 2 }, { studentId: 3 }] },
       ]);
@@ -144,7 +145,7 @@ describe("listUsers", () => {
 
       await listUsers({ user: teacher }, res, vi.fn());
 
-      expect(prisma.student.findMany).toHaveBeenCalledWith({ where: { teacherId: 9 }, select: { id: true } });
+      expect(prisma.student.findMany).toHaveBeenCalledWith({ where: { teacher: { centerId: 3 } }, select: { id: true } });
       expect(res.json.mock.calls[0][0][0].studentIds).toEqual([1, 3]);
     });
 
@@ -1157,18 +1158,28 @@ describe("Teacher scope over Parent/Guardian accounts (by center)", () => {
       expect(prisma.parentChild.deleteMany).not.toHaveBeenCalled();
     });
 
-    it("replaces only the Teacher's own links, leaving other classes' links alone", async () => {
+    it("replaces only the links to the Teacher's center, leaving other centers' links alone", async () => {
       prisma.student.count.mockResolvedValue(2);
       prisma.user.findUnique.mockResolvedValueOnce(parent).mockResolvedValue({ id: 5, children: [] });
 
       await updateUser({ body: { userId: 5, studentIds: [1, 2] }, user: teacher }, mockRes(), vi.fn());
 
       expect(prisma.parentChild.deleteMany).toHaveBeenCalledWith({
-        where: { parentId: 5, student: { teacherId: 7 } },
+        where: { parentId: 5, student: { teacher: { centerId: 3 } } },
       });
       expect(prisma.parentChild.createMany).toHaveBeenCalledWith(
         expect.objectContaining({ data: [{ parentId: 5, studentId: 1 }, { parentId: 5, studentId: 2 }] }),
       );
+    });
+
+    it("reactivates the account when it is given a child again", async () => {
+      prisma.student.count.mockResolvedValue(1);
+      prisma.user.findUnique.mockResolvedValueOnce(parent).mockResolvedValue({ id: 5, children: [] });
+
+      prisma.parentChild.createMany.mockResolvedValue({ count: 1 }); // an earlier test leaves it rejecting
+      await updateUser({ body: { userId: 5, studentIds: [1] }, user: teacher }, mockRes(), vi.fn());
+
+      expect(prisma.user.updateMany).toHaveBeenCalledWith({ where: { id: 5, isActive: false }, data: { isActive: true } });
     });
 
     it("lets an Admin replace the whole list, with students from the account's center", async () => {

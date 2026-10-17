@@ -2,17 +2,24 @@ import { prisma } from "../lib/prisma.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { requireNonEmptyString, optionalString, requireStringArray, requireDateString, parseId } from "../utils/validate.js";
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
+import { studentScopeFor } from "../utils/ownership.js";
 
-export async function getDashboardStats(_req, res, next) {
+// The numbers cover the students the user can see: a Teacher's whole center
+// (teachers at one center share their data), an Admin's everyone. Anyone else
+// gets nothing (default deny — the route also limits it to these two roles).
+export async function getDashboardStats(req, res, next) {
   try {
     // School-local day, not the server's: the server runs in UTC, so using
     // its local date left the counts on "yesterday" until 8 AM Manila time.
     const todayDate = schoolDateAsUtcMidnight();
+    const scope = studentScopeFor(req.user);
+    if (!scope) return res.status(403).json({ message: "Forbidden" });
+    const studentFilter = { student: scope };
 
     const [totalStudents, presentToday, absentToday, totalMaterials] = await Promise.all([
-      prisma.student.count(),
-      prisma.attendance.count({ where: { date: todayDate, status: "present" } }),
-      prisma.attendance.count({ where: { date: todayDate, status: "absent" } }),
+      prisma.student.count({ where: scope }),
+      prisma.attendance.count({ where: { date: todayDate, status: "present", ...studentFilter } }),
+      prisma.attendance.count({ where: { date: todayDate, status: "absent", ...studentFilter } }),
       prisma.material.count(),
     ]);
 

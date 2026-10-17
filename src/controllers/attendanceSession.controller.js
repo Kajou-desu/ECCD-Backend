@@ -6,6 +6,7 @@ import { isSignalPresent } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured } from "../services/recognitionClient.js";
 import { isGatewayOnline } from "../lib/hardwareStatus.js";
 import { listOpenPickupChecks, pickupWindowStatus } from "../services/pickupWatch.service.js";
+import { liveStudentScope } from "../utils/studentScope.js";
 
 // Teacher/admin only (enforced at route level). None of these read anything
 // from the request body: the session's date comes from the server clock in the
@@ -110,15 +111,16 @@ export async function stopSession(req, res, next) {
 // one call: who is verified, who has only one of the two signals so far, and
 // whether the hardware side is alive. Students appear once they have at least
 // one CURRENT signal; a signal that has gone stale simply drops off.
-export async function getMonitor(_req, res, next) {
+export async function getMonitor(req, res, next) {
   try {
+    const scope = liveStudentScope(req.user);
     const session = await findActive();
     if (!session) return res.json({ session: null });
 
     const now = new Date();
     const [signals, verifications, gateway] = await Promise.all([
       prisma.attendanceSignal.findMany({
-        where: { sessionId: session.id },
+        where: { sessionId: session.id, student: scope },
         select: {
           studentId: true,
           kind: true,
@@ -129,7 +131,7 @@ export async function getMonitor(_req, res, next) {
         },
       }),
       prisma.attendanceVerification.findMany({
-        where: { sessionId: session.id },
+        where: { sessionId: session.id, attendance: { student: scope } },
         select: {
           verifiedAt: true,
           attendance: { select: { studentId: true, student: { select: { name: true } } } },

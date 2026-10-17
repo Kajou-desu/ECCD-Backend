@@ -8,6 +8,8 @@ vi.mock("../src/lib/prisma.js", () => ({
     photo: { findMany: vi.fn(), findUnique: vi.fn(), delete: vi.fn() },
     student: { delete: vi.fn() },
     studentDocument: { findMany: vi.fn() },
+    parentChild: { findMany: vi.fn() },
+    user: { updateMany: vi.fn() },
   },
 }));
 
@@ -42,6 +44,8 @@ const req = (extra = {}) => ({ params: {}, body: {}, protocol: "https", get: () 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prisma.parentChild.findMany.mockResolvedValue([]);
+  prisma.user.updateMany.mockResolvedValue({ count: 0 });
 });
 
 describe("files are removed together with their database rows", () => {
@@ -129,6 +133,45 @@ describe("files are removed together with their database rows", () => {
     );
 
     expect(removeStoredFiles).toHaveBeenCalledWith("face.jpg", ["d1.pdf"], ["s1.png"]);
+  });
+
+  it("deleteStudent deactivates the parent accounts left with no child, and signs them out", async () => {
+    prisma.studentDocument.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.student.delete.mockResolvedValue({ id: 4, photo: null });
+    prisma.parentChild.findMany.mockResolvedValue([{ parentId: 21 }, { parentId: 22 }]);
+    const res = mockRes();
+
+    await deleteStudent(req({ params: { id: "4" }, user: { id: 1, role: "Admin" } }), res, vi.fn());
+
+    expect(prisma.parentChild.findMany).toHaveBeenCalledWith({ where: { studentId: 4 }, select: { parentId: true } });
+    // Only accounts that are still active Parent/Guardian AND have no other child.
+    expect(prisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: [21, 22] }, role: { in: ["Parent", "Guardian"] }, isActive: true, children: { none: {} } },
+      data: { isActive: false, tokenVersion: { increment: 1 } },
+    });
+    expect(res.status).toHaveBeenCalledWith(204);
+    // It runs after the delete, when the cascade has removed this child's links.
+    expect(prisma.student.delete.mock.invocationCallOrder[0]).toBeLessThan(prisma.user.updateMany.mock.invocationCallOrder[0]);
+  });
+
+  it("deleteStudent skips the account update when nobody was linked", async () => {
+    prisma.studentDocument.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.student.delete.mockResolvedValue({ id: 4, photo: null });
+    await deleteStudent(req({ params: { id: "4" }, user: { id: 1, role: "Admin" } }), mockRes(), vi.fn());
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("deleteStudent still answers 204 if deactivating the parents fails", async () => {
+    prisma.studentDocument.findMany.mockResolvedValue([]);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.student.delete.mockResolvedValue({ id: 4, photo: null });
+    prisma.parentChild.findMany.mockResolvedValue([{ parentId: 21 }]);
+    prisma.user.updateMany.mockRejectedValue(new Error("db"));
+    const res = mockRes();
+    await deleteStudent(req({ params: { id: "4" }, user: { id: 1, role: "Admin" } }), res, vi.fn());
+    expect(res.status).toHaveBeenCalledWith(204);
   });
 
   it("deleteStudent also erases the child's face enrollment from the recognition service", async () => {
