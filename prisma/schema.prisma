@@ -56,11 +56,34 @@ model User {
   accountActionOtps AccountActionOtp[]
   attendanceSessions AttendanceSession[]
   weeklyGoalsCreated WeeklyGoal[]
+  activityLogs ActivityLog[]
   // Students this Teacher is connected to (one teacher per student).
   assignedStudents Student[] @relation("StudentTeacher")
 
   @@index([centerId])
   @@map("users")
+}
+
+// Who did what, for the Admin's Activity Logs page. Append-only: the app never
+// edits or deletes a row. The actor's email and role are copied in so the entry
+// still reads correctly after that account is deleted (actorId then becomes null).
+// `summary` is a short sentence and never holds passwords, tokens or OTP codes.
+model ActivityLog {
+  id         Int      @id @default(autoincrement())
+  createdAt  DateTime @default(now())
+  actorId    Int?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorEmail String
+  actorRole  String
+  action     String // "category.verb", e.g. "student.delete"
+  targetType String?
+  targetId   Int?
+  summary    String
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("activity_logs")
 }
 
 model Center {

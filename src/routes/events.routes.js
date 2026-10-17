@@ -6,6 +6,7 @@ import {
 	updateEvent,
 	deleteEvent,
 } from "../controllers/events.controller.js";
+import { auditEventCreate, auditEventUpdate, auditEventDelete } from "../middleware/auditRoutes.js";
 
 const router = Router();
 
@@ -13,8 +14,8 @@ const router = Router();
 // (it's school-wide info, not per-student data). Creating/editing/deleting
 // events stays Teacher/Admin only, below.
 router.get("/", requireAuth, requireRole("Teacher", "Admin", "Parent", "Guardian"), getEvents);
-router.post("/", requireAuth, requireRole("Teacher", "Admin"), createEvent);
-router.put("/:id", requireAuth, requireRole("Teacher", "Admin"), updateEvent);
-router.delete("/:id", requireAuth, requireRole("Teacher", "Admin"), deleteEvent);
+router.post("/", requireAuth, requireRole("Teacher", "Admin"), auditEventCreate, createEvent);
+router.put("/:id", requireAuth, requireRole("Teacher", "Admin"), auditEventUpdate, updateEvent);
+router.delete("/:id", requireAuth, requireRole("Teacher", "Admin"), auditEventDelete, deleteEvent);
 
 export default router;

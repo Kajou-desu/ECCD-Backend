@@ -32,6 +32,7 @@ import {
   removeBleDevice,
 } from "../controllers/bleDevices.controller.js";
 import { getChildProgress } from "../controllers/parent.controller.js";
+import { auditStudentCreate, auditStudentImport, auditStudentUpdate, auditStudentDelete } from "../middleware/auditRoutes.js";
 
 const router = Router();
 
@@ -39,10 +40,10 @@ router.use(requireAuth);
 
 router.get("/", requireRole("Teacher", "Admin"), getStudents);
 router.get("/:id", getStudent); // ownership enforced in controller (Parent/Guardian scoped to own children)
-router.post("/", requireRole("Teacher", "Admin"), createStudent);
-router.post("/import", requireRole("Teacher", "Admin"), importStudents);
-router.put("/:id", requireRole("Teacher", "Admin"), updateStudent);
-router.delete("/:id", requireRole("Teacher", "Admin"), deleteStudent);
+router.post("/", requireRole("Teacher", "Admin"), auditStudentCreate, createStudent);
+router.post("/import", requireRole("Teacher", "Admin"), auditStudentImport, importStudents);
+router.put("/:id", requireRole("Teacher", "Admin"), auditStudentUpdate, updateStudent);
+router.delete("/:id", requireRole("Teacher", "Admin"), auditStudentDelete, deleteStudent);
 router.post(
   "/:id/photo",
   requireRole("Teacher", "Admin"),

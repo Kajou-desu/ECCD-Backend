@@ -11,21 +11,22 @@ import {
   requestAccountDeletionOtp,
   uploadMyProfilePhoto,
 } from "../controllers/users.controller.js";
+import { auditAccountUpdate, auditOwnPasswordChange, auditOwnAccountDelete } from "../middleware/auditRoutes.js";
 
 const router = Router();
 
 // Account management's edit-account flow (AccountForm.jsx). Not a
 // self-service "edit my own profile" endpoint — see users.controller.js
 // for why only Teacher/Admin can reach it and what it enforces.
-router.put("/update", requireAuth, requireRole("Teacher", "Admin"), updateUser);
+router.put("/update", requireAuth, requireRole("Teacher", "Admin"), auditAccountUpdate, updateUser);
 
 // Self-service — any authenticated role, scoped to the caller's own
 // account only (req.user.id, never a client-supplied id).
 router.put("/me", requireAuth, profileUpdateLimiter, updateMyProfile);
 router.post("/me/photo", requireAuth, upload.single("photo", { imagesOnly: true }), uploadMyProfilePhoto);
 router.post("/me/password/request-otp", requireAuth, accountOtpLimiter, requestPasswordChangeOtp);
-router.put("/me/password", requireAuth, accountOtpLimiter, changeMyPassword);
+router.put("/me/password", requireAuth, accountOtpLimiter, auditOwnPasswordChange, changeMyPassword);
 router.post("/me/delete/request-otp", requireAuth, accountOtpLimiter, requestAccountDeletionOtp);
-router.delete("/me", requireAuth, accountOtpLimiter, deleteMyAccount);
+router.delete("/me", requireAuth, accountOtpLimiter, auditOwnAccountDelete, deleteMyAccount);
 
 export default router;
