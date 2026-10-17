@@ -85,6 +85,8 @@ model ActivityLog {
   @@index([actorId, createdAt])
   @@index([action, createdAt])
   @@map("activity_logs")
+}
+
 // A school day on which there is no class (typhoon, school event, ...). Days
 // are school days by default (Monday-Friday); only the exceptions are stored.
 model NoClassDay {
