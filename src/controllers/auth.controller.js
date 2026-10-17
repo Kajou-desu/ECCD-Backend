@@ -2,6 +2,8 @@ import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { signToken } from "../utils/jwt.js";
+import { setAuthCookie, clearAuthCookie } from "../utils/authCookie.js";
+import { env } from "../config/env.js";
 import { requireEmail } from "../utils/validate.js";
 import { sendOtpEmail, sendAttendanceEmail } from "../lib/mailer.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
@@ -45,8 +47,10 @@ export async function login(req, res, next) {
     });
 
     const token = signToken(user);
+    setAuthCookie(res, token);
     res.json({
-      token,
+      // Only for older frontends that still read it (see AUTH_RETURN_TOKEN).
+      ...(env.authCookie.returnTokenInBody && { token }),
       user: {
         id: user.id,
         name: user.name,
@@ -64,6 +68,14 @@ export async function login(req, res, next) {
   } catch (err) {
     next(err);
   }
+}
+
+// POST /api/auth/logout — ends the browser session. The cookie is httpOnly, so
+// only the server can remove it. Open to anyone: clearing a cookie reveals
+// nothing and needs no proof of who is asking.
+export function logout(_req, res) {
+  clearAuthCookie(res);
+  res.status(204).send();
 }
 
 const FORGOT_PASSWORD_RESPONSE = { message: "If the email exists, an OTP was sent" };

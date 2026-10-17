@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     student: { findUnique: vi.fn() },
-    attendance: { findMany: vi.fn() },
+    attendance: { findMany: vi.fn(), count: vi.fn() },
     submission: { findMany: vi.fn() },
     weeklyGoal: { findMany: vi.fn() },
     studentGoalProgress: { count: vi.fn(), findMany: vi.fn() },
@@ -65,7 +65,7 @@ describe("getChildren", () => {
 describe("getChildProgress", () => {
   it("returns this week's goals for the child's session with the child's own progress", async () => {
     prisma.student.findUnique.mockResolvedValue({ session: "morning" });
-    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.attendance.count.mockResolvedValue(0);
     prisma.submission.findMany.mockResolvedValue([]);
     prisma.weeklyGoal.findMany.mockResolvedValue([
       { id: 1, title: "Counting to 10", progress: [{ progress: 40, status: "In progress" }] },
@@ -92,9 +92,25 @@ describe("getChildProgress", () => {
     );
   });
 
+  it("works out the attendance rate from two database counts, not by loading every record", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning" });
+    // 1st count: all recorded days; 2nd: the present ones.
+    prisma.attendance.count.mockResolvedValueOnce(8).mockResolvedValueOnce(6);
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.weeklyGoal.findMany.mockResolvedValue([]);
+    const res = mockRes();
+
+    await getChildProgress({ params: { childId: "5" }, user: { id: 1, role: "Admin" } }, res, vi.fn());
+
+    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { studentId: 5 } });
+    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { studentId: 5, status: "present" } });
+    expect(prisma.attendance.findMany).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0]).toMatchObject({ attendance: "75%" });
+  });
+
   it("moves a completed goal out of this week's goals and into the milestones", async () => {
     prisma.student.findUnique.mockResolvedValue({ session: "morning" });
-    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.attendance.count.mockResolvedValue(0);
     prisma.submission.findMany.mockResolvedValue([]);
     prisma.weeklyGoal.findMany.mockResolvedValue([
       { id: 1, title: "Counting to 10", progress: [{ progress: 100, status: "Mastered" }] },
@@ -121,7 +137,7 @@ describe("getChildProgress", () => {
 
   it("only counts and lists this child's completed goals, newest week first", async () => {
     prisma.student.findUnique.mockResolvedValue({ session: "morning" });
-    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.attendance.count.mockResolvedValue(0);
     prisma.submission.findMany.mockResolvedValue([]);
     prisma.weeklyGoal.findMany.mockResolvedValue([]);
     await getChildProgress({ params: { childId: "5" }, user: { id: 1, role: "Admin" } }, mockRes(), vi.fn());
@@ -136,7 +152,7 @@ describe("getChildProgress", () => {
   it("returns recent activities with submittedAt and a signed fileUrl, without notes", async () => {
     process.env.JWT_SECRET = "test-secret";
     prisma.student.findUnique.mockResolvedValue({ session: "morning" });
-    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.attendance.count.mockResolvedValue(0);
     prisma.weeklyGoal.findMany.mockResolvedValue([]);
     prisma.submission.findMany.mockResolvedValue([
       {

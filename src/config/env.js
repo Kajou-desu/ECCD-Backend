@@ -274,6 +274,33 @@ if (isProduction && storageDriver === "local") {
   );
 }
 
+// Session cookie (see utils/authCookie.js).
+//  AUTH_COOKIE_SAMESITE  lax (default) | strict | none. Use lax/strict when the
+//    frontend and the API are the same site (a shared parent domain, or the
+//    API reached through the frontend's own domain). "none" is for a frontend
+//    on a different site and needs https; browsers that block third-party
+//    cookies (Safari, some Firefox/Chrome settings) will still refuse it.
+//  AUTH_COOKIE_SECURE    defaults to true in production (the cookie is only sent
+//    over https); must be true when SameSite=none.
+//  AUTH_RETURN_TOKEN     true = the sign-in response also carries the token in
+//    its body, for older frontends still using Authorization: Bearer while a
+//    deployment is rolling out. Leave it unset once they are updated.
+const authCookieSameSite = (process.env.AUTH_COOKIE_SAMESITE || "lax").toLowerCase();
+if (!["lax", "strict", "none"].includes(authCookieSameSite)) {
+  console.error("AUTH_COOKIE_SAMESITE must be lax, strict or none.");
+  process.exit(1);
+}
+const authCookieSecure = process.env.AUTH_COOKIE_SECURE ? process.env.AUTH_COOKIE_SECURE === "true" : isProduction;
+if ((isProduction || authCookieSameSite === "none") && !authCookieSecure) {
+  console.error("AUTH_COOKIE_SECURE must be true in production and whenever AUTH_COOKIE_SAMESITE=none.");
+  process.exit(1);
+}
+const authCookie = {
+  sameSite: authCookieSameSite,
+  secure: authCookieSecure,
+  returnTokenInBody: process.env.AUTH_RETURN_TOKEN === "true",
+};
+
 const clientOrigins = (process.env.CLIENT_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -282,6 +309,7 @@ const clientOrigins = (process.env.CLIENT_ORIGIN || "")
 export const env = {
   port: Number(process.env.PORT) || 4000,
   clientOrigins,
+  authCookie,
   nodeEnv,
   isProduction,
   redisUrl: process.env.REDIS_URL || null,

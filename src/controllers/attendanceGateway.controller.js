@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { findActiveSession } from "../lib/activeSession.js";
 import { recordSignal } from "../services/attendanceVerification.service.js";
+import { mapWithLimit, SIGNAL_CONCURRENCY } from "../utils/concurrency.js";
 
 // Gateway-key authenticated (see routes/attendanceGateway.routes.js). These
 // handlers never read who the student is from the request: the gateway only
@@ -48,21 +49,24 @@ export async function postEvents(req, res, next) {
     });
     const studentByDevice = new Map(devices.map((d) => [d.deviceIdentifier, d.studentId]));
 
-    // Sequential on purpose: each sighting smooths into the previous one, so
-    // two readings for the same student must not race each other.
-    let accepted = 0;
+    // One student's readings stay in order (each smooths into the previous
+    // one, so two readings for the same student must not race each other —
+    // a student can carry more than one tag). Different students touch
+    // different rows, so they are recorded together instead of one after the
+    // other: the gateway waits for this reply before its next scan.
+    const byStudent = new Map();
     for (const event of events) {
       const studentId = studentByDevice.get(event.deviceIdentifier);
       if (studentId === undefined) continue; // not a registered tag: ignore
-      await recordSignal({
-        sessionId: session.id,
-        sessionDate: session.date,
-        studentId,
-        kind: "ble",
-        value: event.rssi,
-      });
-      accepted += 1;
+      byStudent.set(studentId, [...(byStudent.get(studentId) ?? []), event.rssi]);
     }
+    const groups = [...byStudent.entries()];
+    await mapWithLimit(groups, SIGNAL_CONCURRENCY, async ([studentId, readings]) => {
+      for (const rssi of readings) {
+        await recordSignal({ sessionId: session.id, sessionDate: session.date, studentId, kind: "ble", value: rssi });
+      }
+    });
+    const accepted = groups.reduce((sum, [, readings]) => sum + readings.length, 0);
     res.json({ sessionActive: true, accepted });
   } catch (err) {
     next(err);

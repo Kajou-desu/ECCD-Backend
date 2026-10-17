@@ -34,6 +34,9 @@ function mockRes() {
   const res = {};
   res.status = vi.fn().mockReturnValue(res);
   res.json = vi.fn().mockReturnValue(res);
+  res.send = vi.fn().mockReturnValue(res);
+  res.cookie = vi.fn().mockReturnValue(res);
+  res.clearCookie = vi.fn().mockReturnValue(res);
   return res;
 }
 
@@ -44,7 +47,7 @@ beforeEach(() => {
 });
 
 describe("login", () => {
-  it("returns a token for valid credentials", async () => {
+  it("starts an httpOnly session cookie for valid credentials, and keeps the token out of the body", async () => {
     const passwordHash = await bcrypt.hash("correct-horse", 10);
     prisma.user.findUnique.mockResolvedValue({
       id: 1,
@@ -66,10 +69,32 @@ describe("login", () => {
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { email: "user@example.com" },
     });
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ token: expect.any(String) })
+    expect(res.cookie).toHaveBeenCalledWith(
+      "eccd_session",
+      expect.any(String),
+      expect.objectContaining({ httpOnly: true, sameSite: "lax", path: "/", maxAge: expect.any(Number) }),
     );
+    const body = res.json.mock.calls[0][0];
+    expect(body.user).toMatchObject({ id: 1, email: "user@example.com" });
+    expect(body).not.toHaveProperty("token");
+    expect(JSON.stringify(body)).not.toContain(res.cookie.mock.calls[0][1]);
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it("also returns the token in the body while AUTH_RETURN_TOKEN is on (older frontends)", async () => {
+    const { env } = await import("../src/config/env.js");
+    const passwordHash = await bcrypt.hash("correct-horse", 10);
+    prisma.user.findUnique.mockResolvedValue({
+      id: 1, email: "user@example.com", name: "User", role: "Admin", isActive: true, passwordHash, tokenVersion: 0,
+    });
+    env.authCookie.returnTokenInBody = true;
+    try {
+      const res = mockRes();
+      await login({ body: { email: "user@example.com", password: "correct-horse" } }, res, vi.fn());
+      expect(res.json.mock.calls[0][0].token).toBe(res.cookie.mock.calls[0][1]);
+    } finally {
+      env.authCookie.returnTokenInBody = false;
+    }
   });
 
   it("returns the *previous* lastLoginAt, then updates it to now", async () => {

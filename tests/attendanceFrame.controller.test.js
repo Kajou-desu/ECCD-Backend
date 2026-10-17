@@ -125,6 +125,32 @@ describe("processFrame — recognition outcomes", () => {
     expect(body.faces[0].verified).toBe(true);
   });
 
+  it("records several students in one frame together, and reports them in face order", async () => {
+    const students = [5, 6, 7, 8].map((id) => ({ id, name: `Student ${id}` }));
+    prisma.student.findMany.mockResolvedValue(students);
+    recognizeFrame.mockResolvedValue({
+      width: 640,
+      height: 480,
+      faces: students.map((s, i) => face({ studentId: s.id, box: [i, i, i, i] })),
+    });
+    let running = 0;
+    let peak = 0;
+    recordSignal.mockImplementation(async ({ studentId }) => {
+      running++;
+      peak = Math.max(peak, running);
+      await new Promise((r) => setTimeout(r, studentId === 5 ? 30 : 5)); // the first one finishes last
+      running--;
+      return studentId === 8 ? { state: "pending" } : { state: "verified", arrivedAt: new Date(0) };
+    });
+
+    const { body } = await run();
+
+    expect(peak).toBeGreaterThan(1); // not one after the other
+    expect(recordSignal).toHaveBeenCalledTimes(4);
+    expect(body.verified.map((v) => v.studentId)).toEqual([5, 6, 7]); // face order, not finish order
+    expect(body.faces.map((f) => f.verified)).toEqual([true, true, true, false]);
+  });
+
   it("does NOT record or name a face that misses the thresholds", async () => {
     recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [
       face({ distance: 0.7 }),                                   // too far

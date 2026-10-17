@@ -54,17 +54,38 @@ export function isNotificationPath(path) {
   return path === "/notifications" || path.startsWith("/notifications/");
 }
 
+// A gallery or dashboard loads dozens of images in one go (every thumbnail is
+// its own request), so file URLs would eat the shared per-IP budget — and a
+// whole school shares one IP, so pages would start showing broken pictures.
+// They are exempted from the general limit and covered by their own below.
+export function isFilePath(path) {
+  return path.startsWith("/files/");
+}
+
 // General API traffic
 export const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 min
   limit: 300,
-  skip: (req) => isLiveAttendancePath(req.path) || isNotificationPath(req.path),
+  skip: (req) => isLiveAttendancePath(req.path) || isNotificationPath(req.path) || isFilePath(req.path),
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many requests, please try again later" },
   store: getStore("rl:api:"),
   // If Redis is down, fail open (allow the request) rather than take the
   // whole API down with it — logged loudly so it's visible in monitoring.
+  passOnStoreError: true,
+});
+
+// File downloads (/api/files/:filename). Every link is HMAC-signed and expires,
+// so this is a ceiling against hammering, sized for a school's galleries
+// behind one IP, not a guess-the-password defence.
+export const filesIpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later" },
+  store: getStore("rl:files:"),
   passOnStoreError: true,
 });
 

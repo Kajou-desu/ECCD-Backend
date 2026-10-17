@@ -61,8 +61,11 @@ export async function getChildProgress(req, res, next) {
     });
     if (!student) return res.status(404).json({ message: "Student not found" });
 
-    const [attendanceRecords, submissions, goals, milestones, milestoneRows] = await Promise.all([
-      prisma.attendance.findMany({ where: { studentId } }),
+    const [totalDays, presentDays, submissions, goals, milestones, milestoneRows] = await Promise.all([
+      // Counted in the database: a child's whole attendance history grows every
+      // school day and only these two numbers are needed from it.
+      prisma.attendance.count({ where: { studentId } }),
+      prisma.attendance.count({ where: { studentId, status: "present" } }),
       prisma.submission.findMany({
         where: { studentId },
         include: { material: { select: { title: true, category: true } } },
@@ -98,8 +101,6 @@ export async function getChildProgress(req, res, next) {
       weekStart: m.goal.weekStart.toISOString().slice(0, 10),
     }));
 
-    const totalDays = attendanceRecords.length;
-    const presentDays = attendanceRecords.filter((a) => a.status === "present").length;
     const attendancePct = totalDays > 0 ? Math.round((presentDays / totalDays) * 100) : 0;
 
     const recentActivities = submissions.map((s) => ({

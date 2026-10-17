@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { composeUserName } from "../utils/userName.js";
 import { signToken } from "../utils/jwt.js";
+import { setAuthCookie } from "../utils/authCookie.js";
+import { env } from "../config/env.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import {
@@ -687,7 +689,11 @@ export async function changeMyPassword(req, res, next) {
       where: { id: req.user.id },
       data: { passwordHash, tokenVersion: { increment: 1 } },
     });
-    res.json({ message: "Password updated", token: signToken(updated) });
+    // The tokenVersion bump signed every old token out, this session included:
+    // hand this one a fresh cookie so changing your password doesn't log you out.
+    const token = signToken(updated);
+    setAuthCookie(res, token);
+    res.json({ message: "Password updated", ...(env.authCookie.returnTokenInBody && { token }) });
   } catch (err) {
     next(err);
   }

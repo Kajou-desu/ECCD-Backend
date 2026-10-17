@@ -1,9 +1,12 @@
 import { verifyToken } from "../utils/jwt.js";
 import { prisma } from "../lib/prisma.js";
+import { readAuthCookie } from "../utils/authCookie.js";
 
 export async function requireAuth(req, res, next) {
+  // An explicit Authorization header (API clients) wins; otherwise the session
+  // cookie the browser sends by itself.
   const header = req.headers.authorization;
-  const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
+  const token = header?.startsWith("Bearer ") ? header.slice(7) : header ? null : readAuthCookie(req);
 
   if (!token) {
     return res.status(401).json({ message: "Missing or invalid token" });

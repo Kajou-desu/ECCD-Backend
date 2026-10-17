@@ -6,6 +6,7 @@ import { touchCamera } from "../lib/hardwareStatus.js";
 import { recordSignal } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured, recognizeFrame } from "../services/recognitionClient.js";
 import { liveStudentScope } from "../utils/studentScope.js";
+import { mapWithLimit, SIGNAL_CONCURRENCY } from "../utils/concurrency.js";
 
 // POST /attendance/session/frame — Teacher/Admin only, multipart field "frame".
 // The frame lives in memory only (multer memoryStorage); it is never written to
@@ -73,23 +74,27 @@ export async function processFrame(req, res, next) {
     const verified = [];
     const verifiedIds = new Set();
     const now = new Date();
-    for (const face of candidates) {
-      const student = studentById.get(face.studentId);
-      if (!student) continue; // unknown or inactive student: ignore
-      // Sequential: each sighting smooths into the previous one.
-      const outcome = await recordSignal({
+    // Every candidate is a different student (a student seen twice was dropped
+    // above), so their rows never overlap and they can be recorded together;
+    // the smoothing only needs ONE student's readings to arrive in order, and
+    // each frame is a single reading per student. Results keep the face order.
+    const known = candidates.filter((face) => studentById.has(face.studentId)); // unknown or inactive: ignore
+    const outcomes = await mapWithLimit(known, SIGNAL_CONCURRENCY, (face) =>
+      recordSignal({
         sessionId: session.id,
         sessionDate: session.date,
-        studentId: student.id,
+        studentId: face.studentId,
         kind: "face",
         value: face.distance,
         now,
-      });
-      if (outcome.state === "verified") {
-        verified.push({ studentId: student.id, name: student.name, arrivedAt: outcome.arrivedAt });
-        verifiedIds.add(student.id);
-      }
-    }
+      }),
+    );
+    known.forEach((face, i) => {
+      if (outcomes[i].state !== "verified") return;
+      const student = studentById.get(face.studentId);
+      verified.push({ studentId: student.id, name: student.name, arrivedAt: outcomes[i].arrivedAt });
+      verifiedIds.add(student.id);
+    });
 
     // Names are returned only for confident matches — an unrecognised or
     // ambiguous face is reported as just a box.

@@ -9,6 +9,7 @@ import materialRoutes from "./materials.routes.js";
 import submissionRoutes from "./submissions.routes.js";
 import parentRoutes from "./parent.routes.js";
 import eventRoutes from "./events.routes.js";
+import noClassDayRoutes from "./noClassDays.routes.js";
 import dashboardRoutes from "./dashboard.routes.js";
 import weeklyGoalsRoutes from "./weeklyGoals.routes.js";
 import fileRoutes from "./files.routes.js";
@@ -34,6 +35,7 @@ router.use("/materials", materialRoutes); // /api/materials/*
 router.use("/submissions", submissionRoutes); // /api/submissions
 router.use("/parent", parentRoutes); // /api/parent/children
 router.use("/events", eventRoutes); // /api/events
+router.use("/no-class-days", noClassDayRoutes); // /api/no-class-days (read: all roles; change: Teacher/Admin)
 router.use("/dashboard", dashboardRoutes); // /api/dashboard/*
 router.use("/weekly-goals", weeklyGoalsRoutes); // /api/weekly-goals/*
 router.use("/files", fileRoutes); // /api/files/:filename (public - see files.routes.js)

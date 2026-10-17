@@ -57,6 +57,7 @@ model User {
   attendanceSessions AttendanceSession[]
   weeklyGoalsCreated WeeklyGoal[]
   activityLogs ActivityLog[]
+  noClassDaysSet NoClassDay[]
   // Students this Teacher is connected to (one teacher per student).
   assignedStudents Student[] @relation("StudentTeacher")
 
@@ -84,6 +85,17 @@ model ActivityLog {
   @@index([actorId, createdAt])
   @@index([action, createdAt])
   @@map("activity_logs")
+// A school day on which there is no class (typhoon, school event, ...). Days
+// are school days by default (Monday-Friday); only the exceptions are stored.
+model NoClassDay {
+  id          Int      @id @default(autoincrement())
+  date        DateTime @unique @db.Date
+  reason      String?
+  createdById Int?
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@map("no_class_days")
 }
 
 model Center {

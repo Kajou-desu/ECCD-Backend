@@ -8,6 +8,7 @@ import { createHttpLogger } from "./lib/httpLogger.js";
 import apiRoutes from "./routes/index.js";
 import { AppError, notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
 import { apiLimiter, authLimiter, authEmailLimiter } from "./middleware/rateLimit.js";
+import { requireTrustedOrigin } from "./middleware/trustedOrigin.js";
 
 export const app = express();
 
@@ -73,6 +74,7 @@ const AUTH_PATHS = API_PREFIXES.flatMap((p) => [`${p}/login`, `${p}/auth`]);
 // Stricter limiters on auth routes (IP-keyed and email-keyed, so a
 // distributed attack against one account can't dodge the IP-based limit —
 // see rateLimit.js), general limiter on everything else under /api.
+app.use(API_PREFIXES, requireTrustedOrigin); // cookie-authenticated writes must come from our own frontend
 app.use(AUTH_PATHS, authLimiter, authEmailLimiter);
 app.use("/api/v1", apiLimiter, apiRoutes);
 app.use("/api", apiLimiter, apiRoutes);

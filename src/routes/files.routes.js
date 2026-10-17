@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getFile } from "../controllers/files.controller.js";
+import { filesIpLimiter } from "../middleware/rateLimit.js";
 
 // Not behind requireAuth: the frontend renders every file URL (photos,
 // student avatars, materials, submissions, documents) via plain
@@ -11,6 +12,6 @@ import { getFile } from "../controllers/files.controller.js";
 // working after it expires rather than granting permanent access.
 const router = Router();
 
-router.get("/:filename", getFile);
+router.get("/:filename", filesIpLimiter, getFile);
 
 export default router;

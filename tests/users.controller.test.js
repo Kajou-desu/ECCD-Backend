@@ -64,6 +64,7 @@ function mockRes() {
   res.status = vi.fn().mockReturnValue(res);
   res.json = vi.fn().mockReturnValue(res);
   res.send = vi.fn().mockReturnValue(res);
+  res.cookie = vi.fn().mockReturnValue(res);
   return res;
 }
 
@@ -777,7 +778,7 @@ describe("changeMyPassword", () => {
     expect(res.status).toHaveBeenCalledWith(401);
   });
 
-  it("updates the password, bumps tokenVersion, and returns a fresh token", async () => {
+  it("updates the password, bumps tokenVersion, and issues a fresh session cookie", async () => {
     const passwordHash = await bcrypt.hash("correct-horse-1", 10);
     prisma.user.findUnique.mockResolvedValue({
       id: 1,
@@ -807,9 +808,8 @@ describe("changeMyPassword", () => {
       where: { id: 1 },
       data: expect.objectContaining({ tokenVersion: { increment: 1 } }),
     });
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ token: expect.any(String) }),
-    );
+    expect(res.cookie).toHaveBeenCalledWith("eccd_session", expect.any(String), expect.objectContaining({ httpOnly: true }));
+    expect(res.json).toHaveBeenCalledWith({ message: "Password updated" });
   });
 });
 
