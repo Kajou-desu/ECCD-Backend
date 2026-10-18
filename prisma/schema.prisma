@@ -106,6 +106,7 @@ model Center {
   name      String   @unique
   createdAt DateTime @default(now())
   users     User[]
+  attendanceSessions AttendanceSession[]
 
   @@map("centers")
 }
@@ -299,8 +300,10 @@ enum AttendanceSessionStatus {
 }
 
 // A teacher-started live attendance run (Start/Stop Attendance in the header).
-// At most ONE session can be active at a time — enforced by a partial unique
-// index in the migration (Prisma can't express partial indexes in the schema).
+// Each center has its own: at most ONE session can be active per center —
+// enforced by a partial unique index in the migration (Prisma can't express
+// partial or expression indexes in the schema). centerId is null only for
+// Teachers not yet assigned to a center; those share one session of their own.
 model AttendanceSession {
   id          Int                     @id @default(autoincrement())
   date        DateTime                @db.Date // school-timezone day, computed server-side
@@ -310,6 +313,8 @@ model AttendanceSession {
   // Nullable + SetNull: deleting a teacher account must not be blocked by, or
   // erase, the history of sessions they ran.
   startedById Int?
+  // Always taken from the verified user (or the student), never from a request.
+  centerId    Int?
   // Started by the pickup watch (no teacher pressed Start): only these are
   // closed automatically once every student has been picked up.
   autoStarted        Boolean   @default(false)
@@ -317,10 +322,13 @@ model AttendanceSession {
   stopReminderSentAt DateTime?
 
   startedBy   User? @relation(fields: [startedById], references: [id], onDelete: SetNull)
+  // Restrict, like users: a center with session history cannot be deleted.
+  center      Center? @relation(fields: [centerId], references: [id], onDelete: Restrict)
   signals       AttendanceSignal[]
   verifications AttendanceVerification[]
 
   @@index([date])
+  @@index([centerId, status])
   @@map("attendance_sessions")
 }
 

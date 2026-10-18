@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { findActiveSession } from "../lib/activeSession.js";
+import { centerKey, findActiveSessions, sessionsByCenter } from "../lib/activeSession.js";
 import { recordSignal } from "../services/attendanceVerification.service.js";
 import { mapWithLimit, SIGNAL_CONCURRENCY } from "../utils/concurrency.js";
 
@@ -23,14 +23,15 @@ export async function getRegistry(_req, res, next) {
   }
 }
 
-// Resolves sightings to students for the active session and feeds each one
-// into the verification service. `req.body` has already
-// been validated/normalised by gatewayEventsSchema. The response tells the
-// gateway whether a session is running so it can idle when nothing is.
+// Resolves sightings to students and feeds each one into the verification
+// service of THEIR center's active session (sessions are per center; the
+// gateway itself isn't tied to one). `req.body` has already been
+// validated/normalised by gatewayEventsSchema. The response tells the gateway
+// whether any session is running so it can idle when nothing is.
 export async function postEvents(req, res, next) {
   try {
-    const session = await findActiveSession();
-    if (!session) {
+    const sessions = sessionsByCenter(await findActiveSessions());
+    if (sessions.size === 0) {
       return res.json({ sessionActive: false, accepted: 0 });
     }
 
@@ -45,9 +46,22 @@ export async function postEvents(req, res, next) {
         enabled: true,
         student: { status: "active" },
       },
-      select: { deviceIdentifier: true, studentId: true },
+      select: {
+        deviceIdentifier: true,
+        studentId: true,
+        student: { select: { teacher: { select: { centerId: true } } } },
+      },
     });
-    const studentByDevice = new Map(devices.map((d) => [d.deviceIdentifier, d.studentId]));
+    // tag -> student, and student -> the session of their center. A tag whose
+    // center has no session running is ignored, like an unregistered one.
+    const studentByDevice = new Map();
+    const sessionByStudent = new Map();
+    for (const d of devices) {
+      const session = sessions.get(centerKey(d.student?.teacher?.centerId));
+      if (!session) continue;
+      studentByDevice.set(d.deviceIdentifier, d.studentId);
+      sessionByStudent.set(d.studentId, session);
+    }
 
     // One student's readings stay in order (each smooths into the previous
     // one, so two readings for the same student must not race each other —
@@ -62,6 +76,7 @@ export async function postEvents(req, res, next) {
     }
     const groups = [...byStudent.entries()];
     await mapWithLimit(groups, SIGNAL_CONCURRENCY, async ([studentId, readings]) => {
+      const session = sessionByStudent.get(studentId);
       for (const rssi of readings) {
         await recordSignal({ sessionId: session.id, sessionDate: session.date, studentId, kind: "ble", value: rssi });
       }

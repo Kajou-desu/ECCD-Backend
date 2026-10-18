@@ -9,7 +9,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     $queryRaw: vi.fn(),
     user: { findUnique: vi.fn() },
     bleGateway: { findUnique: vi.fn(), update: vi.fn() },
-    attendanceSession: { findFirst: vi.fn() },
+    attendanceSession: { findMany: vi.fn() },
     studentBleDevice: { findMany: vi.fn() },
     student: { findUnique: vi.fn() },
   },
@@ -39,8 +39,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   prisma.bleGateway.findUnique.mockResolvedValue(gatewayRow);
   prisma.bleGateway.update.mockResolvedValue({});
-  prisma.attendanceSession.findFirst.mockResolvedValue(null);
+  prisma.attendanceSession.findMany.mockResolvedValue([]);
   prisma.studentBleDevice.findMany.mockResolvedValue([]);
+});
+
+// A tag row as the registry query returns it: the tag, its student, and that student's center.
+const tag = (deviceIdentifier, studentId, centerId = null) => ({
+  deviceIdentifier,
+  studentId,
+  student: { teacher: centerId === null ? null : { centerId } },
 });
 
 describe("gateway endpoints — authentication", () => {
@@ -51,7 +58,7 @@ describe("gateway endpoints — authentication", () => {
     const res = await request(app)[method](url).send({ events: [] });
     expect(res.status).toBe(401);
     expect(prisma.studentBleDevice.findMany).not.toHaveBeenCalled();
-    expect(prisma.attendanceSession.findFirst).not.toHaveBeenCalled();
+    expect(prisma.attendanceSession.findMany).not.toHaveBeenCalled();
   });
 
   it("401 with a wrong secret", async () => {
@@ -106,8 +113,8 @@ describe("gateway endpoints — behaviour", () => {
 
   it("POST /events during a session counts only registered tags; heartbeat works", async () => {
     const sessionDate = new Date("2026-09-20T00:00:00.000Z");
-    prisma.attendanceSession.findFirst.mockResolvedValue({ id: 3, date: sessionDate });
-    prisma.studentBleDevice.findMany.mockResolvedValue([{ deviceIdentifier: "D7:40:47:15:14:90", studentId: 5 }]);
+    prisma.attendanceSession.findMany.mockResolvedValue([{ id: 3, date: sessionDate, centerId: null }]);
+    prisma.studentBleDevice.findMany.mockResolvedValue([tag("D7:40:47:15:14:90", 5)]);
 
     const res = await request(app)
       .post("/api/attendance/gateway/events")
@@ -131,6 +138,54 @@ describe("gateway endpoints — behaviour", () => {
     expect(recordSignal).not.toHaveBeenCalled(); // a heartbeat records nothing
   });
 
+  describe("sessions are per center", () => {
+    const date = new Date("2026-09-20T00:00:00.000Z");
+    const post = (events) =>
+      request(app).post("/api/attendance/gateway/events").set("X-Device-Key", KEY).send({ events });
+    const sightings = [
+      { deviceIdentifier: "D7:40:47:15:14:90", rssi: -50 }, // student 5, center 1
+      { deviceIdentifier: "C9:FC:CB:E2:0D:33", rssi: -55 }, // student 6, center 2
+    ];
+    beforeEach(() => {
+      prisma.studentBleDevice.findMany.mockResolvedValue([
+        tag("D7:40:47:15:14:90", 5, 1),
+        tag("C9:FC:CB:E2:0D:33", 6, 2),
+      ]);
+    });
+
+    it("feeds each tag into the session of ITS student's center", async () => {
+      prisma.attendanceSession.findMany.mockResolvedValue([
+        { id: 3, date, centerId: 1 },
+        { id: 4, date, centerId: 2 },
+      ]);
+      const res = await post(sightings);
+      expect(res.body).toEqual({ sessionActive: true, accepted: 2 });
+      const sessionOf = Object.fromEntries(recordSignal.mock.calls.map(([a]) => [a.studentId, a.sessionId]));
+      expect(sessionOf).toEqual({ 5: 3, 6: 4 });
+    });
+
+    it("ignores a tag whose center has no session running, without affecting the others", async () => {
+      prisma.attendanceSession.findMany.mockResolvedValue([{ id: 3, date, centerId: 1 }]);
+      const res = await post(sightings);
+      expect(res.body).toEqual({ sessionActive: true, accepted: 1 });
+      expect(recordSignal).toHaveBeenCalledTimes(1);
+      expect(recordSignal.mock.calls[0][0]).toMatchObject({ studentId: 5, sessionId: 3 });
+    });
+
+    it("a student with no center only counts for the 'no center' session", async () => {
+      prisma.studentBleDevice.findMany.mockResolvedValue([tag("D7:40:47:15:14:90", 5)]); // no teacher/center
+      prisma.attendanceSession.findMany.mockResolvedValue([{ id: 3, date, centerId: 1 }]);
+      expect((await post(sightings)).body).toEqual({ sessionActive: true, accepted: 0 });
+      expect(recordSignal).not.toHaveBeenCalled();
+    });
+
+    it("tells the gateway a session is running if ANY center has one", async () => {
+      prisma.attendanceSession.findMany.mockResolvedValue([{ id: 4, date, centerId: 2 }]);
+      const beat = await post([]);
+      expect(beat.body).toEqual({ sessionActive: true, accepted: 0 });
+    });
+  });
+
   it.each([
     ["no body", {}],
     ["events not an array", { events: "x" }],
@@ -142,7 +197,7 @@ describe("gateway endpoints — behaviour", () => {
   ])("400s on invalid payload: %s", async (_l, body) => {
     const res = await request(app).post("/api/attendance/gateway/events").set("X-Device-Key", KEY).send(body);
     expect(res.status).toBe(400);
-    expect(prisma.attendanceSession.findFirst).not.toHaveBeenCalled();
+    expect(prisma.attendanceSession.findMany).not.toHaveBeenCalled();
   });
 });
 

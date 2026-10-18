@@ -7,11 +7,15 @@ import { isRecognitionConfigured } from "../services/recognitionClient.js";
 import { isGatewayOnline } from "../lib/hardwareStatus.js";
 import { listOpenPickupChecks, pickupWindowStatus } from "../services/pickupWatch.service.js";
 import { liveStudentScope } from "../utils/studentScope.js";
+import { sessionCenterFor } from "../utils/sessionScope.js";
+import { AppError } from "../middleware/errorHandler.js";
 
-// Teacher/admin only (enforced at route level). None of these read anything
-// from the request body: the session's date comes from the server clock in the
-// school's timezone and its owner from req.user (the verified token/DB record),
-// so a client can't choose either.
+// Teacher/admin only (enforced at route level). The session's date comes from
+// the server clock in the school's timezone, its owner from req.user (the
+// verified token/DB record) and, for a Teacher, its center from req.user too, so
+// a client can't choose any of them. Sessions are per center: every handler acts
+// only on the caller's own center's session (see utils/sessionScope.js for the
+// one case, an Admin, where the request names the center).
 
 const SELECT = { id: true, date: true, status: true, startedAt: true, endedAt: true };
 
@@ -27,7 +31,7 @@ function toResponse(session) {
   };
 }
 
-const findActive = () => findActiveSession(SELECT);
+const findActive = (centerId) => findActiveSession(centerId, SELECT);
 
 // GET /attendance/session/current
 //   -> { session: {...} | null, pickupChecks: [...], pickupWindow: { active, endsAt } }
@@ -38,7 +42,10 @@ const findActive = () => findActiveSession(SELECT);
 // 15-second prompt timely without another poller eating into the rate limit.
 export async function getCurrentSession(req, res, next) {
   try {
-    const session = await findActive();
+    // An Admin who has not named a center has no session to show (not an error:
+    // the header polls this).
+    const centerId = sessionCenterFor(req, { required: false, from: "query" });
+    const session = centerId === undefined ? null : await findActive(centerId);
     res.json({
       session: toResponse(session),
       pickupChecks: session ? await listOpenPickupChecks(req.user) : [],
@@ -50,14 +57,16 @@ export async function getCurrentSession(req, res, next) {
 }
 
 // POST /attendance/session/start
-// Idempotent: if today's session is already active it is returned (200) rather
-// than creating a second one, so a double-click or a second teacher device is
-// harmless. A still-active session from a PREVIOUS day is closed first.
+// Idempotent: if today's session is already active at the caller's center it is
+// returned (200) rather than creating a second one, so a double-click or a
+// second teacher device is harmless. A still-active session from a PREVIOUS day
+// is closed first. Other centers' sessions are never touched.
 export async function startSession(req, res, next) {
   try {
+    const centerId = sessionCenterFor(req);
     const today = schoolDateAsUtcMidnight();
 
-    const existing = await findActive();
+    const existing = await findActive(centerId);
     if (existing) {
       if (existing.date.getTime() === today.getTime()) {
         return res.json({ session: toResponse(existing) });
@@ -71,18 +80,20 @@ export async function startSession(req, res, next) {
 
     try {
       const created = await prisma.attendanceSession.create({
-        data: { date: today, startedById: req.user.id },
+        data: { date: today, centerId, startedById: req.user.id },
         select: SELECT,
       });
-      logger.info({ sessionId: created.id, userId: req.user.id }, "Attendance session started");
+      logger.info({ sessionId: created.id, userId: req.user.id, centerId }, "Attendance session started");
       return res.status(201).json({ session: toResponse(created) });
     } catch (err) {
-      // Two starts raced and the database's one-active-session index rejected
-      // ours (P2002). Return the winner instead of an error.
+      // Two starts raced and the database's one-active-session-per-center index
+      // rejected ours (P2002). Return the winner instead of an error.
       if (err?.code === "P2002") {
-        const winner = await findActive();
+        const winner = await findActive(centerId);
         if (winner) return res.json({ session: toResponse(winner) });
       }
+      // An Admin named a center that doesn't exist (foreign key).
+      if (err?.code === "P2003") throw new AppError("Center not found", 404);
       throw err;
     }
   } catch (err) {
@@ -91,15 +102,17 @@ export async function startSession(req, res, next) {
 }
 
 // POST /attendance/session/stop -> { session: null }
+// Stops only the caller's own center's session; other centers keep running.
 // Idempotent: stopping when nothing is active is a no-op success.
 export async function stopSession(req, res, next) {
   try {
+    const centerId = sessionCenterFor(req);
     const { count } = await prisma.attendanceSession.updateMany({
-      where: { status: "active" },
+      where: { status: "active", centerId },
       data: { status: "closed", endedAt: new Date() },
     });
     if (count > 0) {
-      logger.info({ userId: req.user.id, count }, "Attendance session stopped");
+      logger.info({ userId: req.user.id, centerId, count }, "Attendance session stopped");
     }
     res.json({ session: null });
   } catch (err) {
@@ -114,7 +127,8 @@ export async function stopSession(req, res, next) {
 export async function getMonitor(req, res, next) {
   try {
     const scope = liveStudentScope(req.user);
-    const session = await findActive();
+    const centerId = sessionCenterFor(req, { required: false, from: "query" });
+    const session = centerId === undefined ? null : await findActive(centerId);
     if (!session) return res.json({ session: null });
 
     const now = new Date();

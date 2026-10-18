@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
-import { findActiveSession } from "../lib/activeSession.js";
+import { centerKey, findActiveSession, findActiveSessions, sessionsByCenter } from "../lib/activeSession.js";
 import { isCameraAlive, isGatewayOnline } from "../lib/hardwareStatus.js";
 import { schoolDateAsUtcMidnight, schoolMinutesOfDay } from "../utils/schoolDate.js";
 import { evaluate } from "./attendanceVerification.service.js";
@@ -26,6 +26,9 @@ import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 //
 // Silence is weak evidence, so nothing happens unless the ESP32 gateway AND the
 // camera are demonstrably alive, and the clock restarts after any outage.
+// Every center is watched on its own: its students, its session, its camera
+// and its outage clock, so one center's dead camera never pauses (and one
+// center's live camera never vouches for) another's.
 // The decisions are pure functions; runPickupWatch is the database wrapper.
 
 export const PROMPT_EVERY_MS = 60_000;
@@ -110,19 +113,30 @@ export async function autoMarkPickedUp(studentId, today, now = new Date(), { aut
 
 // ---- the periodic job -------------------------------------------------------
 
-// Start of the current "everything has been healthy" stretch; absence is never
-// counted from before it. Starts at process start (a restart is an outage too).
-let unhealthyAt = new Date();
+// Start of the current "everything has been healthy" stretch, per center;
+// absence is never counted from before it. Starts at process start (a restart
+// is an outage too).
+let healthySince = new Date();
+const unhealthyAt = new Map(); // centerKey -> when that center's hardware last looked down
+const unhealthyAtFor = (key) => unhealthyAt.get(key) ?? healthySince;
 export function resetPickupHealth(date = new Date()) {
-  unhealthyAt = date;
+  healthySince = date;
+  unhealthyAt.clear();
 }
 
-const SESSION_SELECT = { id: true, date: true, autoStarted: true, startedAt: true, stopReminderSentAt: true };
+const SESSION_SELECT = {
+  id: true,
+  date: true,
+  centerId: true,
+  autoStarted: true,
+  startedAt: true,
+  stopReminderSentAt: true,
+};
 
 // `windowStart` is when the current window opened. A pickup session that was
-// already stopped since then (by a teacher, or because everyone was picked up)
-// is not started again — Stop must mean stop — so null comes back.
-async function ensureAutoSession(today, session, windowStart) {
+// already stopped since then at this center (by a teacher, or because everyone
+// was picked up) is not started again — Stop must mean stop — so null comes back.
+async function ensureAutoSession(today, session, windowStart, centerId) {
   if (session && session.date.getTime() !== today.getTime()) {
     // Left over from a previous day: close it (guarded) like startSession does.
     await prisma.attendanceSession.updateMany({
@@ -133,20 +147,20 @@ async function ensureAutoSession(today, session, windowStart) {
   }
   if (session) return session;
   const stopped = await prisma.attendanceSession.findFirst({
-    where: { date: today, autoStarted: true, status: "closed", endedAt: { gte: windowStart } },
+    where: { date: today, centerId, autoStarted: true, status: "closed", endedAt: { gte: windowStart } },
     select: { id: true },
   });
   if (stopped) return null;
   try {
     const created = await prisma.attendanceSession.create({
-      data: { date: today, startedById: null, autoStarted: true },
+      data: { date: today, centerId, startedById: null, autoStarted: true },
       select: SESSION_SELECT,
     });
-    logger.info({ sessionId: created.id }, "Attendance session auto-started for pickup tracking");
+    logger.info({ sessionId: created.id, centerId }, "Attendance session auto-started for pickup tracking");
     return created;
   } catch (err) {
-    // Lost a race with a teacher pressing Start (database allows one active session).
-    if (err?.code === "P2002") return findActiveSession(SESSION_SELECT);
+    // Lost a race with a teacher pressing Start (database allows one active session per center).
+    if (err?.code === "P2002") return findActiveSession(centerId, SESSION_SELECT);
     throw err;
   }
 }
@@ -167,8 +181,13 @@ async function sendStopReminder(session, today, now, nowMinutes) {
     });
     if (claimed.count === 0) return;
 
+    // Only this session's center: another center's students are not its business.
     const rows = await prisma.attendance.findMany({
-      where: { date: today, status: "present", student: { session: type, teacherId: { not: null } } },
+      where: {
+        date: today,
+        status: "present",
+        student: { session: type, teacherId: { not: null }, teacher: { centerId: centerKey(session.centerId) } },
+      },
       select: { student: { select: { teacherId: true, teacher: { select: { centerId: true } } } } },
     });
     // The teachers of those students and their colleagues at the same center
@@ -202,8 +221,8 @@ export async function runPickupWatch(now = new Date()) {
   const nowMinutes = schoolMinutesOfDay(now);
   const today = schoolDateAsUtcMidnight(now);
 
-  let session = await findActiveSession(SESSION_SELECT);
-  await sendStopReminder(session, today, now, nowMinutes);
+  const sessions = sessionsByCenter(await findActiveSessions(SESSION_SELECT));
+  for (const session of sessions.values()) await sendStopReminder(session, today, now, nowMinutes);
 
   const types = sessionsInWindow(nowMinutes);
   if (types.length === 0) return;
@@ -224,17 +243,40 @@ export async function runPickupWatch(now = new Date()) {
       arrivedAt: true,
       pickedUpAt: true,
       pickedUpAuto: true,
-      student: { select: { session: true } },
+      student: { select: { session: true, teacher: { select: { centerId: true } } } },
     },
   });
+  const windowStart = instantAtMinute(now, nowMinutes, Math.min(...types.map((t) => pickupWindow(t).startMin)));
+
+  // Each center is judged on its own. A center whose last student was just
+  // picked up has no records any more but may still have a session of ours to close.
+  const byCenter = new Map();
+  for (const record of records) {
+    const key = centerKey(record.student.teacher?.centerId);
+    byCenter.set(key, [...(byCenter.get(key) ?? []), record]);
+  }
+  for (const key of sessions.keys()) if (!byCenter.has(key)) byCenter.set(key, []);
+
+  for (const [key, centerRecords] of byCenter) {
+    try {
+      await watchCenter({ key, records: centerRecords, session: sessions.get(key) ?? null, today, now, nowMinutes, windowStart });
+    } catch (err) {
+      // One center failing must not stop the others being watched.
+      logger.error({ err, centerId: key }, "Pickup watch failed for a center");
+    }
+  }
+}
+
+// One center's share of the periodic job. `session` is that center's active
+// session (or null).
+async function watchCenter({ key, records, session, today, now, nowMinutes, windowStart }) {
   const pending = records.filter((r) => !r.pickedUpAt);
   const autoPickedUp = records.filter((r) => r.pickedUpAt && r.pickedUpAuto);
 
   // No teacher has to press Start: the ESP32 only scans, and the camera only
   // sends frames, while a session is active.
   if (pending.length > 0) {
-    const windowStart = instantAtMinute(now, nowMinutes, Math.min(...types.map((t) => pickupWindow(t).startMin)));
-    session = await ensureAutoSession(today, session, windowStart);
+    session = await ensureAutoSession(today, session, windowStart, key);
   } else if (session?.autoStarted) {
     // Everyone is picked up: end the session this job started, which also
     // turns the teacher's camera off (the live page stops it with the session).
@@ -246,8 +288,8 @@ export async function runPickupWatch(now = new Date()) {
   }
   if (records.length === 0) return;
 
-  if (!session || !(await isGatewayOnline(now)) || !isCameraAlive(now)) {
-    unhealthyAt = now; // never count silence while the eyes were closed
+  if (!session || !(await isGatewayOnline(now)) || !isCameraAlive(key, now)) {
+    unhealthyAt.set(key, now); // never count silence while the eyes were closed
     return;
   }
 
@@ -287,7 +329,7 @@ export async function runPickupWatch(now = new Date()) {
         stillHereAt: stillHere.get(studentId),
         arrivedAt: record.arrivedAt,
         windowStart: instantAtMinute(now, nowMinutes, startMin),
-        unhealthyAt,
+        unhealthyAt: unhealthyAtFor(key),
       });
       const action = decidePickupAction({ now, absentSince: since, lastCheck: lastCheck.get(studentId) ?? null });
       if (action === "pick_up") {

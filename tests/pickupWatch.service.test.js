@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const db = vi.hoisted(() => ({
   prisma: {
     attendance: { findMany: vi.fn(), updateMany: vi.fn() },
-    attendanceSession: { findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
+    attendanceSession: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     attendanceSignal: { findMany: vi.fn() },
     pickupCheck: { findMany: vi.fn(), create: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     notification: { createMany: vi.fn() },
@@ -123,7 +123,10 @@ beforeEach(() => {
   isCameraAlive.mockReturnValue(true);
   prisma.attendance.findMany.mockResolvedValue([]);
   prisma.attendance.updateMany.mockResolvedValue({ count: 1 });
-  prisma.attendanceSession.findFirst.mockResolvedValue(session());
+  // The active sessions (one per center; these have no center). findFirst is only
+  // used for "was one already stopped in this window?" and the lost-race lookup.
+  prisma.attendanceSession.findMany.mockResolvedValue([session()]);
+  prisma.attendanceSession.findFirst.mockResolvedValue(null);
   prisma.attendanceSession.updateMany.mockResolvedValue({ count: 1 });
   prisma.attendanceSignal.findMany.mockResolvedValue([]);
   prisma.pickupCheck.findMany.mockResolvedValue([]);
@@ -243,29 +246,31 @@ describe("runPickupWatch — hardware must be alive", () => {
 
 describe("runPickupWatch — the session", () => {
   it("starts a session by itself so the ESP32 scans and the camera can send", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce(null); // no active session
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce(null); // none stopped earlier in the window
+    prisma.attendanceSession.findMany.mockResolvedValue([]); // no active session
+    prisma.attendanceSession.findFirst.mockResolvedValue(null); // none stopped earlier in the window
     prisma.attendanceSession.create.mockResolvedValue(session());
     prisma.attendance.findMany.mockResolvedValue([record()]);
     await runPickupWatch(at("02:31"));
     expect(prisma.attendanceSession.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { date: TODAY, startedById: null, autoStarted: true } }),
+      expect.objectContaining({ data: { date: TODAY, centerId: null, startedById: null, autoStarted: true } }),
     );
   });
 
   it("does not restart a pickup session that was stopped during this window", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce(null); // none active
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce({ id: 1 }); // one closed since the window opened
+    prisma.attendanceSession.findMany.mockResolvedValue([]); // none active
+    prisma.attendanceSession.findFirst.mockResolvedValue({ id: 1 }); // one closed since the window opened
     prisma.attendance.findMany.mockResolvedValue([record()]);
     await runPickupWatch(at("02:40"));
-    const stoppedQuery = prisma.attendanceSession.findFirst.mock.calls[1][0].where;
-    expect(stoppedQuery).toMatchObject({ date: TODAY, autoStarted: true, status: "closed", endedAt: { gte: MORNING_START } });
+    const stoppedQuery = prisma.attendanceSession.findFirst.mock.calls[0][0].where;
+    expect(stoppedQuery).toMatchObject({
+      date: TODAY, centerId: null, autoStarted: true, status: "closed", endedAt: { gte: MORNING_START },
+    });
     expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled(); // and with no session nothing is judged
   });
 
   it("does not start a session when nobody is left to watch", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValue(null);
+    prisma.attendanceSession.findMany.mockResolvedValue([]);
     prisma.attendance.findMany.mockResolvedValue([]);
     await runPickupWatch(at("02:40"));
     expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
@@ -281,15 +286,15 @@ describe("runPickupWatch — the session", () => {
   });
 
   it("leaves a teacher-started session running", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValue(session({ autoStarted: false }));
+    prisma.attendanceSession.findMany.mockResolvedValue([session({ autoStarted: false })]);
     prisma.attendance.findMany.mockResolvedValue([]);
     await runPickupWatch(at("02:37"));
     expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled();
   });
 
   it("closes a session left over from a previous day before starting a new one", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce(session({ date: T("2026-10-11T00:00:00.000Z") }));
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce(null);
+    prisma.attendanceSession.findMany.mockResolvedValue([session({ date: T("2026-10-11T00:00:00.000Z") })]);
+    prisma.attendanceSession.findFirst.mockResolvedValue(null);
     prisma.attendanceSession.create.mockResolvedValue(session());
     prisma.attendance.findMany.mockResolvedValue([record()]);
     await runPickupWatch(at("02:31"));
@@ -297,6 +302,104 @@ describe("runPickupWatch — the session", () => {
       expect.objectContaining({ where: { id: 1, status: "active" } }),
     );
     expect(prisma.attendanceSession.create).toHaveBeenCalled();
+  });
+});
+
+describe("runPickupWatch — every center on its own", () => {
+  const inCenter = (centerId, over = {}) =>
+    record({ student: { session: "morning", teacher: { centerId } }, ...over });
+  const sessionAt = (centerId, over = {}) => session({ id: 10 + centerId, centerId, ...over });
+  const markedStudents = () => prisma.attendance.updateMany.mock.calls.map(([a]) => a.where.studentId);
+
+  it("one center's dead camera pauses only that center, never another's", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([sessionAt(1), sessionAt(2)]);
+    prisma.attendance.findMany.mockResolvedValue([
+      inCenter(1, { studentId: 5 }),
+      inCenter(2, { studentId: 6, id: 101 }),
+    ]);
+    isCameraAlive.mockImplementation((centerId) => centerId === 1); // only center 1's camera is streaming
+    await runPickupWatch(at("02:40")); // 10 min of silence for both
+
+    expect(markedStudents()).toEqual([5]); // center 1 judged; center 2's silence means nothing
+    expect(isCameraAlive).toHaveBeenCalledWith(1, expect.any(Date));
+    expect(isCameraAlive).toHaveBeenCalledWith(2, expect.any(Date));
+  });
+
+  it("a center's outage restarts only that center's clock", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([sessionAt(1), sessionAt(2)]);
+    prisma.attendance.findMany.mockResolvedValue([
+      inCenter(1, { studentId: 5 }),
+      inCenter(2, { studentId: 6, id: 101 }),
+    ]);
+    isCameraAlive.mockImplementation((centerId) => centerId === 1);
+    await runPickupWatch(at("02:40")); // center 2 noticed down at 02:40
+    prisma.attendance.updateMany.mockClear();
+
+    isCameraAlive.mockReturnValue(true); // both cameras alive again
+    await runPickupWatch(at("02:41")); // center 2 has only been back 1 min: not picked up yet
+    expect(markedStudents()).toEqual([5]); // center 1 never had an outage, still judged from its own silence
+  });
+
+  it("starts a session only for the center that has someone left to watch", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([]);
+    prisma.attendance.findMany.mockResolvedValue([inCenter(2, { studentId: 6 })]);
+    prisma.attendanceSession.create.mockResolvedValue(sessionAt(2));
+    await runPickupWatch(at("02:31"));
+
+    expect(prisma.attendanceSession.create).toHaveBeenCalledTimes(1);
+    expect(prisma.attendanceSession.create.mock.calls[0][0].data).toEqual({
+      date: TODAY, centerId: 2, startedById: null, autoStarted: true,
+    });
+  });
+
+  it("looks for a stopped pickup session at the same center only", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([]);
+    prisma.attendance.findMany.mockResolvedValue([inCenter(2, { studentId: 6 })]);
+    prisma.attendanceSession.findFirst.mockResolvedValue({ id: 1 }); // center 2's was stopped
+    await runPickupWatch(at("02:40"));
+    expect(prisma.attendanceSession.findFirst.mock.calls[0][0].where).toMatchObject({ centerId: 2 });
+    expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
+  });
+
+  it("closes a center's own auto-started session once ITS students are all picked up, leaving others running", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([sessionAt(1), sessionAt(2)]);
+    prisma.attendance.findMany.mockResolvedValue([
+      inCenter(1, { studentId: 5, pickedUpAt: at("02:36"), pickedUpAuto: true }), // center 1: everyone gone
+      inCenter(2, { studentId: 6, id: 101 }), // center 2: still someone to watch
+    ]);
+    await runPickupWatch(at("02:37"));
+
+    const closed = prisma.attendanceSession.updateMany.mock.calls.filter(([a]) => a.data.status === "closed");
+    expect(closed.map(([a]) => a.where.id)).toEqual([11]); // only center 1's session
+  });
+
+  it("closes a center's session even when its last record has gone from the list", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([sessionAt(1)]);
+    prisma.attendance.findMany.mockResolvedValue([]); // nobody at all to watch
+    await runPickupWatch(at("02:37"));
+    expect(prisma.attendanceSession.updateMany).toHaveBeenCalledWith({
+      where: { id: 11, status: "active" },
+      data: { status: "closed", endedAt: at("02:37") },
+    });
+  });
+
+  it("an error at one center does not stop the others being watched", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([sessionAt(1), sessionAt(2)]);
+    prisma.attendance.findMany.mockResolvedValue([
+      inCenter(1, { studentId: 5 }),
+      inCenter(2, { studentId: 6, id: 101 }),
+    ]);
+    isGatewayOnline.mockRejectedValueOnce(new Error("db blip")); // center 1's turn fails
+    await runPickupWatch(at("02:40"));
+    expect(markedStudents()).toEqual([6]); // center 2 still handled
+  });
+
+  it("the stop reminder only goes to the session's own center", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([sessionAt(1)]);
+    prisma.attendance.findMany.mockResolvedValue([{ student: { teacherId: 3, teacher: { centerId: 1 } } }]);
+    prisma.user.findMany.mockResolvedValue([{ id: 3 }]);
+    await runPickupWatch(at("04:40"));
+    expect(prisma.attendance.findMany.mock.calls[0][0].where.student).toMatchObject({ teacher: { centerId: 1 } });
   });
 });
 
@@ -378,7 +481,7 @@ describe("runPickupWatch — stop reminder", () => {
   });
 
   it("does not repeat itself", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValue(session({ stopReminderSentAt: at("04:31") }));
+    prisma.attendanceSession.findMany.mockResolvedValue([session({ stopReminderSentAt: at("04:31") })]);
     await runPickupWatch(afterWindow);
     expect(prisma.notification.createMany).not.toHaveBeenCalled();
   });
@@ -390,7 +493,7 @@ describe("runPickupWatch — stop reminder", () => {
   });
 
   it("ignores a session that only started after the window closed", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValue(session({ startedAt: at("04:35") }));
+    prisma.attendanceSession.findMany.mockResolvedValue([session({ startedAt: at("04:35") })]);
     await runPickupWatch(afterWindow);
     expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled();
   });

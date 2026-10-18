@@ -83,8 +83,18 @@ The defaults are starting points, not measurements.
 
 ## Operating notes
 
-- **One session at a time.** Starting again returns the running one; a session left
-  open is closed automatically after 12 hours.
+- **One session per center.** Each center runs its own live session, so two centers
+  can take attendance at the same time. Starting again at a center returns its running
+  session; Start/Stop at one center never touches another's (the database allows only
+  one active session per center). A session left open is closed automatically after 12
+  hours. A Teacher's center is read from their account, never from the request. Teachers
+  with no center yet share one "no center" session. An Admin has no center of their own,
+  so their Start/Stop/monitor requests must name one (`centerId` in the body, or the
+  query for `GET`).
+- **Everything follows the student's center.** A camera frame or BLE sighting is recorded
+  in the session of *that student's* center, and ignored if that center has no session
+  running. The pickup watch judges each center on its own (its session, its camera, its
+  outage clock), so one center's dead camera never pauses another's.
 - **Camera lives on one device.** Choosing a device's camera is opt-in on the live
   screen. It turns off when you leave the page or the session ends.
 - **Deployment header**: the frontend's `vercel.json` must allow the camera

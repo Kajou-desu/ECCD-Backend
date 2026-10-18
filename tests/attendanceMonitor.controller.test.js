@@ -30,10 +30,11 @@ function mockRes() {
   res.json = vi.fn().mockReturnValue(res);
   return res;
 }
-async function monitor(user = { id: 1, role: "Admin" }) {
+// An Admin has no center of their own, so (like the real route) they name one in the query.
+async function monitor(user = { id: 1, role: "Admin" }, query = { centerId: "1" }) {
   const res = mockRes();
   const next = vi.fn();
-  await getMonitor({ user }, res, next);
+  await getMonitor({ user, query }, res, next);
   return { body: res.json.mock.calls[0]?.[0], next };
 }
 
@@ -140,6 +141,47 @@ describe("getMonitor", () => {
   });
 });
 
+describe("getMonitor — sessions are per center", () => {
+  const sessionWhere = () => prisma.attendanceSession.findFirst.mock.calls[0][0].where;
+
+  it("a Teacher sees their OWN center's session, whatever the query says", async () => {
+    await monitor({ id: 7, role: "Teacher", centerId: 2 }, { centerId: "99" });
+    expect(sessionWhere()).toEqual({ status: "active", centerId: 2 });
+  });
+
+  it("a Teacher's monitor is limited to their center's students too", async () => {
+    await monitor({ id: 7, role: "Teacher", centerId: 2 });
+    expect(prisma.attendanceSignal.findMany.mock.calls[0][0].where).toEqual({
+      sessionId: 3,
+      student: { teacher: { centerId: 2 } },
+    });
+  });
+
+  it("a Teacher with no center yet sees the shared 'no center' session", async () => {
+    await monitor({ id: 7, role: "Teacher" });
+    expect(sessionWhere()).toEqual({ status: "active", centerId: null });
+  });
+
+  it("an Admin sees the session of the center they named", async () => {
+    await monitor({ id: 1, role: "Admin" }, { centerId: "4" });
+    expect(sessionWhere()).toEqual({ status: "active", centerId: 4 });
+  });
+
+  it("an Admin who names no center sees no session, and nothing is read", async () => {
+    const { body } = await monitor({ id: 1, role: "Admin" }, {});
+    expect(body).toEqual({ session: null });
+    expect(prisma.attendanceSession.findFirst).not.toHaveBeenCalled();
+    expect(prisma.attendanceSignal.findMany).not.toHaveBeenCalled();
+  });
+
+  it("an Admin naming a malformed center is rejected before anything is read", async () => {
+    const { body, next } = await monitor({ id: 1, role: "Admin" }, { centerId: ["1", "2"] });
+    expect(body).toBeUndefined();
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    expect(prisma.attendanceSession.findFirst).not.toHaveBeenCalled();
+  });
+});
+
 describe("getMonitor — whose students are shown", () => {
   it("a Teacher's monitor only reads signals and verifications of their own students", async () => {
     await monitor({ id: 7, role: "Teacher" });
@@ -151,7 +193,7 @@ describe("getMonitor — whose students are shown", () => {
   });
 
   it("denies any other role", async () => {
-    const { body, next } = await monitor({ id: 3, role: "Parent" });
+    const { body, next } = await monitor({ id: 3, role: "Parent" }, {});
     expect(body).toBeUndefined();
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });

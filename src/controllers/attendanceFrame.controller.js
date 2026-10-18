@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
-import { findActiveSession } from "../lib/activeSession.js";
+import { centerKey, findActiveSessionsFor, sessionsByCenter } from "../lib/activeSession.js";
 import { touchCamera } from "../lib/hardwareStatus.js";
 import { recordSignal } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured, recognizeFrame } from "../services/recognitionClient.js";
@@ -35,8 +35,10 @@ export async function processFrame(req, res, next) {
       return res.status(503).json({ message: "Recognition unavailable" });
     }
 
-    const session = await findActiveSession();
-    if (!session) {
+    // Sessions are per center: a Teacher can only feed their own center's, so a
+    // frame never lands in another center's session.
+    const sessions = sessionsByCenter(await findActiveSessionsFor(req.user));
+    if (sessions.size === 0) {
       return res.status(409).json({ message: "No active attendance session" });
     }
 
@@ -51,7 +53,10 @@ export async function processFrame(req, res, next) {
       logger.error({ err }, "Face recognition request failed");
       return res.status(502).json({ message: "Recognition unavailable" });
     }
-    touchCamera(); // the pickup watch only trusts "not seen" while frames are flowing
+    // The pickup watch only trusts "not seen" while frames are flowing, judged per
+    // center. An Admin's frames can't say which center's camera this is, so they
+    // vouch for none (the safe side: no automatic pickups on their account).
+    if (req.user.role === "Teacher") touchCamera(req.user.centerId);
 
     // One student appearing as two faces in the same frame is impossible, so
     // it means at least one is a mis-match: trust neither.
@@ -61,14 +66,19 @@ export async function processFrame(req, res, next) {
     }
     const candidates = result.faces.filter((f) => isConfidentMatch(f) && counts.get(f.studentId) === 1);
 
-    const students = candidates.length
+    const found = candidates.length
       ? await prisma.student.findMany({
           // Faces of students outside the caller's own list are dropped here, so
           // they show up as an unnamed box and never get a signal recorded.
           where: { id: { in: candidates.map((f) => f.studentId) }, status: "active", ...scope },
-          select: { id: true, name: true },
+          select: { id: true, name: true, teacher: { select: { centerId: true } } },
         })
       : [];
+    // Each student's signal goes to THEIR center's session; one whose center has
+    // no session running is treated like an unknown face (an unnamed box).
+    const students = found
+      .map((s) => ({ id: s.id, name: s.name, session: sessions.get(centerKey(s.teacher?.centerId)) }))
+      .filter((s) => s.session);
     const studentById = new Map(students.map((s) => [s.id, s]));
 
     const verified = [];
@@ -79,16 +89,17 @@ export async function processFrame(req, res, next) {
     // the smoothing only needs ONE student's readings to arrive in order, and
     // each frame is a single reading per student. Results keep the face order.
     const known = candidates.filter((face) => studentById.has(face.studentId)); // unknown or inactive: ignore
-    const outcomes = await mapWithLimit(known, SIGNAL_CONCURRENCY, (face) =>
-      recordSignal({
+    const outcomes = await mapWithLimit(known, SIGNAL_CONCURRENCY, (face) => {
+      const { session } = studentById.get(face.studentId);
+      return recordSignal({
         sessionId: session.id,
         sessionDate: session.date,
         studentId: face.studentId,
         kind: "face",
         value: face.distance,
         now,
-      }),
-    );
+      });
+    });
     known.forEach((face, i) => {
       if (outcomes[i].state !== "verified") return;
       const student = studentById.get(face.studentId);

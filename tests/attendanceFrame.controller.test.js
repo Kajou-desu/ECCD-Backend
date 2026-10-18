@@ -1,7 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../src/lib/prisma.js", () => ({ prisma: { student: { findMany: vi.fn() } } }));
-vi.mock("../src/lib/activeSession.js", () => ({ findActiveSession: vi.fn() }));
+// Only the database lookup is replaced; centerKey / sessionsByCenter stay real.
+vi.mock("../src/lib/activeSession.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  findActiveSessionsFor: vi.fn(),
+}));
+vi.mock("../src/lib/hardwareStatus.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  touchCamera: vi.fn(),
+}));
 vi.mock("../src/services/attendanceVerification.service.js", () => ({ recordSignal: vi.fn() }));
 vi.mock("../src/services/recognitionClient.js", () => ({
   isRecognitionConfigured: vi.fn(),
@@ -9,14 +17,15 @@ vi.mock("../src/services/recognitionClient.js", () => ({
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { findActiveSession } = await import("../src/lib/activeSession.js");
+const { findActiveSessionsFor } = await import("../src/lib/activeSession.js");
+const { touchCamera } = await import("../src/lib/hardwareStatus.js");
 const { recordSignal } = await import("../src/services/attendanceVerification.service.js");
 const { isRecognitionConfigured, recognizeFrame } = await import("../src/services/recognitionClient.js");
 const { processFrame, isJpeg, isConfidentMatch } = await import("../src/controllers/attendanceFrame.controller.js");
 
 const CFG = { faceMaxDistance: 0.5, faceMinMargin: 0.05 };
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
-const SESSION = { id: 3, date: new Date("2026-09-20T00:00:00.000Z") };
+const SESSION = { id: 3, date: new Date("2026-09-20T00:00:00.000Z"), centerId: null };
 const ADMIN = { id: 1, role: "Admin" };
 const TEACHER = { id: 7, role: "Teacher" };
 const face = (over = {}) => ({ box: [1, 2, 3, 4], studentId: 5, distance: 0.4, margin: 0.2, ...over });
@@ -37,7 +46,7 @@ const run = async (over = {}) => {
 beforeEach(() => {
   vi.clearAllMocks();
   isRecognitionConfigured.mockReturnValue(true);
-  findActiveSession.mockResolvedValue(SESSION);
+  findActiveSessionsFor.mockResolvedValue([SESSION]);
   recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [] });
   prisma.student.findMany.mockResolvedValue([{ id: 5, name: "Ana Reyes" }]);
   recordSignal.mockResolvedValue({ state: "pending" });
@@ -78,12 +87,12 @@ describe("processFrame — gating", () => {
     isRecognitionConfigured.mockReturnValue(false);
     const { res } = await run();
     expect(res.status).toHaveBeenCalledWith(503);
-    expect(findActiveSession).not.toHaveBeenCalled();
+    expect(findActiveSessionsFor).not.toHaveBeenCalled();
     expect(recognizeFrame).not.toHaveBeenCalled();
   });
 
   it("409 when no session is active: the frame is never forwarded", async () => {
-    findActiveSession.mockResolvedValue(null);
+    findActiveSessionsFor.mockResolvedValue([]);
     const { res } = await run();
     expect(res.status).toHaveBeenCalledWith(409);
     expect(recognizeFrame).not.toHaveBeenCalled();
@@ -189,9 +198,69 @@ describe("processFrame — recognition outcomes", () => {
 
   it("passes unexpected errors to next()", async () => {
     const err = new Error("db down");
-    findActiveSession.mockRejectedValue(err);
+    findActiveSessionsFor.mockRejectedValue(err);
     const { next } = await run();
     expect(next).toHaveBeenCalledWith(err);
+  });
+});
+
+describe("processFrame — sessions are per center", () => {
+  const DATE = new Date("2026-09-20T00:00:00.000Z");
+  const CENTER_1 = { id: 3, date: DATE, centerId: 1 };
+  const CENTER_2 = { id: 4, date: DATE, centerId: 2 };
+  const student = (id, centerId) => ({ id, name: `Student ${id}`, teacher: centerId === undefined ? null : { centerId } });
+
+  it("a Teacher's frame is only ever offered their own center's session", async () => {
+    const teacher = { id: 7, role: "Teacher", centerId: 1 };
+    await run({ user: teacher });
+    expect(findActiveSessionsFor).toHaveBeenCalledWith(teacher);
+  });
+
+  it("records each student's signal in THEIR center's session", async () => {
+    findActiveSessionsFor.mockResolvedValue([CENTER_1, CENTER_2]);
+    prisma.student.findMany.mockResolvedValue([student(5, 1), student(6, 2)]);
+    recognizeFrame.mockResolvedValue({
+      width: 640, height: 480,
+      faces: [face(), face({ studentId: 6, box: [5, 6, 7, 8] })],
+    });
+    await run({ user: ADMIN });
+
+    const sessionOf = Object.fromEntries(recordSignal.mock.calls.map(([a]) => [a.studentId, a.sessionId]));
+    expect(sessionOf).toEqual({ 5: 3, 6: 4 });
+  });
+
+  it("a student whose center has no session running is an unnamed box and records nothing", async () => {
+    findActiveSessionsFor.mockResolvedValue([CENTER_1]);
+    prisma.student.findMany.mockResolvedValue([student(5, 1), student(6, 2)]);
+    recognizeFrame.mockResolvedValue({
+      width: 640, height: 480,
+      faces: [face(), face({ studentId: 6, box: [5, 6, 7, 8] })],
+    });
+    const { body } = await run({ user: ADMIN });
+
+    expect(recordSignal).toHaveBeenCalledTimes(1);
+    expect(recordSignal.mock.calls[0][0]).toMatchObject({ studentId: 5, sessionId: 3 });
+    expect(body.faces.map((f) => f.student?.id ?? null)).toEqual([5, null]);
+  });
+
+  it("never leaks which session or center a student belongs to", async () => {
+    findActiveSessionsFor.mockResolvedValue([CENTER_1]);
+    prisma.student.findMany.mockResolvedValue([student(5, 1)]);
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    const { body } = await run({ user: ADMIN });
+    expect(JSON.stringify(body)).not.toMatch(/session|center/i);
+  });
+
+  it("a Teacher's frames vouch for their own center's camera only", async () => {
+    await run({ user: { id: 7, role: "Teacher", centerId: 41 } });
+    expect(touchCamera).toHaveBeenCalledTimes(1);
+    expect(touchCamera).toHaveBeenCalledWith(41);
+  });
+
+  it("an Admin's frames vouch for no center's camera", async () => {
+    await run({ user: ADMIN });
+    expect(recognizeFrame).toHaveBeenCalled(); // the frame was processed...
+    expect(touchCamera).not.toHaveBeenCalled(); // ...but proves nothing about any center's camera
   });
 });
 

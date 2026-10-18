@@ -3,11 +3,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: { studentBleDevice: { findMany: vi.fn() } },
 }));
-vi.mock("../src/lib/activeSession.js", () => ({ findActiveSession: vi.fn() }));
+// Only the database lookup is replaced; centerKey / sessionsByCenter stay real.
+vi.mock("../src/lib/activeSession.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  findActiveSessions: vi.fn(),
+}));
 vi.mock("../src/services/attendanceVerification.service.js", () => ({ recordSignal: vi.fn() }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { findActiveSession } = await import("../src/lib/activeSession.js");
+const { findActiveSessions } = await import("../src/lib/activeSession.js");
 const { recordSignal } = await import("../src/services/attendanceVerification.service.js");
 const { mapWithLimit } = await import("../src/utils/concurrency.js");
 const { postEvents } = await import("../src/controllers/attendanceGateway.controller.js");
@@ -58,7 +62,7 @@ describe("gateway events", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    findActiveSession.mockResolvedValue({ id: 1, date: new Date("2026-10-13") });
+    findActiveSessions.mockResolvedValue([{ id: 1, date: new Date("2026-10-13"), centerId: null }]);
   });
 
   it("records different students together but one student's tags in order", async () => {
@@ -100,7 +104,7 @@ describe("gateway events", () => {
 
   it("answers an unaffected heartbeat and an idle gateway as before", async () => {
     expect(await run([])).toEqual({ sessionActive: true, accepted: 0 });
-    findActiveSession.mockResolvedValue(null);
+    findActiveSessions.mockResolvedValue([]);
     expect(await run([{ deviceIdentifier: "AA:00", rssi: -50 }])).toEqual({ sessionActive: false, accepted: 0 });
   });
 });

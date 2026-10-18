@@ -7,7 +7,10 @@ process.env.CLIENT_ORIGIN = "http://localhost:5173";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: { $queryRaw: vi.fn(), user: { findUnique: vi.fn() }, student: { findMany: vi.fn() } },
 }));
-vi.mock("../src/lib/activeSession.js", () => ({ findActiveSession: vi.fn() }));
+vi.mock("../src/lib/activeSession.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  findActiveSessionsFor: vi.fn(),
+}));
 vi.mock("../src/services/attendanceVerification.service.js", () => ({ recordSignal: vi.fn() }));
 vi.mock("../src/services/recognitionClient.js", () => ({
   isRecognitionConfigured: vi.fn(() => true),
@@ -15,7 +18,7 @@ vi.mock("../src/services/recognitionClient.js", () => ({
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { findActiveSession } = await import("../src/lib/activeSession.js");
+const { findActiveSessionsFor } = await import("../src/lib/activeSession.js");
 const { recognizeFrame } = await import("../src/services/recognitionClient.js");
 const { signToken } = await import("../src/utils/jwt.js");
 const { app } = await import("../src/app.js");
@@ -31,7 +34,7 @@ function auth(role = "Teacher") {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  findActiveSession.mockResolvedValue({ id: 3, date: new Date() });
+  findActiveSessionsFor.mockResolvedValue([{ id: 3, date: new Date(), centerId: null }]);
   recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [] });
 });
 

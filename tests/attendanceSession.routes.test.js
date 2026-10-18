@@ -80,10 +80,52 @@ describe("attendance session routes — access control (default deny)", () => {
     const res = await request(app)
       .post("/api/attendance/session/start")
       .set("Authorization", auth)
-      .send({ startedById: 1, date: "1999-01-01" });
+      .send({ startedById: 1, date: "1999-01-01", centerId: 99 });
 
     expect(res.status).toBe(201);
-    expect(prisma.attendanceSession.create.mock.calls[0][0].data.startedById).toBe(42);
+    const { data } = prisma.attendanceSession.create.mock.calls[0][0];
+    expect(data.startedById).toBe(42);
+    expect(data.centerId).toBeNull(); // this Teacher has no center; the body's 99 is ignored
+  });
+
+  it("a Teacher's session belongs to the center on their account, not the one they name", async () => {
+    const user = { id: 42, email: "u42@school.test", role: "Teacher", centerId: 2, isActive: true, tokenVersion: 0 };
+    prisma.user.findUnique.mockResolvedValue(user);
+    prisma.attendanceSession.create.mockResolvedValue({
+      id: 1, date: new Date("2026-09-20T00:00:00.000Z"), status: "active", startedAt: new Date(), endedAt: null,
+    });
+    const auth = `Bearer ${signToken(user)}`;
+
+    await request(app).post("/api/attendance/session/start").set("Authorization", auth).send({ centerId: 99 });
+    await request(app).post("/api/attendance/session/stop?centerId=99").set("Authorization", auth).send({ centerId: 99 });
+
+    expect(prisma.attendanceSession.create.mock.calls[0][0].data.centerId).toBe(2);
+    expect(prisma.attendanceSession.updateMany.mock.calls[0][0].where).toEqual({ status: "active", centerId: 2 });
+  });
+
+  it("an Admin must say which center: 400 without one, and nothing is written", async () => {
+    const auth = loginAs("Admin", 1);
+    for (const body of [{}, { centerId: "x" }, { centerId: 0 }]) {
+      const res = await request(app).post("/api/attendance/session/start").set("Authorization", auth).send(body);
+      expect(res.status).toBe(400);
+    }
+    const stop = await request(app).post("/api/attendance/session/stop").set("Authorization", auth).send({});
+    expect(stop.status).toBe(400);
+    expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
+    expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("an Admin can start and read the center they name", async () => {
+    const auth = loginAs("Admin", 1);
+    prisma.attendanceSession.create.mockResolvedValue({
+      id: 1, date: new Date("2026-09-20T00:00:00.000Z"), status: "active", startedAt: new Date(), endedAt: null,
+    });
+    const started = await request(app).post("/api/attendance/session/start").set("Authorization", auth).send({ centerId: 3 });
+    expect(started.status).toBe(201);
+    expect(prisma.attendanceSession.create.mock.calls[0][0].data.centerId).toBe(3);
+
+    await request(app).get("/api/attendance/session/current?centerId=3").set("Authorization", auth);
+    expect(prisma.attendanceSession.findFirst.mock.calls.at(-1)[0].where).toEqual({ status: "active", centerId: 3 });
   });
 
   describe("pickup check answers", () => {
