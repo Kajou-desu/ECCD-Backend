@@ -26,7 +26,11 @@ router.put("/me", requireAuth, profileUpdateLimiter, updateMyProfile);
 router.post("/me/photo", requireAuth, upload.single("photo", { imagesOnly: true }), uploadMyProfilePhoto);
 router.post("/me/password/request-otp", requireAuth, accountOtpLimiter, requestPasswordChangeOtp);
 router.put("/me/password", requireAuth, accountOtpLimiter, auditOwnPasswordChange, changeMyPassword);
-router.post("/me/delete/request-otp", requireAuth, accountOtpLimiter, requestAccountDeletionOtp);
-router.delete("/me", requireAuth, accountOtpLimiter, auditOwnAccountDelete, deleteMyAccount);
+// Self-deletion is Admin-only: Teacher and Parent/Guardian accounts are removed
+// by an Admin (DELETE /users/delete/:id), which also keeps a family's or a
+// class's data from vanishing on a single tap. deleteMyAccount still refuses to
+// remove the last Admin.
+router.post("/me/delete/request-otp", requireAuth, requireRole("Admin"), accountOtpLimiter, requestAccountDeletionOtp);
+router.delete("/me", requireAuth, requireRole("Admin"), accountOtpLimiter, auditOwnAccountDelete, deleteMyAccount);
 
 export default router;

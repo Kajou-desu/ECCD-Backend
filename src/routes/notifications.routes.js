@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireRole } from "../middleware/auth.js";
 import { notificationIpLimiter, notificationUserLimiter } from "../middleware/rateLimit.js";
 import {
   getNotifications,
@@ -20,11 +20,15 @@ const router = Router();
 router.use(notificationIpLimiter, requireAuth, notificationUserLimiter);
 
 router.get("/", getNotifications);
-router.get("/preferences", getNotificationPreferences);
-router.put("/preferences", updateNotificationPreferences);
-router.get("/push/public-key", getPushPublicKey);
-router.post("/push/subscribe", subscribePush);
-router.post("/push/unsubscribe", unsubscribePush);
+// Email/SMS/push alerts are only ever sent to parents and guardians (see
+// attendanceNotification.service.js); staff receive in-app notifications only,
+// so these settings endpoints are closed to them.
+const parentsOnly = requireRole("Parent", "Guardian");
+router.get("/preferences", parentsOnly, getNotificationPreferences);
+router.put("/preferences", parentsOnly, updateNotificationPreferences);
+router.get("/push/public-key", parentsOnly, getPushPublicKey);
+router.post("/push/subscribe", parentsOnly, subscribePush);
+router.post("/push/unsubscribe", parentsOnly, unsubscribePush);
 router.patch("/read-all", markAllNotificationsRead);
 router.patch("/:id/read", markNotificationRead);
 router.delete("/:id", dismissNotification);
