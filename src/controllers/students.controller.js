@@ -27,6 +27,9 @@ import { schoolDateString } from "../utils/schoolDate.js";
 // UploadStudentWork picker, useStudents search).
 const LIST_SELECT = {
   id: true,
+  // Which Teacher a student is with: lets an Admin see who has enrolled students
+  // before moving that Teacher to another center.
+  teacherId: true,
   // Only to tell which center a student is at (see teacherCenterId below).
   teacher: { select: { centerId: true } },
   studentCode: true,

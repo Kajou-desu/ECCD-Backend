@@ -29,6 +29,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     student: {
       findMany: vi.fn(),
       count: vi.fn(),
+      updateMany: vi.fn(),
     },
     accountActionOtp: {
       findFirst: vi.fn(),
@@ -874,9 +875,12 @@ describe("parent/guardian <-> student linking", () => {
 
   it("links a new Parent account to students that already list its email", async () => {
     stubRegister();
-    prisma.student.findMany.mockResolvedValue([{ id: 3 }, { id: 4 }]);
+    // 1st lookup derives the center from the selected student, 2nd matches by email.
+    prisma.student.findMany
+      .mockResolvedValueOnce([{ id: 3, name: "Kai", teacher: { centerId: 3 } }])
+      .mockResolvedValue([{ id: 3 }, { id: 4 }]);
 
-    await registerUser({ body: { ...linkBody }, user: admin }, mockRes(), vi.fn());
+    await registerUser({ body: { ...linkBody, studentIds: [3] }, user: admin }, mockRes(), vi.fn());
 
     expect(prisma.student.findMany).toHaveBeenCalledWith({
       where: {
@@ -997,9 +1001,11 @@ describe("parent/guardian <-> student linking", () => {
       .mockResolvedValueOnce({ id: 5, centerId: 3, role: "Teacher", email: "g@example.com" })
       .mockResolvedValue({ id: 5, children: [] });
     prisma.user.update.mockResolvedValue({ id: 5 });
-    prisma.student.findMany.mockResolvedValue([{ id: 3 }]);
+    prisma.student.findMany
+      .mockResolvedValueOnce([{ id: 3, name: "Kai", teacher: { centerId: 3 } }])
+      .mockResolvedValue([{ id: 3 }]);
 
-    await updateUser({ body: { userId: 5, role: "Guardian" }, user: admin }, mockRes(), vi.fn());
+    await updateUser({ body: { userId: 5, role: "Guardian", studentIds: [3] }, user: admin }, mockRes(), vi.fn());
 
     expect(prisma.parentChild.createMany).toHaveBeenCalled();
   });
@@ -1318,8 +1324,7 @@ describe("a Parent/Guardian must be connected to a student", () => {
     prisma.user.findUnique.mockResolvedValue({ id: 9, children: [] });
   });
 
-  it("rejects a new Parent with no students and no email match, and the save is rolled back", async () => {
-    prisma.parentChild.findFirst.mockResolvedValueOnce(null);
+  it("rejects a new Parent with no students, before anything is written", async () => {
     const next = vi.fn();
 
     await registerUser({ body, user: admin }, mockRes(), next);
@@ -1327,16 +1332,16 @@ describe("a Parent/Guardian must be connected to a student", () => {
     expect(next).toHaveBeenCalledWith(
       expect.objectContaining({ status: 400, message: expect.stringMatching(/connected to at least one student/) }),
     );
-    // thrown inside the transaction callback, so Prisma rolls the create back
-    expect(prisma.$transaction).toHaveBeenCalled();
+    expect(prisma.user.create).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it("accepts a new Parent whose email matches a student at the same center", async () => {
-    prisma.student.findMany.mockResolvedValue([{ id: 3 }]);
+  it("accepts a new Parent connected to a student, at that student's center", async () => {
+    prisma.student.findMany.mockResolvedValue([{ id: 3, name: "Kai", teacher: { centerId: 3 } }]);
     prisma.parentChild.findFirst.mockResolvedValueOnce({ id: 1 });
     const res = mockRes();
 
-    await registerUser({ body, user: admin }, res, vi.fn());
+    await registerUser({ body: { ...body, studentIds: [3] }, user: admin }, res, vi.fn());
 
     expect(res.status).toHaveBeenCalledWith(201);
   });
@@ -1387,12 +1392,15 @@ describe("account centers", () => {
     prisma.center.findUnique.mockResolvedValue({ id: 3 });
   });
 
-  it("requires an Admin to choose a center for a new Parent, Guardian or Teacher", async () => {
+  it("requires an Admin to choose a center for a new Teacher, and students for a new Parent or Guardian", async () => {
     const next = vi.fn();
-
-    await registerUser({ body, user: admin }, mockRes(), next);
-
+    await registerUser({ body: { ...body, role: "Teacher" }, user: admin }, mockRes(), next);
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400, message: "Choose the center for this account." }));
+
+    const next2 = vi.fn();
+    await registerUser({ body, user: admin }, mockRes(), next2);
+    expect(next2).toHaveBeenCalledWith(expect.objectContaining({ status: 400, message: expect.stringMatching(/at least one student/) }));
+
     expect(prisma.user.create).not.toHaveBeenCalled();
   });
 
@@ -1400,31 +1408,65 @@ describe("account centers", () => {
     prisma.center.findUnique.mockResolvedValue(null);
     const next = vi.fn();
 
-    await registerUser({ body: { ...body, centerId: 77 }, user: admin }, mockRes(), next);
+    await registerUser({ body: { ...body, role: "Teacher", centerId: 77 }, user: admin }, mockRes(), next);
 
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400, message: expect.stringMatching(/no longer exists/) }));
     expect(prisma.user.create).not.toHaveBeenCalled();
   });
 
-  it("rejects students from another center when an Admin connects them", async () => {
+  it("gives a Parent the center of their students, ignoring any centerId in the request", async () => {
+    prisma.student.findMany.mockResolvedValue([
+      { id: 1, name: "Kai Moran", teacher: { centerId: 4 } },
+      { id: 2, name: "Ana Cruz", teacher: { centerId: 4 } },
+    ]);
+
+    await registerUser({ body: { ...body, centerId: 3, studentIds: [1, 2] }, user: admin }, mockRes(), vi.fn());
+
+    expect(prisma.user.create.mock.calls[0][0].data.centerId).toBe(4);
+  });
+
+  it("rejects students that have no teacher at a center", async () => {
     prisma.student.findMany.mockResolvedValue([
       { id: 1, name: "Kai Moran", teacher: { centerId: 3 } },
-      { id: 2, name: "Ana Cruz", teacher: { centerId: 4 } },
       { id: 3, name: "Lu Reyes", teacher: null },
     ]);
     const next = vi.fn();
 
-    await registerUser({ body: { ...body, centerId: 3, studentIds: [1, 2, 3] }, user: admin }, mockRes(), next);
+    await registerUser({ body: { ...body, studentIds: [1, 3] }, user: admin }, mockRes(), next);
 
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400, message: expect.stringMatching(/Ana Cruz, Lu Reyes/) }));
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400, message: expect.stringMatching(/Lu Reyes/) }));
     expect(prisma.user.create).not.toHaveBeenCalled();
   });
 
-  it("only an Admin can move an account to another center", async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 5, centerId: 3, role: "Parent", email: "maria@example.com" });
+  it("rejects students from different centers", async () => {
+    prisma.student.findMany.mockResolvedValue([
+      { id: 1, name: "Kai Moran", teacher: { centerId: 3 } },
+      { id: 2, name: "Ana Cruz", teacher: { centerId: 4 } },
+    ]);
+    const next = vi.fn();
+
+    await registerUser({ body: { ...body, studentIds: [1, 2] }, user: admin }, mockRes(), next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400, message: expect.stringMatching(/different centers/) }));
+    expect(prisma.user.create).not.toHaveBeenCalled();
+  });
+
+  it("ignores a centerId sent for a Parent/Guardian, even from an Admin", async () => {
+    prisma.user.findUnique.mockReset();
+    prisma.user.findUnique.mockResolvedValueOnce({ id: 5, centerId: 3, role: "Parent", email: "maria@example.com" }).mockResolvedValue({ id: 5, children: [] });
+    prisma.user.update.mockResolvedValue({ id: 5 });
+
+    await updateUser({ body: { userId: 5, centerId: 4, firstName: "Maria" }, user: admin }, mockRes(), vi.fn());
+
+    expect(prisma.user.update.mock.calls[0][0].data).not.toHaveProperty("centerId");
+  });
+
+  it("only an Admin can move a Teacher to another center", async () => {
+    prisma.user.findUnique.mockReset();
+    prisma.user.findUnique.mockResolvedValue({ id: 5, centerId: 3, role: "Teacher", email: "t@example.com" });
     const res = mockRes();
 
-    await updateUser({ body: { userId: 5, centerId: 4 }, user: { id: 7, role: "Teacher", centerId: 3 } }, res, vi.fn());
+    await updateUser({ body: { userId: 5, centerId: 4 }, user: { id: 5, role: "Teacher", centerId: 3 } }, res, vi.fn());
 
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith({ message: "Only an Admin can change an account's center" });
@@ -1432,6 +1474,7 @@ describe("account centers", () => {
   });
 
   it("lets the edit form resend the unchanged center", async () => {
+    prisma.user.findUnique.mockReset();
     prisma.user.findUnique.mockResolvedValueOnce({ id: 5, centerId: 3, role: "Parent", email: "maria@example.com" }).mockResolvedValue({ id: 5, children: [] });
     prisma.user.update.mockResolvedValue({ id: 5 });
     const res = mockRes();
@@ -1442,22 +1485,27 @@ describe("account centers", () => {
     expect(res.status).not.toHaveBeenCalledWith(403);
   });
 
-  it("re-matches students by email when an Admin moves an account to another center, and checks every link", async () => {
+  it("re-derives a Parent's center when an Admin connects students of another center, and checks every link", async () => {
+    prisma.user.findUnique.mockReset();
     prisma.user.findUnique.mockResolvedValueOnce({ id: 5, centerId: 3, role: "Parent", email: "maria@example.com" }).mockResolvedValue({ id: 5, children: [] });
     prisma.user.update.mockResolvedValue({ id: 5 });
-    prisma.center.findUnique.mockResolvedValue({ id: 4 });
-    prisma.student.findMany.mockResolvedValue([{ id: 8 }]);
+    prisma.student.findMany
+      .mockResolvedValueOnce([{ id: 8, name: "New Kid", teacher: { centerId: 4 } }])
+      .mockResolvedValue([{ id: 8 }]);
     prisma.parentChild.findMany.mockResolvedValue([{ student: { name: "Old Kid", teacher: { centerId: 3 } } }]);
     const next = vi.fn();
 
-    await updateUser({ body: { userId: 5, centerId: 4 }, user: admin }, mockRes(), next);
+    await updateUser({ body: { userId: 5, studentIds: [8] }, user: admin }, mockRes(), next);
 
-    expect(prisma.student.findMany.mock.calls[0][0].where.teacher).toEqual({ centerId: 4 });
+    expect(prisma.user.update.mock.calls[0][0].data.centerId).toBe(4);
+    expect(prisma.student.findMany.mock.calls[1][0].where.teacher).toEqual({ centerId: 4 });
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400, message: expect.stringMatching(/Old Kid/) }));
   });
 
   it("will not leave a Teacher, Parent or Guardian without a center", async () => {
+    prisma.user.findUnique.mockReset();
     prisma.user.findUnique.mockResolvedValue({ id: 5, centerId: null, role: "Parent", email: "maria@example.com" });
+    prisma.parentChild.findMany.mockReset().mockResolvedValue([]);
     const res = mockRes();
 
     await updateUser({ body: { userId: 5, firstName: "Maria" }, user: admin }, res, vi.fn());
@@ -1501,46 +1549,131 @@ describe("account form messages", () => {
 describe("moving a Teacher to another center", () => {
   const admin = { id: 1, role: "Admin" };
   const existingTeacher = { id: 5, role: "Teacher", centerId: 3, email: "t@example.com" };
+  const sameCenterTeacher = { role: "Teacher", centerId: 3, isActive: true };
 
-  beforeEach(() => {
-    prisma.user.findUnique.mockResolvedValueOnce(existingTeacher).mockResolvedValue({ id: 5, children: [] });
+  // findUnique is read in order: the account being edited, then (for a transfer)
+  // the teacher taking over, then the saved account.
+  function stub({ students = 0, nextTeacher, families = [] } = {}) {
+    prisma.user.findUnique.mockReset();
+    prisma.user.findUnique.mockResolvedValueOnce(existingTeacher);
+    if (nextTeacher) prisma.user.findUnique.mockResolvedValueOnce(nextTeacher);
+    prisma.user.findUnique.mockResolvedValue({ id: 5, children: [] });
     prisma.user.update.mockResolvedValue({ id: 5 });
+    prisma.user.findMany.mockReset().mockResolvedValue(families);
+    prisma.user.updateMany.mockReset().mockResolvedValue({ count: families.length });
+    prisma.student.count.mockReset().mockResolvedValue(students);
+    prisma.student.updateMany.mockReset().mockResolvedValue({ count: students });
     prisma.center.findUnique.mockResolvedValue({ id: 4 });
-    prisma.user.count.mockReset();
-  });
+  }
 
-  it("is refused while Parent/Guardian accounts of the old center are connected to the Teacher's students", async () => {
-    prisma.user.count.mockResolvedValue(3);
+  it("needs no choice when the teacher has no enrolled students", async () => {
+    stub({ students: 0 });
     const next = vi.fn();
 
     await updateUser({ body: { userId: 5, centerId: 4 }, user: admin }, mockRes(), next);
 
-    expect(prisma.user.count).toHaveBeenCalledWith({
-      where: {
-        role: { in: ["Parent", "Guardian"] },
-        OR: [{ centerId: null }, { centerId: { not: 4 } }],
-        children: { some: { student: { teacherId: 5 } } },
-      },
-    });
-    expect(next).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 400, message: expect.stringMatching(/3 parent\/guardian accounts are connected to this Teacher's students/) }),
-    );
+    expect(next).not.toHaveBeenCalled();
+    expect(prisma.user.update.mock.calls[0][0].data.centerId).toBe(4);
+    expect(prisma.student.updateMany).not.toHaveBeenCalled();
   });
 
-  it("goes through when no account would be left behind", async () => {
-    prisma.user.count.mockResolvedValue(0);
+  it("is refused, with nothing assumed, when students are enrolled and no choice was made", async () => {
+    stub({ students: 4 });
     const next = vi.fn();
-    const res = mockRes();
 
-    await updateUser({ body: { userId: 5, centerId: 4 }, user: admin }, res, next);
+    await updateUser({ body: { userId: 5, centerId: 4 }, user: admin }, mockRes(), next);
+
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 400, message: expect.stringMatching(/move with the teacher or are transferred/) }),
+    );
+    expect(prisma.student.updateMany).not.toHaveBeenCalled();
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("'move' takes the students and their families along to the new center", async () => {
+    stub({ students: 2, families: [{ id: 21, name: "Maria", children: [{ student: { teacherId: 5 } }] }] });
+    const next = vi.fn();
+
+    await updateUser({ body: { userId: 5, centerId: 4, studentAction: "move" }, user: admin }, mockRes(), next);
 
     expect(next).not.toHaveBeenCalled();
+    expect(prisma.user.updateMany).toHaveBeenCalledWith({ where: { id: { in: [21] } }, data: { centerId: 4 } });
+    expect(prisma.student.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("'move' is refused while a family is also connected to another teacher's student", async () => {
+    stub({
+      students: 2,
+      families: [{ id: 21, name: "Maria Santos", children: [{ student: { teacherId: 5 } }, { student: { teacherId: 6 } }] }],
+    });
+    const next = vi.fn();
+
+    await updateUser({ body: { userId: 5, centerId: 4, studentAction: "move" }, user: admin }, mockRes(), next);
+
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 400, message: expect.stringMatching(/Maria Santos/) }),
+    );
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("'transfer' hands every student to a teacher at the current center", async () => {
+    stub({ students: 3, nextTeacher: sameCenterTeacher });
+    const next = vi.fn();
+
+    await updateUser(
+      { body: { userId: 5, centerId: 4, studentAction: "transfer", newTeacherId: 8 }, user: admin },
+      mockRes(),
+      next,
+    );
+
+    expect(next).not.toHaveBeenCalled();
+    expect(prisma.student.updateMany).toHaveBeenCalledWith({ where: { teacherId: 5 }, data: { teacherId: 8 } });
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
     expect(prisma.user.update.mock.calls[0][0].data.centerId).toBe(4);
   });
 
+  it.each([
+    ["another center", { role: "Teacher", centerId: 9, isActive: true }],
+    ["an inactive account", { role: "Teacher", centerId: 3, isActive: false }],
+    ["a non-teacher", { role: "Parent", centerId: 3, isActive: true }],
+    ["a missing account", null],
+  ])("'transfer' refuses a new teacher who is %s", async (_label, nextTeacher) => {
+    stub({ students: 3 });
+    prisma.user.findUnique.mockReset();
+    prisma.user.findUnique.mockResolvedValueOnce(existingTeacher).mockResolvedValueOnce(nextTeacher).mockResolvedValue({ id: 5, children: [] });
+    const next = vi.fn();
+
+    await updateUser(
+      { body: { userId: 5, centerId: 4, studentAction: "transfer", newTeacherId: 8 }, user: admin },
+      mockRes(),
+      next,
+    );
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    expect(prisma.student.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("'transfer' refuses the teacher being moved, or no teacher at all", async () => {
+    for (const newTeacherId of [5, undefined]) {
+      stub({ students: 3, nextTeacher: sameCenterTeacher });
+      const next = vi.fn();
+
+      await updateUser(
+        { body: { userId: 5, centerId: 4, studentAction: "transfer", newTeacherId }, user: admin },
+        mockRes(),
+        next,
+      );
+
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+      expect(prisma.student.updateMany).not.toHaveBeenCalled();
+    }
+  });
+
   it("is not checked when the center stays the same", async () => {
+    stub({ students: 3 });
+
     await updateUser({ body: { userId: 5, centerId: 3, firstName: "T" }, user: admin }, mockRes(), vi.fn());
 
-    expect(prisma.user.count).not.toHaveBeenCalled();
+    expect(prisma.student.count).not.toHaveBeenCalled();
   });
 });

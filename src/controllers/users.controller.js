@@ -198,10 +198,11 @@ async function requireExistingCenter(value) {
   return id;
 }
 
-// Students being connected by an Admin must belong to the account's center
-// (through their Teacher). A Teacher can only pick their own students, which
-// are in their own center by definition (assertCanAccessStudents).
-async function assertStudentsInCenter(studentIds, centerId) {
+// A Parent/Guardian account has no center of its own to choose: it is the center
+// of the students it is connected to (through their Teacher). Every selected
+// student must exist, have a Teacher with a center, and share that one center.
+async function centerFromStudents(studentIds) {
+  if (!studentIds.length) throw new AppError(NO_STUDENT_MESSAGE, 400);
   const students = await prisma.student.findMany({
     where: { id: { in: studentIds } },
     select: { id: true, name: true, teacher: { select: { centerId: true } } },
@@ -209,14 +210,71 @@ async function assertStudentsInCenter(studentIds, centerId) {
   if (students.length !== studentIds.length) {
     throw new AppError("One or more of the selected students no longer exist. Reload the page and try again.", 400);
   }
-  const elsewhere = students.filter((student) => student.teacher?.centerId !== centerId);
-  if (elsewhere.length) {
+  const unassigned = students.filter((student) => student.teacher?.centerId == null);
+  if (unassigned.length) {
     throw new AppError(
-      `These students are not at this account's center (or have no teacher yet): ${elsewhere
-        .map((student) => student.name)
-        .join(", ")}.`,
+      `These students have no teacher at a center yet: ${unassigned.map((student) => student.name).join(", ")}. Assign them a teacher first.`,
       400,
     );
+  }
+  const centerIds = new Set(students.map((student) => student.teacher.centerId));
+  if (centerIds.size > 1) {
+    throw new AppError("The selected students are at different centers. Select students from one center only.", 400);
+  }
+  return [...centerIds][0];
+}
+
+// An Admin moving a Teacher to another center must say what happens to the
+// Teacher's enrolled students (nothing is decided by default):
+// - "move": they stay with the Teacher and follow to the new center, and so do
+//   their Parent/Guardian accounts. Refused if such an account is also connected
+//   to a student of another Teacher, since an account has exactly one center.
+// - "transfer": they go to `newTeacherId`, an active Teacher at the CURRENT
+//   center, so the students (and their families) stay where they are.
+async function resolveStudentsOfMovedTeacher(tx, { teacherId, oldCenterId, newCenterId, action, newTeacherId }) {
+  const enrolled = await tx.student.count({ where: { teacherId } });
+  if (!enrolled) return;
+
+  if (action === "transfer") {
+    const target = friendly("Choose the teacher who will take over these students.", () =>
+      parseId(newTeacherId, "newTeacherId"),
+    );
+    if (target === teacherId) {
+      throw new AppError("Choose a different teacher to take over these students.", 400);
+    }
+    const next = await tx.user.findUnique({
+      where: { id: target },
+      select: { role: true, centerId: true, isActive: true },
+    });
+    if (!next || next.role !== "Teacher" || !next.isActive || oldCenterId == null || next.centerId !== oldCenterId) {
+      throw new AppError("Choose an active teacher at this teacher's current center to take over the students.", 400);
+    }
+    await tx.student.updateMany({ where: { teacherId }, data: { teacherId: target } });
+    return;
+  }
+
+  if (action !== "move") {
+    throw new AppError(
+      "This teacher has enrolled students. Choose whether they move with the teacher or are transferred to another teacher.",
+      400,
+    );
+  }
+
+  const families = await tx.user.findMany({
+    where: { role: { in: LINKABLE_ROLES }, children: { some: { student: { teacherId } } } },
+    select: { id: true, name: true, children: { select: { student: { select: { teacherId: true } } } } },
+  });
+  const split = families.filter((account) => account.children.some((link) => link.student.teacherId !== teacherId));
+  if (split.length) {
+    throw new AppError(
+      `These accounts are also connected to students of other teachers, so they cannot follow this teacher: ${split
+        .map((account) => account.name)
+        .join(", ")}. Transfer the students to another teacher instead, or adjust those accounts first.`,
+      400,
+    );
+  }
+  if (families.length) {
+    await tx.user.updateMany({ where: { id: { in: families.map((a) => a.id) } }, data: { centerId: newCenterId } });
   }
 }
 
@@ -326,10 +384,6 @@ export async function registerUser(req, res, next) {
       return res.status(403).json({ message: "Only an Admin can create a Teacher account" });
     }
 
-    let centerId = null;
-    if (req.user.role === "Teacher") centerId = teacherCenterId(req);
-    else if (role !== "Admin") centerId = await requireExistingCenter(req.body.centerId);
-
     const phone = accountPhone(role, req.body.phone);
     const address = friendly("Address must be 500 characters or fewer.", () => optionalString(req.body.address, 500));
     const passwordHash = await bcrypt.hash(password, 10);
@@ -339,9 +393,18 @@ export async function registerUser(req, res, next) {
     if (studentIds.length && !LINKABLE_ROLES.includes(role)) {
       return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
     }
-    if (studentIds.length) {
-      if (req.user.role === "Teacher") await assertCanAccessStudents(req.user, studentIds);
-      else await assertStudentsInCenter(studentIds, centerId);
+
+    // The center: a Teacher's new account is at the Teacher's own center; an
+    // Admin chooses a Teacher's center; a Parent/Guardian's is always derived
+    // from its students (any centerId in the body is ignored).
+    let centerId = null;
+    if (req.user.role === "Teacher") {
+      centerId = teacherCenterId(req);
+      if (studentIds.length) await assertCanAccessStudents(req.user, studentIds);
+    } else if (LINKABLE_ROLES.includes(role)) {
+      centerId = await centerFromStudents(studentIds);
+    } else if (role !== "Admin") {
+      centerId = await requireExistingCenter(req.body.centerId);
     }
 
     const user = await prisma.$transaction(async (tx) => {
@@ -452,18 +515,31 @@ export async function updateUser(req, res, next) {
     }
     if (req.body.role !== undefined) data.role = requestedRole;
 
-    // The center: an Admin sets it (a Teacher's account and every Parent/
-    // Guardian need one); nobody else can move an account between centers.
+    const studentIds = Array.isArray(req.body.studentIds) ? parseStudentIds(req.body.studentIds) : null;
+
+    if (studentIds && !LINKABLE_ROLES.includes(requestedRole) && studentIds.length) {
+      return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
+    }
+
+    // The center. A Parent/Guardian never has one chosen: it follows their
+    // students' center (an Admin re-connecting students re-derives it; any
+    // centerId in the body is ignored). Only an Admin can move a Teacher.
     let centerId = existing.centerId;
-    if (req.body.centerId !== undefined && req.body.centerId !== existing.centerId) {
+    if (requestedRole === "Admin") {
+      centerId = null;
+    } else if (LINKABLE_ROLES.includes(requestedRole)) {
+      if (req.user.role === "Admin") {
+        if (studentIds) centerId = await centerFromStudents(studentIds);
+        else if (!LINKABLE_ROLES.includes(existing.role)) throw new AppError(NO_STUDENT_MESSAGE, 400);
+      }
+    } else if (req.body.centerId !== undefined && req.body.centerId !== existing.centerId) {
       if (req.user.role !== "Admin") {
         // The edit form resends the unchanged value, which is fine; anything else is not.
         return res.status(403).json({ message: "Only an Admin can change an account's center" });
       }
-      centerId = requestedRole === "Admin" ? null : await requireExistingCenter(req.body.centerId);
+      centerId = await requireExistingCenter(req.body.centerId);
     }
-    if (requestedRole === "Admin") centerId = null;
-    else if (centerId == null) {
+    if (requestedRole !== "Admin" && centerId == null) {
       return res.status(400).json({ message: "Choose a center for this account." });
     }
     const centerChanged = centerId !== existing.centerId;
@@ -477,19 +553,12 @@ export async function updateUser(req, res, next) {
       });
     }
 
-    const studentIds = Array.isArray(req.body.studentIds) ? parseStudentIds(req.body.studentIds) : null;
-
-    if (studentIds && !LINKABLE_ROLES.includes(requestedRole) && studentIds.length) {
-      return res.status(400).json({ message: "Only Parent or Guardian accounts can be connected to students" });
-    }
-
     // A Teacher may only connect their own students, and replaces only their own
     // part of the list: links to another Teacher's students are not theirs to
     // remove (the form never shows them, so it never sends them).
     const teacherScoped = req.user.role === "Teacher";
     if (studentIds?.length) {
       if (teacherScoped) await assertCanAccessStudents(req.user, studentIds);
-      else await assertStudentsInCenter(studentIds, centerId);
     }
 
     const user = await prisma.$transaction(async (tx) => {
@@ -513,22 +582,16 @@ export async function updateUser(req, res, next) {
         await tx.parentChild.deleteMany({ where: { parentId: id } });
       }
 
-      // Moving a Teacher to another center moves their students with them; the
-      // Parent/Guardian accounts connected to those students must follow first.
+      // Moving a Teacher to another center: their enrolled students either
+      // follow (with their families) or are handed to another teacher first.
       if (centerChanged && existing.role === "Teacher" && requestedRole === "Teacher") {
-        const stranded = await tx.user.count({
-          where: {
-            role: { in: LINKABLE_ROLES },
-            OR: [{ centerId: null }, { centerId: { not: centerId } }],
-            children: { some: { student: { teacherId: id } } },
-          },
+        await resolveStudentsOfMovedTeacher(tx, {
+          teacherId: id,
+          oldCenterId: existing.centerId,
+          newCenterId: centerId,
+          action: req.body.studentAction,
+          newTeacherId: req.body.newTeacherId,
         });
-        if (stranded > 0) {
-          throw new AppError(
-            `${stranded} parent/guardian account${stranded === 1 ? " is" : "s are"} connected to this Teacher's students at their current center. Move ${stranded === 1 ? "it" : "them"} to the new center, or reassign the students, before changing this Teacher's center.`,
-            400,
-          );
-        }
       }
 
       if (LINKABLE_ROLES.includes(requestedRole)) {

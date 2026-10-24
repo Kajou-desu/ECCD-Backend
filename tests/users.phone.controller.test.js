@@ -9,6 +9,7 @@ vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     user: { findUnique: vi.fn(), update: vi.fn() },
     center: { findUnique: vi.fn() },
+    student: { findMany: vi.fn() },
     $transaction: vi.fn((cb) => cb(tx)),
   },
 }));
@@ -37,6 +38,7 @@ beforeEach(() => {
   tx.user.update.mockResolvedValue(savedUser);
   tx.user.findUnique.mockResolvedValue(savedUser);
   tx.student.findMany.mockResolvedValue([]);
+  prisma.student.findMany.mockResolvedValue([{ id: 4, name: "Kai", teacher: { centerId: 3 } }]);
   tx.parentChild.findFirst.mockResolvedValue({ id: 1 });
   tx.parentChild.findMany.mockResolvedValue([]);
   prisma.center.findUnique.mockResolvedValue({ id: 3 });
@@ -46,7 +48,7 @@ beforeEach(() => {
 function registerReq(role, phone) {
   return {
     user: { id: 1, role: "Admin" },
-    body: { firstName: "A", lastName: "B", email: "a@example.com", password: "Str0ng!Passw0rd#1", role, phone, centerId: 3 },
+    body: { firstName: "A", lastName: "B", email: "a@example.com", password: "Str0ng!Passw0rd#1", role, phone, centerId: 3, studentIds: role === "Teacher" ? [] : [4] },
   };
 }
 
