@@ -39,7 +39,7 @@ export async function getChildren(req, res, next) {
 // attendance: {...}} shape this originally guessed.
 //
 // weeklyGoals: real data, per docs/WEEKLY_GOALS_PROPOSAL.md — this week's
-// classroom goals for the child's session, with the child's own progress
+// classroom goals (shared by both sessions), with the child's own progress
 // row (defaulting to 0%/"Not started" when the teacher hasn't graded yet).
 // A goal the child has completed (100%) moves out of this list and into the
 // milestones, so it is never shown in both. weeklyGoalsTotal is the number of
@@ -57,7 +57,7 @@ export async function getChildProgress(req, res, next) {
 
     const student = await prisma.student.findUnique({
       where: { id: studentId },
-      select: { session: true },
+      select: { id: true },
     });
     if (!student) return res.status(404).json({ message: "Student not found" });
 
@@ -73,7 +73,7 @@ export async function getChildProgress(req, res, next) {
         take: 10,
       }),
       prisma.weeklyGoal.findMany({
-        where: { weekStart: schoolWeekStart(), session: student.session },
+        where: { weekStart: schoolWeekStart() },
         include: { progress: { where: { studentId } } },
         orderBy: { createdAt: "asc" },
       }),

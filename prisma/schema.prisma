@@ -506,12 +506,12 @@ model DailyTheme {
   @@map("daily_themes")
 }
 
-// One row per (weekStart, session) — mirrors DailyTheme's one-row-per-day
-// pattern. See docs/WEEKLY_GOALS_PROPOSAL.md for the design rationale.
+// One row per (weekStart, title). A goal is shared by the morning and the
+// afternoon session — it is authored once per week, and only each student's
+// progress (StudentGoalProgress) differs. See docs/WEEKLY_GOALS_PROPOSAL.md.
 model WeeklyGoal {
   id          Int      @id @default(autoincrement())
   weekStart   DateTime @db.Date // Monday of the week, school-timezone
-  session     Session
   title       String
   description String?
   category    String? // e.g. "Motor Skills", "Numeracy" — free text, like Material.category
@@ -522,8 +522,8 @@ model WeeklyGoal {
 
   progress    StudentGoalProgress[]
 
-  @@unique([weekStart, session, title])
-  @@index([weekStart, session])
+  @@unique([weekStart, title])
+  @@index([weekStart])
   @@map("weekly_goals")
 }
 

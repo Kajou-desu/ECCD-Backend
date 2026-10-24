@@ -63,7 +63,7 @@ describe("getChildren", () => {
 });
 
 describe("getChildProgress", () => {
-  it("returns this week's goals for the child's session with the child's own progress", async () => {
+  it("returns this week's goals (shared by both sessions) with the child's own progress", async () => {
     prisma.student.findUnique.mockResolvedValue({ session: "morning" });
     prisma.attendance.count.mockResolvedValue(0);
     prisma.submission.findMany.mockResolvedValue([]);
@@ -82,6 +82,7 @@ describe("getChildProgress", () => {
 
     await getChildProgress(req, res, next);
 
+    expect(prisma.weeklyGoal.findMany.mock.calls[0][0].where).not.toHaveProperty("session");
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
         weeklyGoals: [

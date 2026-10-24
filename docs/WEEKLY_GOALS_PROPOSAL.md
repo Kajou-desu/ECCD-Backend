@@ -7,6 +7,12 @@ there is nothing real to return. The frontend contract already exists —
 `WeeklyGoalsCard.jsx` renders `{ id, title, progress, status }` per goal — it's
 only the data source that's missing. This document proposes how to build one.
 
+> **Update:** goals are no longer split by session. A goal is authored once per
+> week and is shared by the morning and the afternoon class (`WeeklyGoal` is
+> unique on `(weekStart, title)`, with no `session` column); only each
+> student's progress differs. The per-(week, session) modelling below is the
+> original proposal and is kept for context.
+
 ## Scope decision: class-wide goals, not per-child
 
 ECCD SmartTrack's existing patterns (attendance sessions, materials, daily

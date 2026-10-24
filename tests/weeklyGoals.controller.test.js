@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     weeklyGoal: { findMany: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn(), findUnique: vi.fn() },
-    student: { findMany: vi.fn() },
+    student: { findMany: vi.fn(), count: vi.fn() },
     studentGoalProgress: { upsert: vi.fn() },
     // Array-style $transaction (as used by updateGoalProgress): resolve
     // like Promise.all over the array of prisma-call promises passed in.
@@ -19,6 +19,8 @@ const {
   deleteWeeklyGoal,
   updateGoalProgress,
 } = await import("../src/controllers/weeklyGoals.controller.js");
+
+const ADMIN = { id: 1, role: "Admin" };
 
 function mockRes() {
   const res = {};
@@ -38,7 +40,6 @@ describe("getWeeklyGoals", () => {
       {
         id: 1,
         weekStart: new Date(Date.UTC(2026, 8, 21)),
-        session: "morning",
         title: "Counting to 10",
         description: null,
         category: "Numeracy",
@@ -46,26 +47,28 @@ describe("getWeeklyGoals", () => {
       },
     ]);
     prisma.student.findMany.mockResolvedValue([
-      { id: 5, name: "Ari Bell" },
-      { id: 6, name: "Bo Cruz" },
+      { id: 5, name: "Ari Bell", session: "morning" },
+      { id: 6, name: "Bo Cruz", session: "afternoon" },
     ]);
 
-    const req = { query: { week: "2026-09-21", session: "morning" } };
+    const req = { query: { week: "2026-09-21" }, user: { id: 1, role: "Admin" } };
     const res = mockRes();
     const next = vi.fn();
 
     await getWeeklyGoals(req, res, next);
 
+    expect(prisma.weeklyGoal.findMany.mock.calls[0][0].where).toEqual({
+      weekStart: new Date(Date.UTC(2026, 8, 21)),
+    });
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
-        session: "morning",
         goals: [
           expect.objectContaining({
             id: 1,
             title: "Counting to 10",
             students: [
-              { studentId: 5, name: "Ari Bell", progress: 60, status: "In progress" },
-              { studentId: 6, name: "Bo Cruz", progress: 0, status: "Not started" },
+              { studentId: 5, name: "Ari Bell", session: "morning", progress: 60, status: "In progress" },
+              { studentId: 6, name: "Bo Cruz", session: "afternoon", progress: 0, status: "Not started" },
             ],
           }),
         ],
@@ -73,15 +76,26 @@ describe("getWeeklyGoals", () => {
     );
   });
 
-  it("rejects an invalid session", async () => {
-    const req = { query: { session: "midnight" } };
-    const res = mockRes();
+  it("lists both sessions' students, limited to the Teacher's own center", async () => {
+    prisma.weeklyGoal.findMany.mockResolvedValue([]);
+    prisma.student.findMany.mockResolvedValue([]);
+
+    const req = { query: { week: "2026-09-21" }, user: { id: 9, role: "Teacher", centerId: 3 } };
+    await getWeeklyGoals(req, mockRes(), vi.fn());
+
+    const where = prisma.student.findMany.mock.calls[0][0].where;
+    expect(where).toEqual({ status: "active", teacher: { centerId: 3 } });
+    expect(where).not.toHaveProperty("session");
+  });
+
+  it("denies a role that has no student scope", async () => {
+    const req = { query: {}, user: { id: 2, role: "Parent" } };
     const next = vi.fn();
 
-    await getWeeklyGoals(req, res, next);
+    await getWeeklyGoals(req, mockRes(), next);
 
     expect(prisma.weeklyGoal.findMany).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 });
 
@@ -90,14 +104,13 @@ describe("createWeeklyGoal", () => {
     prisma.weeklyGoal.create.mockResolvedValue({
       id: 1,
       weekStart: new Date(Date.UTC(2026, 8, 21)),
-      session: "morning",
       title: "Counting to 10",
       description: null,
       category: "Numeracy",
     });
 
     const req = {
-      body: { weekStart: "2026-09-21", session: "morning", title: "Counting to 10", category: "Numeracy" },
+      body: { weekStart: "2026-09-21", title: "Counting to 10", category: "Numeracy" },
       user: { id: 9 },
     };
     const res = mockRes();
@@ -105,24 +118,22 @@ describe("createWeeklyGoal", () => {
 
     await createWeeklyGoal(req, res, next);
 
-    expect(prisma.weeklyGoal.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        session: "morning",
-        title: "Counting to 10",
-        category: "Numeracy",
-        createdById: 9,
-      }),
-    });
+    const { data } = prisma.weeklyGoal.create.mock.calls[0][0];
+    expect(data).toEqual(
+      expect.objectContaining({ title: "Counting to 10", category: "Numeracy", createdById: 9 }),
+    );
+    // One goal for the week, not one per session.
+    expect(data).not.toHaveProperty("session");
     expect(res.status).toHaveBeenCalledWith(201);
   });
 
-  it("returns 409 when a goal with the same title already exists for that week/session", async () => {
+  it("returns 409 when a goal with the same title already exists for that week", async () => {
     const conflict = new Error("duplicate");
     conflict.code = "P2002";
     prisma.weeklyGoal.create.mockRejectedValue(conflict);
 
     const req = {
-      body: { weekStart: "2026-09-21", session: "morning", title: "Counting to 10" },
+      body: { weekStart: "2026-09-21", title: "Counting to 10" },
       user: { id: 9 },
     };
     const res = mockRes();
@@ -135,7 +146,7 @@ describe("createWeeklyGoal", () => {
   });
 
   it("rejects a blank title", async () => {
-    const req = { body: { weekStart: "2026-09-21", session: "morning", title: "   " }, user: { id: 9 } };
+    const req = { body: { weekStart: "2026-09-21", title: "   " }, user: { id: 9 } };
     const res = mockRes();
     const next = vi.fn();
 
@@ -185,6 +196,7 @@ describe("updateGoalProgress", () => {
       .mockResolvedValueOnce({ studentId: 6, progress: 100, status: "Mastered" });
 
     const req = {
+      user: ADMIN,
       params: { id: "1" },
       body: {
         updates: [
@@ -210,7 +222,7 @@ describe("updateGoalProgress", () => {
     prisma.studentGoalProgress.upsert.mockResolvedValue({ studentId: 5, progress: 100, status: "Mastered" });
 
     await updateGoalProgress(
-      { params: { id: "1" }, body: { updates: [{ studentId: 5, progress: 40, status: " mastered".trim() }] } },
+      { user: ADMIN, params: { id: "1" }, body: { updates: [{ studentId: 5, progress: 40, status: " mastered".trim() }] } },
       mockRes(),
       vi.fn(),
     );
@@ -225,7 +237,7 @@ describe("updateGoalProgress", () => {
     prisma.studentGoalProgress.upsert.mockResolvedValue({ studentId: 5, progress: 40, status: "In progress" });
 
     await updateGoalProgress(
-      { params: { id: "1" }, body: { updates: [{ studentId: 5, progress: 40, status: "In progress" }] } },
+      { user: ADMIN, params: { id: "1" }, body: { updates: [{ studentId: 5, progress: 40, status: "In progress" }] } },
       mockRes(),
       vi.fn(),
     );
@@ -237,6 +249,7 @@ describe("updateGoalProgress", () => {
     prisma.weeklyGoal.findUnique.mockResolvedValue({ id: 1 });
 
     const req = {
+      user: ADMIN,
       params: { id: "1" },
       body: { updates: [{ studentId: 5, progress: 150, status: "Nope" }] },
     };
@@ -253,6 +266,7 @@ describe("updateGoalProgress", () => {
     prisma.weeklyGoal.findUnique.mockResolvedValue(null);
 
     const req = {
+      user: ADMIN,
       params: { id: "999" },
       body: { updates: [{ studentId: 5, progress: 50, status: "In progress" }] },
     };
@@ -262,5 +276,29 @@ describe("updateGoalProgress", () => {
     await updateGoalProgress(req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  it("forbids grading a student outside the Teacher's scope and saves nothing", async () => {
+    prisma.weeklyGoal.findUnique.mockResolvedValue({ id: 1 });
+    prisma.student.count.mockResolvedValue(1); // only 1 of the 2 ids is in scope
+
+    const next = vi.fn();
+    await updateGoalProgress(
+      {
+        user: { id: 9, role: "Teacher", centerId: 3 },
+        params: { id: "1" },
+        body: {
+          updates: [
+            { studentId: 5, progress: 50, status: "In progress" },
+            { studentId: 77, progress: 50, status: "In progress" },
+          ],
+        },
+      },
+      mockRes(),
+      next,
+    );
+
+    expect(prisma.studentGoalProgress.upsert).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 });

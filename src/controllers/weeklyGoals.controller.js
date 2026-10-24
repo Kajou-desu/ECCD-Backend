@@ -3,11 +3,11 @@ import {
   parseId,
   requireNonEmptyString,
   optionalString,
-  requireSession,
   requireDateString,
   requireProgress,
 } from "../utils/validate.js";
 import { schoolWeekStart } from "../utils/schoolDate.js";
+import { studentScopeFor, assertCanAccessStudents } from "../utils/ownership.js";
 import { AppError } from "../middleware/errorHandler.js";
 
 // Resolves a "?week=YYYY-MM-DD" query param (or a "weekStart" body field) to
@@ -22,32 +22,33 @@ function toGoalResponse(goal) {
   return {
     id: goal.id,
     weekStart: goal.weekStart,
-    session: goal.session,
     title: goal.title,
     description: goal.description,
     category: goal.category,
   };
 }
 
-// GET /api/weekly-goals?week=YYYY-MM-DD&session=morning
-// Teacher/Admin only. Lists this week's goals for a session, each paired
-// with every currently-enrolled student's progress (0/"Not started" for
-// students with no progress row yet) — the shape the "grade the class" UI
-// needs.
+// GET /api/weekly-goals?week=YYYY-MM-DD
+// Teacher/Admin only. Lists this week's goals — shared by the morning and the
+// afternoon session — each paired with the progress of every active student
+// the caller may see (0/"Not started" for students with no progress row yet),
+// the shape the "grade the class" UI needs.
 export async function getWeeklyGoals(req, res, next) {
   try {
     const weekStart = resolveWeekStart(req.query.week);
-    const session = requireSession(req.query.session);
+    // Same student scope as the rest of the Teacher/Admin APIs; no scope = deny.
+    const scope = studentScopeFor(req.user);
+    if (!scope) throw new AppError("Forbidden", 403);
 
     const [goals, students] = await Promise.all([
       prisma.weeklyGoal.findMany({
-        where: { weekStart, session },
+        where: { weekStart },
         include: { progress: true },
         orderBy: { createdAt: "asc" },
       }),
       prisma.student.findMany({
-        where: { session, status: "active" },
-        select: { id: true, name: true },
+        where: { status: "active", ...scope },
+        select: { id: true, name: true, session: true },
         orderBy: { name: "asc" },
       }),
     ]);
@@ -59,13 +60,14 @@ export async function getWeeklyGoals(req, res, next) {
         return {
           studentId: student.id,
           name: student.name,
+          session: student.session,
           progress: entry?.progress ?? 0,
           status: entry?.status ?? "Not started",
         };
       }),
     }));
 
-    res.json({ weekStart, session, goals: result });
+    res.json({ weekStart, goals: result });
   } catch (err) {
     next(err);
   }
@@ -75,7 +77,6 @@ export async function getWeeklyGoals(req, res, next) {
 export async function createWeeklyGoal(req, res, next) {
   try {
     const weekStart = resolveWeekStart(req.body.weekStart);
-    const session = requireSession(req.body.session);
     const title = requireNonEmptyString(req.body.title, "title", 200);
     const description = optionalString(req.body.description, 2000);
     const category = optionalString(req.body.category, 100);
@@ -83,7 +84,6 @@ export async function createWeeklyGoal(req, res, next) {
     const goal = await prisma.weeklyGoal.create({
       data: {
         weekStart,
-        session,
         title,
         description,
         category,
@@ -93,10 +93,10 @@ export async function createWeeklyGoal(req, res, next) {
 
     res.status(201).json(toGoalResponse(goal));
   } catch (err) {
-    // Unique constraint on (weekStart, session, title): same wording as
+    // Unique constraint on (weekStart, title): same wording as
     // events/materials duplicate-name handling elsewhere in this codebase.
     if (err.code === "P2002") {
-      return res.status(409).json({ message: "A goal with this title already exists for that week and session" });
+      return res.status(409).json({ message: "A goal with this title already exists for that week" });
     }
     next(err);
   }
@@ -122,7 +122,7 @@ export async function updateWeeklyGoal(req, res, next) {
   } catch (err) {
     if (err.code === "P2025") return res.status(404).json({ message: "Goal not found" });
     if (err.code === "P2002") {
-      return res.status(409).json({ message: "A goal with this title already exists for that week and session" });
+      return res.status(409).json({ message: "A goal with this title already exists for that week" });
     }
     next(err);
   }
@@ -176,6 +176,13 @@ export async function updateGoalProgress(req, res, next) {
 
     const goal = await prisma.weeklyGoal.findUnique({ where: { id: goalId }, select: { id: true } });
     if (!goal) return res.status(404).json({ message: "Goal not found" });
+
+    // Every graded student must be one the caller may access (all-or-nothing),
+    // so a client-supplied studentId can never reach another center's child.
+    await assertCanAccessStudents(
+      req.user,
+      parsed.map((u) => u.studentId),
+    );
 
     const results = await prisma.$transaction(
       parsed.map((u) =>
