@@ -107,6 +107,8 @@ model Center {
   createdAt DateTime @default(now())
   users     User[]
   attendanceSessions AttendanceSession[]
+  materials Material[]
+  albums    Album[]
 
   @@map("centers")
 }
@@ -410,18 +412,26 @@ model BleGateway {
   @@map("ble_gateways")
 }
 
+// An album belongs to one center, like its photos. Only that center's Teachers
+// and families see it (an Admin sees every center's). centerId is null only for
+// albums that predate centers and could not be matched to one; only an Admin
+// sees those.
 model Album {
   id          Int      @id @default(autoincrement())
   title       String
   eventId     Int?
   materialId  Int?
+  centerId    Int?
   description String?
   createdAt   DateTime @default(now())
 
   photos      Photo[]
   event       Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
   activity    Material? @relation(fields: [materialId], references: [id], onDelete: SetNull)
+  // Restrict, like users: a center that still has albums cannot be deleted.
+  center      Center?   @relation(fields: [centerId], references: [id], onDelete: Restrict)
 
+  @@index([centerId])
   @@map("albums")
 }
 
@@ -437,19 +447,25 @@ model Photo {
   @@map("photos")
 }
 
+// A material (learning activity) belongs to one center; see Album for who sees
+// it and what a null centerId means.
 model Material {
   id          Int      @id @default(autoincrement())
   title       String
   category    String?
   description String?
   fileUrl     String?
+  centerId    Int?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   submissions Submission[]
   albums      Album[]
   dailyThemes DailyTheme[]
+  // Restrict, like users: a center that still has materials cannot be deleted.
+  center      Center?      @relation(fields: [centerId], references: [id], onDelete: Restrict)
 
+  @@index([centerId])
   @@map("materials")
 }
 

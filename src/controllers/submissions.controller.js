@@ -1,7 +1,8 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
-import { assertCanAccessStudent } from "../utils/ownership.js";
+import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
+import { staffContentScopeFor } from "../utils/contentScope.js";
 import { parseId } from "../utils/validate.js";
 import { notifyTeacherOfSubmission } from "../services/submissionNotification.service.js";
 
@@ -30,20 +31,26 @@ export async function getSubmissions(req, res, next) {
 // Everything the "student works" page needs in one round trip: the material
 // (so an unknown id is a clean 404) and every student's uploaded work for it.
 // Staff only — the route enforces Teacher/Admin, because this lists ALL
-// students' work, which a Parent/Guardian must never see.
+// students' work, which a Parent/Guardian must never see. A Teacher only gets
+// materials of their own center, and only the work of students they may see
+// (their center's): work handed in before materials had centers can't expose
+// another center's children.
 // `select` keeps the response to what the page renders; nothing else about
 // the student leaves the server.
 export async function getMaterialSubmissions(req, res, next) {
   try {
     const id = parseId(req.params.id, "id");
+    const scope = staffContentScopeFor(req.user);
+    const studentScope = studentScopeFor(req.user);
 
     const material = await prisma.material.findUnique({
-      where: { id },
+      where: { id, ...scope },
       select: {
         id: true,
         title: true,
         category: true,
         submissions: {
+          where: { student: studentScope },
           orderBy: { submittedAt: "desc" },
           select: {
             id: true,
@@ -85,7 +92,18 @@ export async function submitStudentWork(req, res, next) {
 
     await assertCanAccessStudent(req.user, studentId);
 
-    const material = await prisma.material.findUnique({ where: { id: materialId } });
+    // Work is only handed in for a material of the student's own center, so a
+    // guessed materialId can't reach another center's material. A student with
+    // no Teacher (so no center) has none, the same as a Parent's materials list.
+    const student = await prisma.student.findUnique({
+      where: { id: studentId },
+      select: { teacher: { select: { centerId: true } } },
+    });
+    const studentCenterId = student?.teacher?.centerId ?? null;
+    const material =
+      studentCenterId == null
+        ? null
+        : await prisma.material.findUnique({ where: { id: materialId, centerId: studentCenterId } });
     if (!material) return res.status(404).json({ message: "Material not found" });
 
     const submission = await prisma.submission.create({

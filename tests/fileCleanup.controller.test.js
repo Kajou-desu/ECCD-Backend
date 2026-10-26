@@ -5,7 +5,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     material: { findUnique: vi.fn(), update: vi.fn(), delete: vi.fn() },
     submission: { findMany: vi.fn() },
     album: { delete: vi.fn() },
-    photo: { findMany: vi.fn(), findUnique: vi.fn(), delete: vi.fn() },
+    photo: { findMany: vi.fn(), findFirst: vi.fn(), delete: vi.fn() },
     student: { delete: vi.fn() },
     studentDocument: { findMany: vi.fn() },
     parentChild: { findMany: vi.fn() },
@@ -41,6 +41,8 @@ function mockRes() {
   return res;
 }
 const req = (extra = {}) => ({ params: {}, body: {}, protocol: "https", get: () => "host", ...extra });
+// Materials and albums belong to a center: the Teacher can only touch their own center's.
+const TEACHER = { id: 1, role: "Teacher", centerId: 4 };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -53,12 +55,13 @@ describe("files are removed together with their database rows", () => {
     prisma.submission.findMany.mockResolvedValue([{ fileUrl: "s1.pdf" }, { fileUrl: "s2.png" }]);
     prisma.material.delete.mockResolvedValue({ id: 5, fileUrl: "m.pdf" });
 
-    await deleteMaterial(req({ params: { id: "5" } }), mockRes(), vi.fn());
+    await deleteMaterial(req({ params: { id: "5" }, user: TEACHER }), mockRes(), vi.fn());
 
     expect(prisma.submission.findMany).toHaveBeenCalledWith({
       where: { materialId: 5 },
       select: { fileUrl: true },
     });
+    expect(prisma.material.delete).toHaveBeenCalledWith({ where: { id: 5, centerId: 4 } });
     expect(removeStoredFiles).toHaveBeenCalledWith("m.pdf", ["s1.pdf", "s2.png"]);
   });
 
@@ -67,8 +70,21 @@ describe("files are removed together with their database rows", () => {
     prisma.material.delete.mockRejectedValue(Object.assign(new Error("gone"), { code: "P2025" }));
 
     const res = mockRes();
-    await deleteMaterial(req({ params: { id: "5" } }), res, vi.fn());
+    await deleteMaterial(req({ params: { id: "5" }, user: TEACHER }), res, vi.fn());
 
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(removeStoredFiles).not.toHaveBeenCalled();
+  });
+
+  it("deleteMaterial removes nothing for a material of another center (it is simply not found)", async () => {
+    // The delete is scoped to the Teacher's center, so Prisma finds no row to delete.
+    prisma.submission.findMany.mockResolvedValue([{ fileUrl: "other-center.pdf" }]);
+    prisma.material.delete.mockRejectedValue(Object.assign(new Error("gone"), { code: "P2025" }));
+
+    const res = mockRes();
+    await deleteMaterial(req({ params: { id: "6" }, user: TEACHER }), res, vi.fn());
+
+    expect(prisma.material.delete).toHaveBeenCalledWith({ where: { id: 6, centerId: 4 } });
     expect(res.status).toHaveBeenCalledWith(404);
     expect(removeStoredFiles).not.toHaveBeenCalled();
   });
@@ -78,15 +94,23 @@ describe("files are removed together with their database rows", () => {
     prisma.material.update.mockResolvedValue({ id: 5, fileUrl: "new.pdf" });
 
     await updateMaterial(
-      req({ params: { id: "5" }, body: { title: "T" }, file: { filename: "new.pdf" } }),
+      req({ params: { id: "5" }, body: { title: "T" }, file: { filename: "new.pdf" }, user: TEACHER }),
       mockRes(),
       vi.fn()
     );
+    expect(prisma.material.findUnique).toHaveBeenCalledWith({
+      where: { id: 5, centerId: 4 },
+      select: { fileUrl: true },
+    });
     expect(removeStoredFiles).toHaveBeenCalledWith("old.pdf");
 
     removeStoredFiles.mockClear();
     prisma.material.findUnique.mockClear();
-    await updateMaterial(req({ params: { id: "5" }, body: { title: "T2" } }), mockRes(), vi.fn());
+    await updateMaterial(
+      req({ params: { id: "5" }, body: { title: "T2" }, user: TEACHER }),
+      mockRes(),
+      vi.fn()
+    );
     expect(removeStoredFiles).not.toHaveBeenCalled();
     expect(prisma.material.findUnique).not.toHaveBeenCalled();
   });
@@ -95,27 +119,44 @@ describe("files are removed together with their database rows", () => {
     prisma.photo.findMany.mockResolvedValue([{ fileUrl: "p1.jpg" }, { fileUrl: "p2.jpg" }]);
     prisma.album.delete.mockResolvedValue({ id: 2 });
 
-    await deleteAlbum(req({ params: { albumId: "2" } }), mockRes(), vi.fn());
+    await deleteAlbum(req({ params: { albumId: "2" }, user: TEACHER }), mockRes(), vi.fn());
 
+    expect(prisma.album.delete).toHaveBeenCalledWith({ where: { id: 2, centerId: 4 } });
     expect(removeStoredFiles).toHaveBeenCalledWith(["p1.jpg", "p2.jpg"]);
   });
 
+  it("deleteAlbum removes no photo files for an album of another center", async () => {
+    prisma.photo.findMany.mockResolvedValue([{ fileUrl: "other.jpg" }]);
+    prisma.album.delete.mockRejectedValue(Object.assign(new Error("gone"), { code: "P2025" }));
+
+    const res = mockRes();
+    await deleteAlbum(req({ params: { albumId: "3" }, user: TEACHER }), res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(removeStoredFiles).not.toHaveBeenCalled();
+  });
+
   it("deleteAlbumPhoto removes that photo's file", async () => {
-    prisma.photo.findUnique.mockResolvedValue({ id: 9, albumId: 2, fileUrl: "p9.jpg" });
+    prisma.photo.findFirst.mockResolvedValue({ id: 9, albumId: 2, fileUrl: "p9.jpg" });
     prisma.photo.delete.mockResolvedValue({});
 
-    await deleteAlbumPhoto(req({ params: { albumId: "2", photoId: "9" } }), mockRes(), vi.fn());
+    await deleteAlbumPhoto(req({ params: { albumId: "2", photoId: "9" }, user: TEACHER }), mockRes(), vi.fn());
 
+    expect(prisma.photo.findFirst).toHaveBeenCalledWith({
+      where: { id: 9, albumId: 2, album: { centerId: 4 } },
+    });
     expect(removeStoredFiles).toHaveBeenCalledWith("p9.jpg");
   });
 
-  it("deleteAlbumPhoto leaves the file alone when the photo belongs to another album", async () => {
-    prisma.photo.findUnique.mockResolvedValue({ id: 9, albumId: 3, fileUrl: "p9.jpg" });
+  it("deleteAlbumPhoto leaves the file alone when the photo is not in this album, or the album is another center's", async () => {
+    // One scoped lookup covers both: no row matches, so nothing is deleted.
+    prisma.photo.findFirst.mockResolvedValue(null);
 
     const res = mockRes();
-    await deleteAlbumPhoto(req({ params: { albumId: "2", photoId: "9" } }), res, vi.fn());
+    await deleteAlbumPhoto(req({ params: { albumId: "2", photoId: "9" }, user: TEACHER }), res, vi.fn());
 
     expect(res.status).toHaveBeenCalledWith(404);
+    expect(prisma.photo.delete).not.toHaveBeenCalled();
     expect(removeStoredFiles).not.toHaveBeenCalled();
   });
 

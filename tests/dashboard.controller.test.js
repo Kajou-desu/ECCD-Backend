@@ -5,7 +5,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     dailyTheme: { findUnique: vi.fn(), upsert: vi.fn() },
     student: { count: vi.fn() },
     attendance: { count: vi.fn() },
-    material: { count: vi.fn() },
+    material: { count: vi.fn(), findUnique: vi.fn() },
   },
 }));
 
@@ -19,6 +19,9 @@ function mockRes() {
   return res;
 }
 
+const TEACHER = { id: 7, role: "Teacher", centerId: 4 };
+const ADMIN = { id: 1, role: "Admin", centerId: null };
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -26,8 +29,10 @@ beforeEach(() => {
 describe("upsertDailyTheme", () => {
   it("upserts the given date with the provided fields", async () => {
     prisma.dailyTheme.upsert.mockResolvedValue({ id: 1, date: new Date("2026-09-21T00:00:00.000Z") });
+    prisma.material.findUnique.mockResolvedValue({ id: 17 });
 
     const req = {
+      user: TEACHER,
       body: {
         date: "2026-09-21",
         letter: "A",
@@ -44,6 +49,11 @@ describe("upsertDailyTheme", () => {
 
     await upsertDailyTheme(req, res, next);
 
+    // The attached activity has to be one of the Teacher's own center's.
+    expect(prisma.material.findUnique).toHaveBeenCalledWith({
+      where: { id: 17, centerId: 4 },
+      select: { id: true },
+    });
     expect(prisma.dailyTheme.upsert).toHaveBeenCalledWith({
       where: { date: new Date("2026-09-21T00:00:00.000Z") },
       create: expect.objectContaining({
@@ -81,6 +91,47 @@ describe("upsertDailyTheme", () => {
   });
 });
 
+describe("upsertDailyTheme and centers", () => {
+  const theme = { letter: "A", label: "Apple", title: "Letter A Day", objectives: [] };
+
+  it("refuses an activity of another center, without saving the theme", async () => {
+    prisma.material.findUnique.mockResolvedValue(null);
+    const res = mockRes();
+
+    await upsertDailyTheme({ user: TEACHER, body: { ...theme, materialId: 99 } }, res, vi.fn());
+
+    expect(prisma.material.findUnique).toHaveBeenCalledWith({ where: { id: 99, centerId: 4 }, select: { id: true } });
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: "Material not found" });
+    expect(prisma.dailyTheme.upsert).not.toHaveBeenCalled();
+  });
+
+  it("lets an Admin attach any center's activity", async () => {
+    prisma.material.findUnique.mockResolvedValue({ id: 99 });
+    prisma.dailyTheme.upsert.mockResolvedValue({ id: 1 });
+
+    await upsertDailyTheme({ user: ADMIN, body: { ...theme, materialId: 99 } }, mockRes(), vi.fn());
+
+    expect(prisma.material.findUnique).toHaveBeenCalledWith({ where: { id: 99 }, select: { id: true } });
+    expect(prisma.dailyTheme.upsert).toHaveBeenCalled();
+  });
+
+  it("refuses a Teacher with no center only when an activity is attached", async () => {
+    const noCenter = { id: 8, role: "Teacher", centerId: null };
+    prisma.dailyTheme.upsert.mockResolvedValue({ id: 1 });
+
+    const next = vi.fn();
+    await upsertDailyTheme({ user: noCenter, body: { ...theme, materialId: 5 } }, mockRes(), next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
+    expect(prisma.dailyTheme.upsert).not.toHaveBeenCalled();
+
+    // A theme without an activity involves no center at all, so it still works.
+    await upsertDailyTheme({ user: noCenter, body: theme }, mockRes(), vi.fn());
+    expect(prisma.material.findUnique).not.toHaveBeenCalled();
+    expect(prisma.dailyTheme.upsert).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("getDailyTheme", () => {
   it("looks up the school-local day before UTC midnight", async () => {
     vi.useFakeTimers();
@@ -88,7 +139,7 @@ describe("getDailyTheme", () => {
     prisma.dailyTheme.findUnique.mockResolvedValue(null);
 
     const res = mockRes();
-    await getDailyTheme({}, res, vi.fn());
+    await getDailyTheme({ user: TEACHER }, res, vi.fn());
 
     expect(prisma.dailyTheme.findUnique).toHaveBeenCalledWith({
       where: { date: new Date("2026-09-20T00:00:00.000Z") },
@@ -100,11 +151,11 @@ describe("getDailyTheme", () => {
   it("returns a signed URL for the linked activity file", async () => {
     prisma.dailyTheme.findUnique.mockResolvedValue({
       id: 1,
-      material: { id: 17, title: "Letter A worksheet", fileUrl: "activity.pdf" },
+      material: { id: 17, title: "Letter A worksheet", fileUrl: "activity.pdf", centerId: 4 },
     });
 
     const res = mockRes();
-    const req = { protocol: "https", get: () => "classroom.example" };
+    const req = { user: TEACHER, protocol: "https", get: () => "classroom.example" };
     await getDailyTheme(req, res, vi.fn());
 
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
@@ -113,6 +164,33 @@ describe("getDailyTheme", () => {
         fileUrl: expect.stringMatching(/^https:\/\/classroom\.example\/api\/files\/activity\.pdf\?/),
       }),
     }));
+  });
+
+  it("hides an activity of another center, but still shows the school-wide theme", async () => {
+    prisma.dailyTheme.findUnique.mockResolvedValue({
+      id: 1,
+      title: "Letter A Day",
+      material: { id: 17, title: "Other center's worksheet", fileUrl: "secret.pdf", centerId: 9 },
+    });
+
+    const res = mockRes();
+    await getDailyTheme({ user: TEACHER, protocol: "https", get: () => "classroom.example" }, res, vi.fn());
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ title: "Letter A Day", material: null }));
+  });
+
+  it("shows an Admin the activity whichever center it belongs to, and a Teacher with no center none", async () => {
+    const theme = { id: 1, material: { id: 17, title: "W", fileUrl: "a.pdf", centerId: 9 } };
+    prisma.dailyTheme.findUnique.mockResolvedValue(theme);
+    const base = { protocol: "https", get: () => "classroom.example" };
+
+    const admin = mockRes();
+    await getDailyTheme({ ...base, user: ADMIN }, admin, vi.fn());
+    expect(admin.json).toHaveBeenCalledWith(expect.objectContaining({ material: expect.objectContaining({ id: 17 }) }));
+
+    const noCenter = mockRes();
+    await getDailyTheme({ ...base, user: { id: 8, role: "Teacher", centerId: null } }, noCenter, vi.fn());
+    expect(noCenter.json).toHaveBeenCalledWith(expect.objectContaining({ material: null }));
   });
 });
 
@@ -158,6 +236,29 @@ describe("getDashboardStats", () => {
     prisma.student.count.mockResolvedValue(1);
     await getDashboardStats({ user: { id: 7, role: "Teacher", centerId: null } }, mockRes(), vi.fn());
     expect(prisma.student.count).toHaveBeenCalledWith({ where: { teacherId: 7 } });
+  });
+
+  it("counts only the materials of a Teacher's own center, and every material for an Admin", async () => {
+    prisma.student.count.mockResolvedValue(1);
+    prisma.attendance.count.mockResolvedValue(0);
+    prisma.material.count.mockResolvedValue(2);
+
+    await getDashboardStats({ user: TEACHER }, mockRes(), vi.fn());
+    expect(prisma.material.count).toHaveBeenLastCalledWith({ where: { centerId: 4 } });
+
+    await getDashboardStats({ user: ADMIN }, mockRes(), vi.fn());
+    expect(prisma.material.count).toHaveBeenLastCalledWith({ where: {} });
+  });
+
+  it("shows 0 materials, without counting, to a Teacher with no center", async () => {
+    prisma.student.count.mockResolvedValue(1);
+    prisma.attendance.count.mockResolvedValue(0);
+    const res = mockRes();
+
+    await getDashboardStats({ user: { id: 7, role: "Teacher", centerId: null } }, res, vi.fn());
+
+    expect(prisma.material.count).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ totalMaterials: 0 }));
   });
 
   it("refuses any other role without querying", async () => {

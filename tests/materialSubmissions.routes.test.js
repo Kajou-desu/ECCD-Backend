@@ -18,8 +18,8 @@ const { app } = await import("../src/app.js");
 
 // requireAuth re-reads the user from the DB on every request, so the mocked
 // user record IS the identity/role under test.
-function loginAs(role, id = 1) {
-  const user = { id, email: `u${id}@school.test`, role, isActive: true, tokenVersion: 0 };
+function loginAs(role, id = 1, centerId = role === "Admin" ? null : 4) {
+  const user = { id, email: `u${id}@school.test`, role, centerId, isActive: true, tokenVersion: 0 };
   prisma.user.findUnique.mockResolvedValue(user);
   return `Bearer ${signToken(user)}`;
 }
@@ -117,12 +117,13 @@ describe("GET /api/materials/:id/submissions — behaviour", () => {
     await request(app).get("/api/materials/7/submissions").set("Authorization", loginAs("Teacher"));
 
     expect(prisma.material.findUnique).toHaveBeenCalledWith({
-      where: { id: 7 },
+      where: { id: 7, centerId: 4 },
       select: {
         id: true,
         title: true,
         category: true,
         submissions: {
+          where: { student: { teacher: { centerId: 4 } } },
           orderBy: { submittedAt: "desc" },
           select: {
             id: true,
@@ -135,6 +136,36 @@ describe("GET /api/materials/:id/submissions — behaviour", () => {
         },
       },
     });
+  });
+
+  it("lets an Admin open any center's material, and see every student's work", async () => {
+    prisma.material.findUnique.mockResolvedValue(MATERIAL);
+
+    const res = await request(app).get("/api/materials/7/submissions").set("Authorization", loginAs("Admin"));
+
+    expect(res.status).toBe(200);
+    const [query] = prisma.material.findUnique.mock.calls[0];
+    expect(query.where).toEqual({ id: 7 });
+    expect(query.select.submissions.where).toEqual({ student: {} });
+  });
+
+  it("404 for a material of another center — the same answer as for one that doesn't exist", async () => {
+    // The lookup is scoped to the Teacher's center, so another center's row is simply not found.
+    prisma.material.findUnique.mockResolvedValue(null);
+
+    const res = await request(app).get("/api/materials/8/submissions").set("Authorization", loginAs("Teacher"));
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ message: "Material not found" });
+  });
+
+  it("403 for a Teacher with no center, without querying", async () => {
+    const res = await request(app)
+      .get("/api/materials/7/submissions")
+      .set("Authorization", loginAs("Teacher", 1, null));
+
+    expect(res.status).toBe(403);
+    expect(prisma.material.findUnique).not.toHaveBeenCalled();
   });
 
   it("returns an empty list (not an error) for a material nobody has submitted to", async () => {
