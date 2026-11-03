@@ -168,6 +168,18 @@ from `PICKUP_AFTERNOON_START` (14:30), for `PICKUP_WINDOW_HOURS` (2).
   clock restarts after any outage. This means the teacher must keep the Live
   attendance page open (it owns the camera) during the window.
 - Assumes a single API instance (the job and the camera heartbeat are in-process).
+- **Manual Start / Stop** (button on the Live attendance page):
+  `POST /api/attendance/session/pickup-watch/start` and `/stop` (Teacher, or an
+  Admin naming `centerId`; acts on that center only; idempotent). The choice is
+  one row per center per day (`pickup_watch_overrides`), so it survives a restart.
+  *Stop* pauses the window that is open: nothing is prompted or marked for that
+  center and its session is left running (a window that opens later, such as the
+  afternoon one, is unaffected). *Start* opens a window of its own, even outside
+  the schedule: it covers morning and afternoon students, lasts
+  `PICKUP_WINDOW_HOURS` from the press, and silence is counted only from then
+  (so resuming never marks anyone for the time it was stopped). `GET
+  /attendance/session/current` reports `pickupWindow: { active, endsAt, mode }`
+  with `mode` of `auto` (the schedule), `on` or `off`.
 - The ESP32 only reports tags at or above -70 dBm: check the whole room is
   covered from the teacher's table, or students will look "gone".
 

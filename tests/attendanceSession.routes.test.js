@@ -10,6 +10,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     user: { findUnique: vi.fn() },
     attendanceSession: { findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     pickupCheck: { findMany: vi.fn().mockResolvedValue([]), findUnique: vi.fn(), updateMany: vi.fn() },
+    pickupWatchOverride: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]), create: vi.fn(), updateMany: vi.fn() },
   },
 }));
 
@@ -35,6 +36,8 @@ describe("attendance session routes — access control (default deny)", () => {
     ["get", "/api/attendance/session/current"],
     ["post", "/api/attendance/session/start"],
     ["post", "/api/attendance/session/stop"],
+    ["post", "/api/attendance/session/pickup-watch/start"],
+    ["post", "/api/attendance/session/pickup-watch/stop"],
     ["get", "/api/attendance/session/monitor"],
   ])("%s %s: 401 without a token, and never touches the session table", async (method, url) => {
     const res = await request(app)[method](url);
@@ -42,6 +45,7 @@ describe("attendance session routes — access control (default deny)", () => {
     expect(prisma.attendanceSession.findFirst).not.toHaveBeenCalled();
     expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
     expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled();
+    expect(prisma.pickupWatchOverride.create).not.toHaveBeenCalled();
   });
 
   it.each(["Parent", "Guardian"])("403 for role %s on every session endpoint", async (role) => {
@@ -50,6 +54,8 @@ describe("attendance session routes — access control (default deny)", () => {
       ["get", "/api/attendance/session/current"],
       ["post", "/api/attendance/session/start"],
       ["post", "/api/attendance/session/stop"],
+      ["post", "/api/attendance/session/pickup-watch/start"],
+      ["post", "/api/attendance/session/pickup-watch/stop"],
       ["get", "/api/attendance/session/monitor"],
       ["post", "/api/attendance/session/pickup-checks/1/answer"],
     ]) {
@@ -57,6 +63,7 @@ describe("attendance session routes — access control (default deny)", () => {
       expect(res.status).toBe(403);
     }
     expect(prisma.pickupCheck.updateMany).not.toHaveBeenCalled();
+    expect(prisma.pickupWatchOverride.create).not.toHaveBeenCalled();
     expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
     expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled();
   });

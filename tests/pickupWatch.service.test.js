@@ -6,6 +6,7 @@ const db = vi.hoisted(() => ({
     attendanceSession: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     attendanceSignal: { findMany: vi.fn() },
     pickupCheck: { findMany: vi.fn(), create: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
+    pickupWatchOverride: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     notification: { createMany: vi.fn() },
     student: { findUnique: vi.fn() },
     user: { findMany: vi.fn() },
@@ -32,6 +33,8 @@ const {
   absentSince,
   decidePickupAction,
   pickupWindowStatus,
+  pickupWatchStatus,
+  setPickupWatchRunning,
   runPickupWatch,
   resetPickupHealth,
   listOpenPickupChecks,
@@ -131,6 +134,10 @@ beforeEach(() => {
   prisma.attendanceSignal.findMany.mockResolvedValue([]);
   prisma.pickupCheck.findMany.mockResolvedValue([]);
   prisma.pickupCheck.create.mockResolvedValue({});
+  prisma.pickupWatchOverride.findMany.mockResolvedValue([]);
+  prisma.pickupWatchOverride.findFirst.mockResolvedValue(null);
+  prisma.pickupWatchOverride.updateMany.mockResolvedValue({ count: 1 });
+  prisma.pickupWatchOverride.create.mockResolvedValue({});
 });
 
 describe("runPickupWatch — when it acts", () => {
@@ -566,6 +573,139 @@ describe("teacher prompts", () => {
     it("answers not_found for an unknown id", async () => {
       prisma.pickupCheck.findUnique.mockResolvedValue(null);
       expect(await answerPickupCheck(teacher, 404, false, NOW)).toEqual({ outcome: "not_found" });
+    });
+  });
+});
+
+// ---- the teacher's manual Start / Stop ---------------------------------------
+
+describe("manual Start / Stop", () => {
+  const off = (setAt) => ({ mode: "off", setAt });
+  const on = (setAt) => ({ mode: "on", setAt });
+  const centerRecord = (centerId, over = {}) => record({ student: { session: "morning", teacher: { centerId } }, ...over });
+  const markedStudents = () => prisma.attendance.updateMany.mock.calls.map(([a]) => a.where.studentId);
+
+  describe("pickupWatchStatus", () => {
+    it("follows the schedule with no override", () => {
+      expect(pickupWatchStatus(at("03:00"), null, CFG)).toEqual({ active: true, endsAt: at("04:30"), mode: "auto" });
+      expect(pickupWatchStatus(at("02:00"), null, CFG)).toEqual({ active: false, endsAt: null, mode: "auto" });
+    });
+    it("Stop pauses the window that was open, but not one that opens later", () => {
+      const stopped = off(at("03:00"));
+      expect(pickupWatchStatus(at("03:30"), stopped, CFG)).toEqual({ active: false, endsAt: null, mode: "off" });
+      expect(pickupWatchStatus(at("06:30"), stopped, CFG)).toEqual({ active: true, endsAt: at("08:30"), mode: "auto" }); // 14:30 Manila
+    });
+    it("Start opens a window of its own, even outside the schedule, for the configured hours", () => {
+      const started = on(at("00:00")); // 08:00 Manila
+      expect(pickupWatchStatus(at("01:00"), started, CFG)).toEqual({ active: true, endsAt: at("02:00"), mode: "on" });
+      expect(pickupWatchStatus(at("02:00"), started, CFG).active).toBe(false); // over
+    });
+    it("Start after a Stop resumes, and runs to whichever end is later", () => {
+      expect(pickupWatchStatus(at("04:00"), on(at("04:00")), CFG)).toEqual({ active: true, endsAt: at("06:00"), mode: "on" });
+    });
+  });
+
+  describe("setPickupWatchRunning", () => {
+    it("Start writes an 'on' row when tracking is not running", async () => {
+      const status = await setPickupWatchRunning(4, true, at("00:00"));
+      expect(prisma.pickupWatchOverride.create).toHaveBeenCalledWith({
+        data: { date: TODAY, centerId: 4, mode: "on", setAt: at("00:00") },
+      });
+      expect(status).toBeDefined();
+    });
+    it("Start is a no-op while the schedule already runs (it must not restart anyone's clock)", async () => {
+      const status = await setPickupWatchRunning(null, true, at("03:00"));
+      expect(prisma.pickupWatchOverride.create).not.toHaveBeenCalled();
+      expect(prisma.pickupWatchOverride.updateMany).not.toHaveBeenCalled();
+      expect(status).toEqual({ active: true, endsAt: at("04:30"), mode: "auto" });
+    });
+    it("Stop updates the existing row in place", async () => {
+      prisma.pickupWatchOverride.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 3 });
+      await setPickupWatchRunning(null, false, at("03:00"));
+      expect(prisma.pickupWatchOverride.updateMany).toHaveBeenCalledWith({
+        where: { id: 3 }, data: { mode: "off", setAt: at("03:00") },
+      });
+    });
+    it("Stop is a no-op when nothing is running", async () => {
+      await setPickupWatchRunning(null, false, at("02:00"));
+      expect(prisma.pickupWatchOverride.create).not.toHaveBeenCalled();
+      expect(prisma.pickupWatchOverride.updateMany).not.toHaveBeenCalled();
+    });
+    it("a lost race on the one-row-per-day index updates the winner's row", async () => {
+      prisma.pickupWatchOverride.create.mockRejectedValue({ code: "P2002" });
+      await setPickupWatchRunning(4, true, at("00:00"));
+      expect(prisma.pickupWatchOverride.updateMany).toHaveBeenCalledWith({
+        where: { date: TODAY, centerId: 4 }, data: { mode: "on", setAt: at("00:00") },
+      });
+    });
+    it("other errors are not swallowed", async () => {
+      prisma.pickupWatchOverride.create.mockRejectedValue({ code: "P2003" });
+      await expect(setPickupWatchRunning(999, true, at("00:00"))).rejects.toMatchObject({ code: "P2003" });
+    });
+  });
+
+  describe("runPickupWatch", () => {
+    it("a stopped center is left alone: no prompt, no pickup, and its session stays open", async () => {
+      prisma.attendance.findMany.mockResolvedValue([centerRecord(1)]);
+      prisma.attendanceSession.findMany.mockResolvedValue([session({ centerId: 1 })]);
+      prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: 1, ...off(at("02:31")) }]);
+      await runPickupWatch(at("02:40")); // 10 min of silence
+      expect(markedStudents()).toEqual([]);
+      expect(prisma.pickupCheck.create).not.toHaveBeenCalled();
+      expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled(); // not closed, not restarted
+      expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
+    });
+
+    it("stopping one center does not stop another", async () => {
+      prisma.attendance.findMany.mockResolvedValue([centerRecord(1), centerRecord(2, { studentId: 6, id: 101 })]);
+      prisma.attendanceSession.findMany.mockResolvedValue([session({ id: 11, centerId: 1 }), session({ id: 12, centerId: 2 })]);
+      prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: 1, ...off(at("02:31")) }]);
+      await runPickupWatch(at("02:40"));
+      expect(markedStudents()).toEqual([6]);
+    });
+
+    it("a Stop from the morning window does not stop the afternoon one", async () => {
+      prisma.attendance.findMany.mockResolvedValue([centerRecord(null, { student: { session: "afternoon", teacher: { centerId: null } } })]);
+      prisma.attendanceSession.findMany.mockResolvedValue([session({ centerId: null })]);
+      prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: null, ...off(at("03:00")) }]);
+      resetPickupHealth(at("06:00"));
+      await runPickupWatch(at("06:40")); // 14:40 Manila, ten minutes into the afternoon window
+      expect(markedStudents()).toEqual([5]);
+    });
+
+    it("Start tracks every student outside the schedule, counting silence only from the press", async () => {
+      const startedAt = at("00:00"); // 08:00 Manila, no scheduled window
+      resetPickupHealth(at("00:00"));
+      prisma.attendance.findMany.mockResolvedValue([centerRecord(null, { arrivedAt: at("00:00") })]);
+      prisma.attendanceSession.findMany.mockResolvedValue([session({ centerId: null, startedAt })]);
+      prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: null, ...on(startedAt) }]);
+
+      await runPickupWatch(at("00:04")); // 4 min after Start: too early to mark
+      expect(markedStudents()).toEqual([]);
+      const { where } = prisma.attendance.findMany.mock.calls[0][0];
+      expect(where.student.session).toEqual({ in: ["morning", "afternoon"] });
+
+      await runPickupWatch(at("00:06")); // past the 5-minute mark
+      expect(markedStudents()).toEqual([5]);
+    });
+
+    it("Start does not reach back over a pause: nobody is marked for the minutes it was stopped", async () => {
+      // last seen 02:35; stopped 02:36; started again 02:50 -> silence counts from 02:50, not 02:35
+      resetPickupHealth(at("02:00"));
+      prisma.attendance.findMany.mockResolvedValue([centerRecord(null)]);
+      prisma.attendanceSignal.findMany.mockResolvedValue([
+        { studentId: 5, kind: "face", score: 0.9, hits: 3, lastSeenAt: at("02:35") },
+      ]);
+      prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: null, ...on(at("02:50")) }]);
+      await runPickupWatch(at("02:52"));
+      expect(markedStudents()).toEqual([]);
+    });
+
+    it("a manual window that has run its course stops tracking", async () => {
+      prisma.attendance.findMany.mockResolvedValue([centerRecord(null)]);
+      prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: null, ...on(at("00:00")) }]);
+      await runPickupWatch(at("02:01")); // 2 h + 1 min later, outside the schedule too
+      expect(prisma.attendance.findMany).not.toHaveBeenCalled();
     });
   });
 });

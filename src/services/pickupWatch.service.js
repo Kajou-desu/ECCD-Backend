@@ -69,6 +69,91 @@ export function pickupWindowStatus(now = new Date(), cfg = env.pickup) {
   return { active: true, endsAt: instantAtMinute(now, nowMinutes, endMin) };
 }
 
+// ---- the teacher's manual Start / Stop ---------------------------------------
+//
+// An override is one row per center per day (see PickupWatchOverride):
+//   * "off" (Stop) pauses the scheduled window that was open when it was pressed;
+//     a window that opens later (afternoon) is unaffected;
+//   * "on" (Start) opens a window of its own: it lasts PICKUP_WINDOW_HOURS from
+//     when it was pressed, covers every watched student, and silence is only
+//     counted from that moment (so resuming never marks anyone for the pause).
+
+// When the scheduled window now open began, or null when none is open.
+export function scheduledWindowStart(now = new Date(), cfg = env.pickup) {
+  const nowMinutes = schoolMinutesOfDay(now);
+  const open = sessionsInWindow(nowMinutes, cfg);
+  if (open.length === 0) return null;
+  return instantAtMinute(now, nowMinutes, Math.min(...open.map((s) => pickupWindow(s, cfg).startMin)));
+}
+
+export function isManualWindowOpen(override, now = new Date(), cfg = env.pickup) {
+  return override?.mode === "on" && override.setAt.getTime() + cfg.windowMs > now.getTime();
+}
+
+export function isScheduledWindowPaused(override, scheduledStart) {
+  return override?.mode === "off" && scheduledStart != null && override.setAt >= scheduledStart;
+}
+
+// What the Live attendance page shows: is tracking running right now, until when,
+// and which mode got it there ("auto" = the schedule, "on"/"off" = the teacher).
+export function pickupWatchStatus(now = new Date(), override = null, cfg = env.pickup) {
+  const scheduled = pickupWindowStatus(now, cfg);
+  if (isManualWindowOpen(override, now, cfg)) {
+    const manualEnd = new Date(override.setAt.getTime() + cfg.windowMs);
+    const endsAt = scheduled.active && scheduled.endsAt > manualEnd ? scheduled.endsAt : manualEnd;
+    return { active: true, endsAt, mode: "on" };
+  }
+  if (isScheduledWindowPaused(override, scheduledWindowStart(now, cfg))) {
+    return { active: false, endsAt: null, mode: "off" };
+  }
+  return { ...scheduled, mode: "auto" };
+}
+
+// Today's overrides, centerKey -> { mode, setAt }.
+async function loadPickupOverrides(today) {
+  const rows = await prisma.pickupWatchOverride.findMany({
+    where: { date: today },
+    select: { centerId: true, mode: true, setAt: true },
+  });
+  return new Map(rows.map((r) => [centerKey(r.centerId), { mode: r.mode, setAt: r.setAt }]));
+}
+
+export function findPickupOverride(centerId, now = new Date()) {
+  return prisma.pickupWatchOverride.findFirst({
+    where: { date: schoolDateAsUtcMidnight(now), centerId: centerKey(centerId) },
+    select: { mode: true, setAt: true },
+  });
+}
+
+async function saveOverride(centerId, mode, now) {
+  const date = schoolDateAsUtcMidnight(now);
+  const key = centerKey(centerId);
+  const data = { mode, setAt: now };
+  const existing = await prisma.pickupWatchOverride.findFirst({ where: { date, centerId: key }, select: { id: true } });
+  if (existing) {
+    await prisma.pickupWatchOverride.updateMany({ where: { id: existing.id }, data });
+    return;
+  }
+  try {
+    await prisma.pickupWatchOverride.create({ data: { date, centerId: key, ...data } });
+  } catch (err) {
+    // Two presses raced and the one-row-per-center-per-day index rejected ours:
+    // the other row exists now, so make it say what this press asked for.
+    if (err?.code !== "P2002") throw err;
+    await prisma.pickupWatchOverride.updateMany({ where: { date, centerId: key }, data });
+  }
+}
+
+// Idempotent, so a double-click or a second device is harmless: starting when
+// tracking already runs (or stopping when it doesn't) changes nothing, and
+// never restarts anyone's unseen clock. Returns the status after the change.
+export async function setPickupWatchRunning(centerId, running, now = new Date()) {
+  const current = pickupWatchStatus(now, await findPickupOverride(centerId, now));
+  if (current.active === running) return current;
+  await saveOverride(centerId, running ? "on" : "off", now);
+  return pickupWatchStatus(now, await findPickupOverride(centerId, now));
+}
+
 const latestOf = (dates) => dates.filter(Boolean).reduce((a, b) => (b > a ? b : a), new Date(0));
 
 // When the current continuous "neither face nor tag seen" stretch began: the
@@ -225,7 +310,11 @@ export async function runPickupWatch(now = new Date()) {
   for (const session of sessions.values()) await sendStopReminder(session, today, now, nowMinutes);
 
   const types = sessionsInWindow(nowMinutes);
-  if (types.length === 0) return;
+  const overrides = await loadPickupOverrides(today);
+  // Centers whose teacher pressed Start: tracked for every student, from that moment.
+  const manualStart = new Map();
+  for (const [key, override] of overrides) if (isManualWindowOpen(override, now)) manualStart.set(key, override.setAt);
+  if (types.length === 0 && manualStart.size === 0) return;
 
   // Present, not yet picked up (or auto-picked up, for the undo), with at
   // least one enabled tag: without a tag "both gone" can't be judged, so those
@@ -235,7 +324,11 @@ export async function runPickupWatch(now = new Date()) {
       date: today,
       status: "present",
       arrivedAt: { not: null },
-      student: { status: "active", session: { in: types }, bleDevices: { some: { enabled: true } } },
+      student: {
+        status: "active",
+        session: { in: manualStart.size > 0 ? SESSIONS : types },
+        bleDevices: { some: { enabled: true } },
+      },
     },
     select: {
       id: true,
@@ -246,20 +339,46 @@ export async function runPickupWatch(now = new Date()) {
       student: { select: { session: true, teacher: { select: { centerId: true } } } },
     },
   });
-  const windowStart = instantAtMinute(now, nowMinutes, Math.min(...types.map((t) => pickupWindow(t).startMin)));
+  const scheduledStart = types.length > 0 ? scheduledWindowStart(now) : null;
 
   // Each center is judged on its own. A center whose last student was just
   // picked up has no records any more but may still have a session of ours to close.
+  // A center whose teacher pressed Stop keeps its scheduled students out of the
+  // list (nothing is prompted or marked) and its session is left as it is.
   const byCenter = new Map();
+  const paused = new Set();
   for (const record of records) {
     const key = centerKey(record.student.teacher?.centerId);
-    byCenter.set(key, [...(byCenter.get(key) ?? []), record]);
+    let windowStart;
+    if (manualStart.has(key)) {
+      windowStart = manualStart.get(key);
+    } else if (types.includes(record.student.session)) {
+      if (isScheduledWindowPaused(overrides.get(key), scheduledStart)) {
+        paused.add(key);
+        continue;
+      }
+      windowStart = instantAtMinute(now, nowMinutes, pickupWindow(record.student.session).startMin);
+    } else {
+      continue;
+    }
+    byCenter.set(key, [...(byCenter.get(key) ?? []), { ...record, windowStart }]);
   }
   for (const key of sessions.keys()) if (!byCenter.has(key)) byCenter.set(key, []);
+  for (const key of sessions.keys()) {
+    if (isScheduledWindowPaused(overrides.get(key), scheduledStart) && !manualStart.has(key)) paused.add(key);
+  }
 
   for (const [key, centerRecords] of byCenter) {
     try {
-      await watchCenter({ key, records: centerRecords, session: sessions.get(key) ?? null, today, now, nowMinutes, windowStart });
+      await watchCenter({
+        key,
+        records: centerRecords,
+        session: sessions.get(key) ?? null,
+        today,
+        now,
+        windowStart: manualStart.get(key) ?? scheduledStart,
+        paused: paused.has(key),
+      });
     } catch (err) {
       // One center failing must not stop the others being watched.
       logger.error({ err, centerId: key }, "Pickup watch failed for a center");
@@ -269,7 +388,7 @@ export async function runPickupWatch(now = new Date()) {
 
 // One center's share of the periodic job. `session` is that center's active
 // session (or null).
-async function watchCenter({ key, records, session, today, now, nowMinutes, windowStart }) {
+async function watchCenter({ key, records, session, today, now, windowStart, paused }) {
   const pending = records.filter((r) => !r.pickedUpAt);
   const autoPickedUp = records.filter((r) => r.pickedUpAt && r.pickedUpAuto);
 
@@ -277,7 +396,7 @@ async function watchCenter({ key, records, session, today, now, nowMinutes, wind
   // sends frames, while a session is active.
   if (pending.length > 0) {
     session = await ensureAutoSession(today, session, windowStart, key);
-  } else if (session?.autoStarted) {
+  } else if (session?.autoStarted && !paused) {
     // Everyone is picked up: end the session this job started, which also
     // turns the teacher's camera off (the live page stops it with the session).
     await prisma.attendanceSession.updateMany({
@@ -322,13 +441,12 @@ async function watchCenter({ key, records, session, today, now, nowMinutes, wind
   for (const record of pending) {
     try {
       const { studentId } = record;
-      const { startMin } = pickupWindow(record.student.session);
       const since = absentSince({
         lastFaceAt: latest.get(`${studentId}:face`)?.lastSeenAt,
         lastBleAt: latest.get(`${studentId}:ble`)?.lastSeenAt,
         stillHereAt: stillHere.get(studentId),
         arrivedAt: record.arrivedAt,
-        windowStart: instantAtMinute(now, nowMinutes, startMin),
+        windowStart: record.windowStart,
         unhealthyAt: unhealthyAtFor(key),
       });
       const action = decidePickupAction({ now, absentSince: since, lastCheck: lastCheck.get(studentId) ?? null });

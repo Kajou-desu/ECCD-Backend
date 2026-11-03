@@ -107,6 +107,7 @@ model Center {
   createdAt DateTime @default(now())
   users     User[]
   attendanceSessions AttendanceSession[]
+  pickupWatchOverrides PickupWatchOverride[]
   materials Material[]
   albums    Album[]
 
@@ -294,6 +295,30 @@ model PickupCheck {
   @@index([studentId, date])
   @@index([date])
   @@map("pickup_checks")
+}
+
+enum PickupWatchMode {
+  on
+  off
+}
+
+// A teacher's manual Start/Stop of automatic pickup for one center on one school
+// day (the button on the Live attendance page). "off" pauses the scheduled window
+// that was open when it was pressed; "on" opens a window of its own that starts at
+// setAt. At most one row per center per day — enforced by a partial unique index
+// in the migration (Prisma can't express expression indexes); centerId is null
+// only for Teachers not yet assigned to a center, who share one row of their own.
+model PickupWatchOverride {
+  id       Int             @id @default(autoincrement())
+  date     DateTime        @db.Date // school-timezone day, computed server-side
+  centerId Int?
+  mode     PickupWatchMode
+  setAt    DateTime
+
+  center Center? @relation(fields: [centerId], references: [id], onDelete: Cascade)
+
+  @@index([date])
+  @@map("pickup_watch_overrides")
 }
 
 enum AttendanceSessionStatus {

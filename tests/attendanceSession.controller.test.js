@@ -8,11 +8,12 @@ vi.mock("../src/lib/prisma.js", () => ({
       updateMany: vi.fn(),
     },
     pickupCheck: { findMany: vi.fn().mockResolvedValue([]) },
+    pickupWatchOverride: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]), create: vi.fn(), updateMany: vi.fn() },
   },
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { getCurrentSession, startSession, stopSession } = await import(
+const { getCurrentSession, startSession, stopSession, startPickupWatch, stopPickupWatch } = await import(
   "../src/controllers/attendanceSession.controller.js"
 );
 
@@ -50,7 +51,7 @@ describe("getCurrentSession", () => {
     prisma.attendanceSession.findFirst.mockResolvedValue(null);
     const res = mockRes();
     await getCurrentSession(teacherReq, res, vi.fn());
-    expect(res.json).toHaveBeenCalledWith({ session: null, pickupChecks: [], pickupWindow: { active: false, endsAt: null } });
+    expect(res.json).toHaveBeenCalledWith({ session: null, pickupChecks: [], pickupWindow: { active: false, endsAt: null, mode: "auto" } });
     expect(prisma.pickupCheck.findMany).not.toHaveBeenCalled(); // nothing to look up without a session
   });
 
@@ -305,5 +306,52 @@ describe("stopSession", () => {
     await stopSession(teacherAt(2), res, next);
     expect(next).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith({ session: null });
+  });
+});
+
+describe("start / stop automatic pickup", () => {
+  // 7:31 AM Manila: outside both pickup windows, so Start has something to do and Stop does not.
+  it("Start records an override for the caller's own center and reports it", async () => {
+    // status read, existing-row lookup, then the status read after saving
+    prisma.pickupWatchOverride.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ mode: "on", setAt: new Date() });
+    const res = mockRes();
+    await startPickupWatch(teacherAt(4, { body: { centerId: 9 } }), res, vi.fn()); // a Teacher's body is ignored
+    expect(prisma.pickupWatchOverride.create).toHaveBeenCalledWith({
+      data: { date: TODAY, centerId: 4, mode: "on", setAt: new Date("2026-09-19T23:31:00.000Z") },
+    });
+    expect(res.json).toHaveBeenCalledWith({ pickupWindow: expect.objectContaining({ active: true, mode: "on" }) });
+  });
+
+  it("Stop does nothing when tracking is not running", async () => {
+    const res = mockRes();
+    await stopPickupWatch(teacherAt(4), res, vi.fn());
+    expect(prisma.pickupWatchOverride.create).not.toHaveBeenCalled();
+    expect(prisma.pickupWatchOverride.updateMany).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({ pickupWindow: expect.objectContaining({ active: false }) });
+  });
+
+  it("an Admin must name a valid center", async () => {
+    const next = vi.fn();
+    await startPickupWatch(adminReq({ body: {} }), mockRes(), next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    expect(prisma.pickupWatchOverride.create).not.toHaveBeenCalled();
+  });
+
+  it("an unknown center is a 404, not a server error", async () => {
+    prisma.pickupWatchOverride.findFirst.mockResolvedValue(null);
+    prisma.pickupWatchOverride.create.mockRejectedValue({ code: "P2003" });
+    const next = vi.fn();
+    await startPickupWatch(adminReq({ body: { centerId: 999 } }), mockRes(), next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 404 }));
+  });
+
+  it("any other role is forbidden", async () => {
+    const next = vi.fn();
+    await startPickupWatch({ user: { id: 8, role: "Parent" }, body: {} }, mockRes(), next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
+    expect(prisma.pickupWatchOverride.create).not.toHaveBeenCalled();
   });
 });

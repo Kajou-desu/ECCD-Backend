@@ -5,7 +5,13 @@ import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 import { isSignalPresent } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured } from "../services/recognitionClient.js";
 import { isGatewayOnline } from "../lib/hardwareStatus.js";
-import { listOpenPickupChecks, pickupWindowStatus } from "../services/pickupWatch.service.js";
+import {
+  findPickupOverride,
+  listOpenPickupChecks,
+  pickupWatchStatus,
+  pickupWindowStatus,
+  setPickupWatchRunning,
+} from "../services/pickupWatch.service.js";
 import { liveStudentScope } from "../utils/studentScope.js";
 import { sessionCenterFor } from "../utils/sessionScope.js";
 import { AppError } from "../middleware/errorHandler.js";
@@ -49,7 +55,8 @@ export async function getCurrentSession(req, res, next) {
     res.json({
       session: toResponse(session),
       pickupChecks: session ? await listOpenPickupChecks(req.user) : [],
-      pickupWindow: pickupWindowStatus(),
+      pickupWindow:
+        centerId === undefined ? pickupWindowStatus() : pickupWatchStatus(new Date(), await findPickupOverride(centerId)),
     });
   } catch (err) {
     next(err);
@@ -119,6 +126,26 @@ export async function stopSession(req, res, next) {
     next(err);
   }
 }
+
+// POST /attendance/session/pickup-watch/start | /stop -> { pickupWindow: { active, endsAt, mode } }
+// The Live attendance page's Start/Stop auto pickup button. Acts only on the
+// caller's own center (an Admin names it, see utils/sessionScope.js), and is
+// idempotent. It records the choice only: the pickup job does the work.
+function setPickupWatch(running) {
+  return async (req, res, next) => {
+    try {
+      const centerId = sessionCenterFor(req);
+      const pickupWindow = await setPickupWatchRunning(centerId, running);
+      logger.info({ userId: req.user.id, centerId, running }, "Automatic pickup switched by a user");
+      res.json({ pickupWindow });
+    } catch (err) {
+      // An Admin named a center that doesn't exist (foreign key).
+      next(err?.code === "P2003" ? new AppError("Center not found", 404) : err);
+    }
+  };
+}
+export const startPickupWatch = setPickupWatch(true);
+export const stopPickupWatch = setPickupWatch(false);
 
 // GET /attendance/session/monitor — everything the live monitor screen needs in
 // one call: who is verified, who has only one of the two signals so far, and
