@@ -4,8 +4,12 @@ vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     material: { findUnique: vi.fn() },
     student: { findUnique: vi.fn() },
-    submission: { create: vi.fn() },
+    submission: { create: vi.fn(), findMany: vi.fn() },
   },
+}));
+vi.mock("../src/lib/fileStorage.js", () => ({
+  removeStoredFiles: vi.fn().mockResolvedValue(undefined),
+  removeUploadedFiles: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../src/utils/ownership.js", () => ({ assertCanAccessStudent: vi.fn() }));
 vi.mock("../src/middleware/upload.js", () => ({ fileUrl: () => "/uploads/f.png" }));
@@ -35,6 +39,7 @@ beforeEach(() => {
   prisma.student.findUnique.mockResolvedValue({ teacher: { centerId: 4 } });
   prisma.material.findUnique.mockResolvedValue({ id: 3, title: "Shapes" });
   prisma.submission.create.mockResolvedValue({ id: 9, fileUrl: "/uploads/f.png" });
+  prisma.submission.findMany.mockResolvedValue([]);
 });
 
 describe("submitStudentWork notifications", () => {

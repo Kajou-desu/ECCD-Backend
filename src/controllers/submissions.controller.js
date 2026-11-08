@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
+import { removeStoredFiles, removeUploadedFiles } from "../lib/fileStorage.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 import { staffContentScopeFor } from "../utils/contentScope.js";
@@ -58,7 +59,7 @@ export async function getMaterialSubmissions(req, res, next) {
             fileName: true,
             fileUrl: true,
             submittedAt: true,
-            student: { select: { name: true } },
+            student: { select: { name: true, session: true } },
           },
         },
       },
@@ -71,6 +72,7 @@ export async function getMaterialSubmissions(req, res, next) {
       submissions: submissions.map(({ student, ...submission }) => ({
         ...submission,
         studentName: student.name,
+        studentSession: student.session,
         fileUrl: signFileUrl(req, submission.fileUrl),
       })),
     });
@@ -106,14 +108,41 @@ export async function submitStudentWork(req, res, next) {
         : await prisma.material.findUnique({ where: { id: materialId, centerId: studentCenterId } });
     if (!material) return res.status(404).json({ message: "Material not found" });
 
-    const submission = await prisma.submission.create({
-      data: {
-        materialId,
-        studentId,
-        fileUrl: fileUrl(req, req.file.filename),
-        fileName: req.file.originalname,
-      },
+    // A student has one piece of work per material. If there is already one,
+    // the caller must say so explicitly (replace=true) before it is swapped;
+    // otherwise nothing is changed and the new upload is discarded.
+    const existing = await prisma.submission.findMany({
+      where: { materialId, studentId },
+      select: { id: true, fileUrl: true },
     });
+    const replace = req.body.replace === "true";
+    if (existing.length > 0 && !replace) {
+      await removeUploadedFiles(req);
+      return res.status(409).json({
+        message: "This student has already uploaded work for this material.",
+        code: "SUBMISSION_EXISTS",
+      });
+    }
+
+    const newData = {
+      materialId,
+      studentId,
+      fileUrl: fileUrl(req, req.file.filename),
+      fileName: req.file.originalname,
+    };
+    // Swap in one transaction so a failure can't leave the student with no work.
+    const submission =
+      existing.length > 0
+        ? (
+            await prisma.$transaction([
+              prisma.submission.deleteMany({ where: { id: { in: existing.map((s) => s.id) } } }),
+              prisma.submission.create({ data: newData }),
+            ])
+          )[1]
+        : await prisma.submission.create({ data: newData });
+
+    // The replaced files are unreachable now; best-effort cleanup (never throws).
+    if (existing.length > 0) await removeStoredFiles(existing.map((s) => s.fileUrl));
 
     // Only when a parent/guardian submits: a teacher/admin uploading on a
     // child's behalf must not notify the teacher about their own action.

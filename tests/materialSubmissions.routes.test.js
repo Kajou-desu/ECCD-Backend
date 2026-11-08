@@ -36,7 +36,7 @@ const MATERIAL = {
       fileName: "kenneth.pdf",
       fileUrl: "http://localhost:4000/api/files/1758400000000-0123456789abcdef.pdf",
       submittedAt: SUBMITTED_AT,
-      student: { name: "Kenneth Alvarez" },
+      student: { name: "Kenneth Alvarez", session: "morning" },
     },
   ],
 };
@@ -107,7 +107,7 @@ describe("GET /api/materials/:id/submissions — behaviour", () => {
 
     expect(res.body.submissions[0]).not.toHaveProperty("student");
     expect(Object.keys(res.body.submissions[0]).sort()).toEqual(
-      ["fileName", "fileUrl", "id", "studentId", "studentName", "submittedAt"],
+      ["fileName", "fileUrl", "id", "studentId", "studentName", "studentSession", "submittedAt"],
     );
   });
 
@@ -131,7 +131,7 @@ describe("GET /api/materials/:id/submissions — behaviour", () => {
             fileName: true,
             fileUrl: true,
             submittedAt: true,
-            student: { select: { name: true } },
+            student: { select: { name: true, session: true } },
           },
         },
       },
