@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
@@ -528,5 +528,67 @@ describe("getChildAttendance — log dates", () => {
       spy.mockRestore();
     }
     expect(res.json.mock.calls[0][0].logs[0].date).toBe("Oct 01, 2026");
+  });
+});
+
+describe("late is decided once, when the arrival is recorded", () => {
+  afterEach(() => vi.useRealTimers());
+  const at820 = () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-06T00:20:00.000Z")); // 8:20 AM Manila
+  };
+  const mark = () =>
+    updateAttendance({ params: { studentId: "5" }, body: { date: "2026-11-06", status: "present" } }, mockRes(), vi.fn());
+
+  it("stores late=true for an arrival after the session's start", async () => {
+    at820();
+    prisma.student.findMany.mockResolvedValueOnce([{ id: 5, session: "morning", teacher: null }]); // default 8:00 start
+    prisma.attendance.upsert.mockResolvedValue({ id: 1 });
+    await mark();
+    const { create, update } = prisma.attendance.upsert.mock.calls[0][0];
+    expect([create.late, update.late]).toEqual([true, true]);
+  });
+
+  it("stores late=false when the student's center starts later", async () => {
+    at820();
+    prisma.student.findMany.mockResolvedValueOnce([{ id: 5, session: "morning", teacher: { centerId: 10 } }]);
+    prisma.schoolTimeSettings.findMany.mockResolvedValueOnce([{ centerId: 10, morningStartMin: 510, afternoonStartMin: 780 }]);
+    prisma.attendance.upsert.mockResolvedValue({ id: 1 });
+    await mark();
+    expect(prisma.attendance.upsert.mock.calls[0][0].create.late).toBe(false);
+  });
+
+  it("stores late=false for absent, and for a day marked by hand later (no arrival time)", async () => {
+    prisma.student.findMany.mockResolvedValue([{ id: 5, session: "morning", teacher: null }]);
+    prisma.attendance.upsert.mockResolvedValue({ id: 1 });
+    await updateAttendance({ params: { studentId: "5" }, body: { date: "2026-11-06", status: "absent" } }, mockRes(), vi.fn());
+    await updateAttendance({ params: { studentId: "5" }, body: { date: "2020-01-15", status: "present" } }, mockRes(), vi.fn());
+    expect(prisma.attendance.upsert.mock.calls.map((c) => c[0].create.late)).toEqual([false, false]);
+  });
+
+  it("bulk entry stores the flag per student", async () => {
+    at820();
+    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.student.findMany.mockResolvedValueOnce([
+      { id: 1, session: "morning", teacher: null },
+      { id: 2, session: "afternoon", teacher: null },
+    ]);
+    prisma.$transaction.mockResolvedValue([{ id: 11 }, { id: 12 }]);
+    prisma.attendance.upsert.mockReturnValue({});
+    await recordAttendance(
+      { user: admin, body: [{ studentId: 1, date: "2026-11-06", status: "present" }, { studentId: 2, date: "2026-11-06", status: "present" }] },
+      mockRes(), vi.fn(),
+    );
+    expect(prisma.attendance.upsert.mock.calls.map((c) => c[0].create.late)).toEqual([true, false]);
+  });
+
+  it("a stored answer survives the student's session changing afterwards", async () => {
+    prisma.student.findMany.mockResolvedValueOnce([{ id: 1, name: "A", session: "afternoon", photo: null, teacher: null }]); // moved to afternoon
+    prisma.attendance.findMany.mockResolvedValueOnce([
+      { studentId: 1, status: "present", arrivedAt: new Date("2026-11-06T00:20:00Z"), late: true, verification: null },
+    ]);
+    const res = mockRes();
+    await getAttendance({ user: admin, query: { date: "2026-11-06" } }, res, vi.fn());
+    expect(res.json.mock.calls[0][0][0].late).toBe(true); // judged as a morning arrival when it happened
   });
 });

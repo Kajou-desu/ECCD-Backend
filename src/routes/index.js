@@ -17,6 +17,7 @@ import userRoutes from "./users.routes.js";
 import profileRoutes from "./profile.routes.js";
 import centerRoutes from "./centers.routes.js";
 import schoolTimesRoutes from "./schoolTimes.routes.js";
+import studentTransferRoutes from "./studentTransfers.routes.js";
 import activityLogRoutes from "./activityLogs.routes.js";
 import notificationRoutes from "./notifications.routes.js";
 
@@ -44,6 +45,7 @@ router.use("/users", userRoutes); // /api/users/all, /api/users/register, /api/u
 router.use("/activity-logs", activityLogRoutes); // /api/activity-logs (read: Admin; POST /export: any signed-in user)
 router.use("/centers", centerRoutes); // /api/centers (list: Teacher/Admin; create/rename: Admin)
 router.use("/school-times", schoolTimesRoutes); // /api/school-times (Teacher: own center; Admin: any center)
+router.use("/student-transfers", studentTransferRoutes); // /api/student-transfers (Teacher/Admin; see controller for who may do what)
 router.use("/profile", profileRoutes); // /api/profile/update
 router.use("/notifications", notificationRoutes); // /api/notifications/*
 

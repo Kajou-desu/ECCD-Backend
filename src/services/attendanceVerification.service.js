@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { env } from "../config/env.js";
 import { notifyArrival } from "./attendanceNotification.service.js";
+import { loadLateRules, lateFlag } from "../lib/lateFlag.js";
 
 // Face + BLE => verified attendance.
 //
@@ -51,15 +52,16 @@ const keyOf = (sessionId, studentId, kind) => ({ sessionId_studentId_kind: { ses
 // earlier verification) is never overwritten; the unique (studentId, date) key
 // and the status-guarded updateMany make this race-safe.
 async function markVerified({ sessionId, sessionDate, studentId, face, ble, now }) {
+  const late = lateFlag(await loadLateRules([studentId]), studentId, "present", now);
   const result = await prisma.$transaction(async (tx) => {
     const { count } = await tx.attendance.createMany({
-      data: [{ studentId, date: sessionDate, status: "present", arrivedAt: now }],
+      data: [{ studentId, date: sessionDate, status: "present", arrivedAt: now, late }],
       skipDuplicates: true,
     });
     if (count === 0) {
       const { count: overridden } = await tx.attendance.updateMany({
         where: { studentId, date: sessionDate, status: "absent" },
-        data: { status: "present", arrivedAt: now, pickedUpAt: null, pickedUpAuto: false },
+        data: { status: "present", arrivedAt: now, late, pickedUpAt: null, pickedUpAuto: false },
       });
       if (overridden === 0) return { state: "already_recorded" };
     }

@@ -20,3 +20,11 @@ export function lateCutoffFor(session, times = DEFAULT_SCHOOL_TIMES) {
 export function isLateArrival(status, arrivedAt, session, times) {
   return status === "present" && Boolean(arrivedAt) && schoolMinutesOfDay(arrivedAt) > lateCutoffFor(session, times);
 }
+
+// What to show for a stored record: the decision made when it was recorded
+// (`record.late`, see lib/lateFlag.js). Only a record from before that column
+// existed (late is null) is still judged live, with the student's CURRENT
+// session and center times, until the backfill script has fixed it.
+export function lateOf(record, session, times) {
+  return record.late ?? isLateArrival(record.status, record.arrivedAt, session, times);
+}

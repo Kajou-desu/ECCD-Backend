@@ -60,6 +60,9 @@ model User {
   noClassDaysSet NoClassDay[]
   // Students this Teacher is connected to (one teacher per student).
   assignedStudents Student[] @relation("StudentTeacher")
+  // Transfer requests this Teacher started / was asked to accept.
+  transfersOut StudentTransfer[] @relation("TransferFrom")
+  transfersIn  StudentTransfer[] @relation("TransferTo")
 
   @@index([centerId])
   @@map("users")
@@ -231,6 +234,7 @@ model Student {
   updatedAt DateTime @updatedAt
 
   parents     ParentChild[]
+  transfers   StudentTransfer[]
   attendance  Attendance[]
   pickupChecks PickupCheck[]
   submissions Submission[]
@@ -275,6 +279,12 @@ model Attendance {
   date      DateTime         @db.Date
   status    AttendanceStatus
   arrivedAt DateTime?
+  // Whether the arrival was after the session's start time. Decided ONCE, when
+  // the arrival is recorded, against the student's session and center times of
+  // that moment, so moving a student to another session/center or changing a
+  // center's school times never rewrites history. null = a record from before
+  // this column existed (judged live until the backfill script has run).
+  late      Boolean?
   // When the student was picked up. Set either manually via
   // PATCH /attendance/:studentId/pickup (Teacher/Admin), or automatically by
   // the pickup watch (services/pickupWatch.service.js) once neither the face
@@ -637,4 +647,43 @@ model PushSubscription {
 
   @@index([userId])
   @@map("push_subscriptions")
+}
+
+enum TransferStatus {
+  pending
+  accepted
+  declined
+  cancelled
+}
+
+// Moving a student to another session, teacher or center. It always starts with
+// the student's current teacher (or an Admin). A move that stays inside one
+// center, or only changes the session, is applied at once and stored as
+// "accepted"; a move to another center is "pending" until the receiving teacher
+// accepts. Centers are copied in as plain ids so the record still reads
+// correctly later. At most one pending request per student (a partial unique
+// index in the migration; Prisma can't express it).
+model StudentTransfer {
+  id            Int            @id @default(autoincrement())
+  studentId     Int
+  fromTeacherId Int?
+  toTeacherId   Int?
+  fromCenterId  Int?
+  toCenterId    Int?
+  fromSession   Session
+  toSession     Session
+  status        TransferStatus @default(pending)
+  createdById   Int?
+  resolvedById  Int?
+  createdAt     DateTime       @default(now())
+  resolvedAt    DateTime?
+
+  student     Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  fromTeacher User?   @relation("TransferFrom", fields: [fromTeacherId], references: [id], onDelete: SetNull)
+  toTeacher   User?   @relation("TransferTo", fields: [toTeacherId], references: [id], onDelete: SetNull)
+
+  @@index([studentId, status])
+  @@index([toTeacherId, status])
+  @@index([fromTeacherId, status])
+  @@map("student_transfers")
 }

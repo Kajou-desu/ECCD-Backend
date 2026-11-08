@@ -48,7 +48,7 @@ describe("student detail teacher center", () => {
       birthday: new Date("2023-03-04T00:00:00.000Z"),
       photo: null,
       documents: [],
-      teacher: { id: 2, name: "Taylor Reed", center: { name: "North ECCD Center" } },
+      teacher: { id: 2, name: "Taylor Reed", centerId: 4, center: { name: "North ECCD Center" } },
     });
     const res = mockRes();
 
@@ -62,7 +62,7 @@ describe("student detail teacher center", () => {
       expect.objectContaining({
         where: { id: 7 },
         include: expect.objectContaining({
-          teacher: { select: { id: true, name: true, center: { select: { name: true } } } },
+          teacher: { select: { id: true, name: true, centerId: true, center: { select: { name: true } } } },
         }),
       }),
     );
@@ -70,6 +70,7 @@ describe("student detail teacher center", () => {
       expect.objectContaining({
         teacher: "Taylor Reed",
         teacherCenterLocation: "North ECCD Center",
+        teacherCenterId: 4,
         school: "North ECCD Center",
       }),
     );

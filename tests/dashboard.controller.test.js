@@ -201,8 +201,10 @@ describe("getDashboardStats", () => {
   afterEach(() => vi.useRealTimers());
 
   // 8:20 AM and 7:50 AM local time (Asia/Manila) on the school day 2026-09-30.
-  const row = (arrivedAt, centerId = undefined, session = "morning") => ({
+  const row = (arrivedAt, centerId = undefined, session = "morning", late = null) => ({
+    status: "present",
     arrivedAt: arrivedAt ? new Date(arrivedAt) : null,
+    late,
     student: { session, teacher: centerId === undefined ? null : { centerId } },
   });
 
@@ -230,6 +232,20 @@ describe("getDashboardStats", () => {
       excusedToday: 2,
       totalMaterials: 3,
     });
+  });
+
+  it("trusts the stored late flag over the current times, and judges only legacy records (late null) live", async () => {
+    prisma.student.count.mockResolvedValue(3);
+    prisma.attendance.count.mockResolvedValue(0);
+    prisma.material.count.mockResolvedValue(0);
+    prisma.attendance.findMany.mockResolvedValue([
+      row("2026-09-30T00:20:00Z", undefined, "morning", false), // 8:20 but stored on time: stays on time
+      row("2026-09-29T23:50:00Z", undefined, "morning", true), // 7:50 but stored late: stays late
+      row("2026-09-30T00:20:00Z", undefined, "morning", null), // legacy: judged now (default 8:00 start) -> late
+    ]);
+    const res = mockRes();
+    await getDashboardStats({ user: { id: 1, role: "Admin" } }, res, vi.fn());
+    expect(res.json.mock.calls[0][0].lateToday).toBe(2);
   });
 
   it("counts late against each student's own center's school times", async () => {

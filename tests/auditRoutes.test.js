@@ -96,6 +96,23 @@ describe("audit routes", () => {
     expect(prisma.center.findUnique.mock.calls[1][0].where).toEqual({ id: 8 });
   });
 
+  it("transfers are logged by student and teacher name: asked, applied, accepted, declined, cancelled", async () => {
+    const body = (status, over = {}) => ({ id: 7, status, student: { name: "Ana Cruz" }, toTeacher: { name: "Dina" }, fromSession: "morning", toSession: "morning", ...over });
+    await run(routes.auditTransferCreate, { body: body("pending") });
+    await run(routes.auditTransferCreate, { body: body("accepted", { toSession: "afternoon" }) });
+    await run(routes.auditTransferAccept, { body: body("accepted") });
+    await run(routes.auditTransferDecline, { body: body("declined") });
+    await run(routes.auditTransferCancel, { body: body("cancelled") });
+    expect(recordActivity.mock.calls.map((c) => [c[0].action, c[0].summary])).toEqual([
+      ["student.transfer", 'Asked to transfer student "Ana Cruz" to "Dina"'],
+      ["student.transfer", 'Transferred student "Ana Cruz" to "Dina" (afternoon session)'],
+      ["student.transfer", 'Accepted transfer of student "Ana Cruz" to "Dina"'],
+      ["student.transfer_declined", 'Declined transfer of student "Ana Cruz" to "Dina"'],
+      ["student.transfer_cancelled", 'Cancelled transfer of student "Ana Cruz" to "Dina"'],
+    ]);
+    expect(recordActivity.mock.calls[0][0].targetId).toBe(7); // the transfer's id, not a student id
+  });
+
   it("a student delete names the student read before the delete", async () => {
     prisma.student.findUnique.mockResolvedValue({ name: "Ana Cruz" });
     await run(routes.auditStudentDelete, { req: { params: { id: "12" } }, status: 204 });

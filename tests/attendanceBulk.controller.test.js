@@ -167,6 +167,14 @@ describe("importAttendance", () => {
     expect(prisma.attendanceVerification.deleteMany).toHaveBeenCalledOnce();
   });
 
+  it("stores late=false on imported records (back-dated days have no arrival time to judge)", async () => {
+    prisma.student.findMany.mockResolvedValue([{ id: 1, name: "Ana Cruz", session: "morning", teacher: null }]);
+    prisma.attendance.findMany.mockResolvedValue([]);
+    await run({ records: [{ studentName: "Ana Cruz", date: "2026-09-02", status: "present" }] });
+    const { create, update } = prisma.attendance.upsert.mock.calls[0][0];
+    expect([create.late, update.late]).toEqual([false, false]);
+  });
+
   it("matches names ignoring case, extra spaces and how an accent was typed", async () => {
     prisma.student.findMany.mockResolvedValue([{ id: 1, name: "José Dela Cruz" }]);
     prisma.attendance.findMany.mockResolvedValue([]);

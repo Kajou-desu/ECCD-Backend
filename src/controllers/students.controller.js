@@ -52,7 +52,7 @@ const LIST_SELECT = {
 // plus embedded documents and the connected teacher.
 const DETAIL_INCLUDE = {
   documents: true,
-  teacher: { select: { id: true, name: true, center: { select: { name: true } } } },
+  teacher: { select: { id: true, name: true, centerId: true, center: { select: { name: true } } } },
 };
 
 // Prisma DateTime -> plain YYYY-MM-DD. Needed because StudentForm.jsx feeds
@@ -76,6 +76,8 @@ function toStudentDetailResponse(req, student) {
     ...rest,
     teacher: teacher?.name ?? null,
     teacherCenterLocation: teacher?.center?.name ?? null,
+    // Lets the transfer dialog say whether a move stays inside the center.
+    teacherCenterId: teacher?.centerId ?? null,
     // StudentProfileHeader.jsx reads `student.school`. There is no school column;
     // the school/center is the assigned teacher's center, so derive it here.
     school: teacher?.center?.name ?? null,

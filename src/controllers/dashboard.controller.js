@@ -4,7 +4,7 @@ import { requireNonEmptyString, optionalString, requireStringArray, requireDateS
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 import { studentScopeFor } from "../utils/ownership.js";
 import { contentScopeFor, staffContentScopeFor, inContentScope } from "../utils/contentScope.js";
-import { isLateArrival } from "../utils/late.js";
+import { lateOf } from "../utils/late.js";
 import { loadSchoolTimes, schoolTimesFor } from "../lib/schoolTimes.js";
 
 // The numbers cover the students and materials the user can see: a Teacher's
@@ -28,7 +28,9 @@ export async function getDashboardStats(req, res, next) {
       prisma.attendance.findMany({
         where: { date: todayDate, status: "present", ...studentFilter },
         select: {
+          status: true,
           arrivedAt: true,
+          late: true,
           student: { select: { session: true, teacher: { select: { centerId: true } } } },
         },
       }),
@@ -39,7 +41,7 @@ export async function getDashboardStats(req, res, next) {
     const schoolTimes = await loadSchoolTimes(presentRows.map((r) => r.student.teacher?.centerId));
     // Late is a subset of present: they did arrive, just after their session began.
     const lateToday = presentRows.filter((r) =>
-      isLateArrival("present", r.arrivedAt, r.student.session, schoolTimesFor(schoolTimes, r.student.teacher?.centerId)),
+      lateOf(r, r.student.session, schoolTimesFor(schoolTimes, r.student.teacher?.centerId)),
     ).length;
 
     res.json({ totalStudents, presentToday: presentRows.length, lateToday, absentToday, excusedToday, totalMaterials });

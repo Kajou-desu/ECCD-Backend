@@ -114,6 +114,33 @@ export const auditAttendanceDelete = audit("attendance.delete", {
   },
 });
 
+// ---- student transfers ----
+// The same "student.transfer" action covers asking for one and a move that was
+// applied at once; the sentence says which. Only names and sessions are logged.
+const transferSubject = (body) => `${quote(body.student?.name)} to ${quote(body.toTeacher?.name)}`;
+export const auditTransferCreate = audit("student.transfer", {
+  target: "student_transfer",
+  describe: (_req, body) => {
+    if (!body?.student) return null;
+    const session = body.fromSession !== body.toSession ? ` (${body.toSession} session)` : "";
+    return body.status === "accepted"
+      ? `Transferred student ${transferSubject(body)}${session}`
+      : `Asked to transfer student ${transferSubject(body)}${session}`;
+  },
+});
+export const auditTransferAccept = audit("student.transfer", {
+  target: "student_transfer",
+  describe: (_req, body) => body?.student && `Accepted transfer of student ${transferSubject(body)}`,
+});
+export const auditTransferDecline = audit("student.transfer_declined", {
+  target: "student_transfer",
+  describe: (_req, body) => body?.student && `Declined transfer of student ${transferSubject(body)}`,
+});
+export const auditTransferCancel = audit("student.transfer_cancelled", {
+  target: "student_transfer",
+  describe: (_req, body) => body?.student && `Cancelled transfer of student ${transferSubject(body)}`,
+});
+
 // ---- centers, events, materials ----
 export const auditCenterCreate = audit("center.create", {
   target: "center",

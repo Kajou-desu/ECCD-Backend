@@ -3,7 +3,8 @@ import { assertCanAccessStudent, assertCanAccessStudents, studentScopeFor } from
 import { AppError } from "../middleware/errorHandler.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { schoolMinutesOfDay, schoolDateString } from "../utils/schoolDate.js";
-import { isLateArrival } from "../utils/late.js";
+import { lateOf } from "../utils/late.js";
+import { loadLateRules, lateFlag } from "../lib/lateFlag.js";
 import { loadSchoolTimes, schoolTimesFor } from "../lib/schoolTimes.js";
 import { notifyArrival, notifyPickup } from "../services/attendanceNotification.service.js";
 import {
@@ -84,12 +85,9 @@ export async function getAttendance(req, res, next) {
       status: attendanceByStudentId.get(s.id)?.status ?? null,
       arrivedAt: attendanceByStudentId.get(s.id)?.arrivedAt ?? null,
       pickedUpAt: attendanceByStudentId.get(s.id)?.pickedUpAt ?? null,
-      late: isLateArrival(
-        attendanceByStudentId.get(s.id)?.status,
-        attendanceByStudentId.get(s.id)?.arrivedAt,
-        s.session,
-        schoolTimesFor(schoolTimes, s.teacher?.centerId),
-      ),
+      late: attendanceByStudentId.has(s.id)
+        ? lateOf(attendanceByStudentId.get(s.id), s.session, schoolTimesFor(schoolTimes, s.teacher?.centerId))
+        : false,
       // true only for a "present" the system recorded itself (face + BLE); a
       // record a teacher entered or changed by hand is never "verified".
       verified:
@@ -128,11 +126,14 @@ export async function updateAttendance(req, res, next) {
         }))?.status === "present"
       : false;
 
+    const arrivedAt = arrivedAtFor(status, date);
+    const late = lateFlag(await loadLateRules([studentId]), studentId, status, arrivedAt);
     const record = await prisma.attendance.upsert({
       where: { studentId_date: { studentId, date: toDate(date) } },
       update: {
         status,
-        arrivedAt: arrivedAtFor(status, date),
+        arrivedAt,
+        late,
         // Re-marking a status re-asserts the day from scratch: a stale
         // pickup must not survive (e.g. present -> picked up -> absent ->
         // present would otherwise show as already picked up).
@@ -143,7 +144,8 @@ export async function updateAttendance(req, res, next) {
         studentId,
         date: toDate(date),
         status,
-        arrivedAt: arrivedAtFor(status, date),
+        arrivedAt,
+        late,
       },
     });
     // A manual edit supersedes any automatic evidence for this record.
@@ -251,13 +253,17 @@ export async function recordAttendance(req, res, next) {
     const existingByKey = new Map(existing.map((r) => [`${r.studentId}:${r.date.toISOString().slice(0, 10)}`, r]));
     const toWrite = validated.filter((entry) => existingByKey.get(keyOf(entry))?.status !== entry.status);
 
+    const rules = await loadLateRules(toWrite.map((entry) => entry.studentId));
     const written = await prisma.$transaction(
-      toWrite.map(({ studentId, date, dateString, status }) =>
-        prisma.attendance.upsert({
+      toWrite.map(({ studentId, date, dateString, status }) => {
+        const arrivedAt = arrivedAtFor(status, dateString);
+        const late = lateFlag(rules, studentId, status, arrivedAt);
+        return prisma.attendance.upsert({
           where: { studentId_date: { studentId, date } },
           update: {
             status,
-            arrivedAt: arrivedAtFor(status, dateString),
+            arrivedAt,
+            late,
             pickedUpAt: null,
             pickedUpAuto: false,
           },
@@ -265,10 +271,11 @@ export async function recordAttendance(req, res, next) {
             studentId,
             date,
             status,
-            arrivedAt: arrivedAtFor(status, dateString),
+            arrivedAt,
+            late,
           },
-        })
-      )
+        });
+      })
     );
     // A manual edit supersedes any automatic evidence for the records that
     // actually changed.
@@ -334,7 +341,7 @@ export async function getChildAttendance(req, res, next) {
 
       if (r.status === "present") {
         presentDays += 1;
-        if (isLateArrival(r.status, r.arrivedAt, session, schoolTimes)) lateArrivals += 1;
+        if (lateOf(r, session, schoolTimes)) lateArrivals += 1;
       } else if (r.status === "absent") absentDays += 1;
       else if (r.status === "excused") excusedDays += 1;
 

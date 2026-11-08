@@ -42,6 +42,10 @@ const db = vi.hoisted(() => {
         return state.attendance.find((a) => a.studentId === k.studentId && a.date.getTime() === k.date.getTime()) ?? null;
       },
     },
+    // Late rules (lib/lateFlag.js): every student is a morning-session student with no center.
+    student: {
+      findMany: async ({ where }) => where.id.in.map((id) => ({ id, session: "morning", teacher: null })),
+    },
     attendanceVerification: {
       create: async ({ data }) => { const row = { id: state.nextId++, ...data }; state.verifications.push(row); return row; },
     },
@@ -151,6 +155,7 @@ describe("recordSignal (full flow against the in-memory tables)", () => {
 
     expect(db.state.attendance).toHaveLength(1);
     expect(db.state.attendance[0]).toMatchObject({ studentId: 5, date: DATE, status: "present", arrivedAt: at(4) });
+    expect(db.state.attendance[0].late).toBeTypeOf("boolean"); // decided now, stored with the record
     expect(db.state.verifications).toHaveLength(1);
     expect(db.state.verifications[0]).toMatchObject({ sessionId: SESSION, verifiedAt: at(4) });
     expect(db.state.verifications[0].faceDistance).toBeCloseTo(0.41);

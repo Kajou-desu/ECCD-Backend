@@ -208,6 +208,13 @@ export const attendanceDeleteLimiter = perUserLimiter(
   30,
   "Too many requests, please try again later"
 );
+// Starting or answering a student transfer: rare, deliberate, and each one
+// notifies another teacher.
+export const studentTransferLimiter = perUserLimiter(
+  "rl:student-transfer:",
+  30,
+  "Too many requests, please try again later"
+);
 export const schoolTimesUserLimiter = perUserLimiter(
   "rl:school-times:",
   30,

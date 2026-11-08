@@ -3,7 +3,8 @@ import { AppError } from "../middleware/errorHandler.js";
 import { assertCanAccessStudent, assertCanAccessStudents, studentScopeFor } from "../utils/ownership.js";
 import { parseId, requireDateString, requireAttendanceStatus } from "../utils/validate.js";
 import { toDate, assertNotFutureDate, arrivedAtFor } from "./attendance.controller.js";
-import { isLateArrival } from "../utils/late.js";
+import { lateOf } from "../utils/late.js";
+import { loadLateRules, lateFlag } from "../lib/lateFlag.js";
 import { loadSchoolTimes, schoolTimesFor } from "../lib/schoolTimes.js";
 
 // Ranged reads, CSV import and deletion for attendance. All are Teacher/Admin
@@ -58,6 +59,7 @@ export async function getAttendanceRange(req, res, next) {
         date: true,
         status: true,
         arrivedAt: true,
+        late: true,
         pickedUpAt: true,
         student: {
           select: { name: true, studentCode: true, session: true, teacher: { select: { centerId: true } } },
@@ -85,12 +87,7 @@ export async function getAttendanceRange(req, res, next) {
         status: r.status,
         arrivedAt: r.arrivedAt,
         pickedUpAt: r.pickedUpAt,
-        late: isLateArrival(
-          r.status,
-          r.arrivedAt,
-          r.student.session,
-          schoolTimesFor(schoolTimes, r.student.teacher?.centerId),
-        ),
+        late: lateOf(r, r.student.session, schoolTimesFor(schoolTimes, r.student.teacher?.centerId)),
       })),
     });
   } catch (err) {
@@ -192,14 +189,17 @@ export async function importAttendance(req, res, next) {
     if (dryRun) return res.json({ dryRun: true, ...summary, failed });
 
     if (toWrite.length) {
+      const rules = await loadLateRules(toWrite.map((entry) => entry.studentId));
       const written = await prisma.$transaction(
-        toWrite.map(({ studentId, date, dateString, status }) =>
-          prisma.attendance.upsert({
+        toWrite.map(({ studentId, date, dateString, status }) => {
+          const arrivedAt = arrivedAtFor(status, dateString);
+          const late = lateFlag(rules, studentId, status, arrivedAt);
+          return prisma.attendance.upsert({
             where: { studentId_date: { studentId, date } },
-            update: { status, arrivedAt: arrivedAtFor(status, dateString), pickedUpAt: null, pickedUpAuto: false },
-            create: { studentId, date, status, arrivedAt: arrivedAtFor(status, dateString) },
-          }),
-        ),
+            update: { status, arrivedAt, late, pickedUpAt: null, pickedUpAuto: false },
+            create: { studentId, date, status, arrivedAt, late },
+          });
+        }),
       );
       // A manual edit supersedes any automatic evidence for what changed.
       await prisma.attendanceVerification.deleteMany({

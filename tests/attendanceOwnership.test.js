@@ -10,6 +10,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     attendance: { findMany: vi.fn(), upsert: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
     attendanceVerification: { deleteMany: vi.fn() },
     parentChild: { findUnique: vi.fn() },
+    schoolTimeSettings: { findMany: vi.fn() },
     $transaction: vi.fn(),
   },
 }));
@@ -56,6 +57,7 @@ function expectNoWritesOrAlerts() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prisma.student.findMany.mockResolvedValue([]); // late rules: no known student -> not late
   prisma.attendance.upsert.mockResolvedValue({ id: 1, arrivedAt: new Date() });
   prisma.attendance.findUnique.mockResolvedValue(null);
   prisma.attendanceVerification.deleteMany.mockResolvedValue({ count: 0 });
