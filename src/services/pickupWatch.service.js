@@ -6,7 +6,6 @@ import { isCameraAlive, isGatewayOnline } from "../lib/hardwareStatus.js";
 import { schoolDateAsUtcMidnight, schoolMinutesOfDay } from "../utils/schoolDate.js";
 import { evaluate } from "./attendanceVerification.service.js";
 import { notifyPickup } from "./attendanceNotification.service.js";
-import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 
 // Automatic pickup.
 //
@@ -14,13 +13,11 @@ import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 // students from PICKUP_AFTERNOON_START, for PICKUP_WINDOW_HOURS) a present
 // student whose face AND BLE tag have both gone unseen is checked on:
 //
-//   * after 1 minute unseen the teacher gets an in-app "still in the center?"
-//     prompt that lasts 15 s. "Still here" restarts the clock, "Picked up" marks
-//     the student picked up. Unanswered, it expires and a new one is made a
-//     minute later;
-//   * after PICKUP_ABSENT_MIN (5) minutes unseen with no "still here", the
-//     student is marked picked up automatically. Parents get the same
-//     notification as a manual pickup;
+//   * after 1 minute unseen the student shows as "Not Detected" in the Live
+//     attendance table (see presenceStatus), where the teacher can mark them
+//     picked up by hand. Nothing pops up: the table is the notification;
+//   * after PICKUP_ABSENT_MIN (5) minutes unseen the student is marked picked up
+//     automatically. Parents get the same notification as a manual pickup;
 //   * an auto-marked student who is seen again (face + tag) inside the window is
 //     put back. Outside the window the pickup stands.
 //
@@ -31,8 +28,8 @@ import { assertCanAccessStudent, studentScopeFor } from "../utils/ownership.js";
 // center's live camera never vouches for) another's.
 // The decisions are pure functions; runPickupWatch is the database wrapper.
 
-export const PROMPT_EVERY_MS = 60_000;
-export const PROMPT_TTL_MS = 15_000;
+// How long neither signal may go unseen before a present student shows as "Not Detected".
+export const NOT_DETECTED_AFTER_MS = 60_000;
 const SESSIONS = ["morning", "afternoon"];
 // A "pickup window is over" reminder is only worth sending soon after the end.
 const REMINDER_GRACE_MIN = 60;
@@ -157,38 +154,44 @@ export async function setPickupWatchRunning(centerId, running, now = new Date())
 const latestOf = (dates) => dates.filter(Boolean).reduce((a, b) => (b > a ? b : a), new Date(0));
 
 // When the current continuous "neither face nor tag seen" stretch began: the
-// latest of the last sighting by either signal, the teacher's last "still here",
-// the student's arrival, the start of the window, and the end of the last hardware outage.
-export function absentSince({ lastFaceAt, lastBleAt, stillHereAt, arrivedAt, windowStart, unhealthyAt }) {
-  return latestOf([lastFaceAt, lastBleAt, stillHereAt, arrivedAt, windowStart, unhealthyAt]);
+// latest of the last sighting by either signal, the student's arrival, the start
+// of the window, and the end of the last hardware outage.
+export function absentSince({ lastFaceAt, lastBleAt, arrivedAt, windowStart, unhealthyAt }) {
+  return latestOf([lastFaceAt, lastBleAt, arrivedAt, windowStart, unhealthyAt]);
 }
 
-// "wait" | "prompt" | "pick_up". `lastCheck` is the student's newest prompt today:
-// { createdAt, expiresAt, answeredAt } | null.
-export function decidePickupAction({ now, absentSince: since, lastCheck, cfg = env.pickup }) {
-  const t = now.getTime();
-  // A prompt is on the teacher's screen: let them answer (or let it expire).
-  if (lastCheck && !lastCheck.answeredAt && lastCheck.expiresAt.getTime() > t) return "wait";
-  if (t - since.getTime() >= cfg.absentMs) return "pick_up";
-  // The next prompt is due a minute after the absence began or after the last
-  // prompt (made during this absence) ended.
-  const dueFrom = lastCheck && lastCheck.createdAt > since ? lastCheck.expiresAt.getTime() : since.getTime();
-  return t - dueFrom >= PROMPT_EVERY_MS ? "prompt" : "wait";
+// "wait" | "pick_up".
+export function decidePickupAction({ now, absentSince: since, cfg = env.pickup }) {
+  return now.getTime() - since.getTime() >= cfg.absentMs ? "pick_up" : "wait";
 }
+
+// What the Live attendance table shows for a PRESENT student: "picked_up",
+// "not_detected" (neither face nor tag seen for NOT_DETECTED_AFTER_MS, counted
+// the same way as the pickup watch counts absence) or "inside". `detectionActive`
+// is false while the gateway or the camera is down: silence proves nothing then,
+// so nobody is called "not_detected".
+export function presenceStatus({ now, pickedUpAt, detectionActive, ...signals }) {
+  if (pickedUpAt) return "picked_up";
+  if (!detectionActive) return "inside";
+  return now.getTime() - absentSince(signals).getTime() >= NOT_DETECTED_AFTER_MS ? "not_detected" : "inside";
+}
+
+// When this center's hardware last looked down (or the process started), so the
+// table counts silence the same way the watch does.
+export const unhealthySinceFor = (centerId) => unhealthyAtFor(centerKey(centerId));
 
 // ---- shared writes ----------------------------------------------------------
 
 // Marks today's record picked up unless it already is (or isn't "present").
 // Race-safe: the guarded updateMany lets only one caller win, and only the
-// winner notifies parents. `auto` is false when the teacher said so themselves:
-// that is a manual decision and is never undone. Returns whether this call did it.
-export async function autoMarkPickedUp(studentId, today, now = new Date(), { auto = true } = {}) {
+// winner notifies parents. Returns whether this call did it.
+export async function autoMarkPickedUp(studentId, today, now = new Date()) {
   const { count } = await prisma.attendance.updateMany({
     where: { studentId, date: today, status: "present", arrivedAt: { not: null }, pickedUpAt: null },
-    data: { pickedUpAt: now, pickedUpAuto: auto },
+    data: { pickedUpAt: now, pickedUpAuto: true },
   });
   if (count === 0) return false;
-  logger.info({ studentId, auto }, "Student marked picked up by the pickup watch");
+  logger.info({ studentId }, "Student marked picked up by the pickup watch");
   // Fire-and-forget, same as the manual path: a failed SMS must not undo this.
   Promise.resolve()
     .then(() => notifyPickup(studentId, now))
@@ -413,29 +416,16 @@ async function watchCenter({ key, records, session, today, now, windowStart, pau
   }
 
   const ids = records.map((r) => r.studentId);
-  const [signals, checks] = await Promise.all([
-    prisma.attendanceSignal.findMany({
-      where: { studentId: { in: ids }, session: { date: today } },
-      select: { studentId: true, kind: true, score: true, hits: true, lastSeenAt: true },
-    }),
-    prisma.pickupCheck.findMany({
-      where: { studentId: { in: ids }, date: today },
-      orderBy: { createdAt: "asc" },
-      select: { studentId: true, createdAt: true, expiresAt: true, answeredAt: true, answer: true },
-    }),
-  ]);
+  const signals = await prisma.attendanceSignal.findMany({
+    where: { studentId: { in: ids }, session: { date: today } },
+    select: { studentId: true, kind: true, score: true, hits: true, lastSeenAt: true },
+  });
 
   // Newest sighting per (student, kind) across today's sessions.
   const latest = new Map();
   for (const s of signals) {
     const key = `${s.studentId}:${s.kind}`;
     if (!latest.has(key) || s.lastSeenAt > latest.get(key).lastSeenAt) latest.set(key, s);
-  }
-  const lastCheck = new Map();
-  const stillHere = new Map();
-  for (const c of checks) {
-    lastCheck.set(c.studentId, c);
-    if (c.answer === "still_here" && c.answeredAt) stillHere.set(c.studentId, c.answeredAt);
   }
 
   for (const record of pending) {
@@ -444,18 +434,12 @@ async function watchCenter({ key, records, session, today, now, windowStart, pau
       const since = absentSince({
         lastFaceAt: latest.get(`${studentId}:face`)?.lastSeenAt,
         lastBleAt: latest.get(`${studentId}:ble`)?.lastSeenAt,
-        stillHereAt: stillHere.get(studentId),
         arrivedAt: record.arrivedAt,
         windowStart: record.windowStart,
         unhealthyAt: unhealthyAtFor(key),
       });
-      const action = decidePickupAction({ now, absentSince: since, lastCheck: lastCheck.get(studentId) ?? null });
-      if (action === "pick_up") {
+      if (decidePickupAction({ now, absentSince: since }) === "pick_up") {
         await autoMarkPickedUp(studentId, today, now);
-      } else if (action === "prompt") {
-        await prisma.pickupCheck.create({
-          data: { studentId, date: today, expiresAt: new Date(now.getTime() + PROMPT_TTL_MS) },
-        });
       }
     } catch (err) {
       logger.error({ err, studentId: record.studentId }, "Pickup watch failed for a student");
@@ -478,64 +462,4 @@ async function watchCenter({ key, records, session, today, now, windowStart, pau
       logger.error({ err, studentId: record.studentId }, "Pickup undo failed for a student");
     }
   }
-}
-
-// ---- the teacher's side (called by the controller) --------------------------
-
-// `{ student: scope }` for a Teacher, nothing for an Admin (sees all), and a
-// filter that matches nothing for any other role.
-function studentFilterFor(user) {
-  const scope = studentScopeFor(user) ?? { id: -1 };
-  return Object.keys(scope).length > 0 ? { student: scope } : {};
-}
-
-// Open prompts the user may see: their center's students' (a Teacher), or all (Admin).
-export async function listOpenPickupChecks(user, now = new Date()) {
-  const today = schoolDateAsUtcMidnight(now);
-  const rows = await prisma.pickupCheck.findMany({
-    where: {
-      date: today,
-      answeredAt: null,
-      expiresAt: { gt: now },
-      ...studentFilterFor(user),
-    },
-    orderBy: { createdAt: "asc" },
-    select: { id: true, studentId: true, expiresAt: true, student: { select: { name: true } } },
-  });
-  return rows.map((r) => ({
-    id: r.id,
-    studentId: r.studentId,
-    name: r.student.name,
-    // Remaining time rather than a timestamp: the browser's clock may be off.
-    expiresInMs: Math.max(0, r.expiresAt.getTime() - now.getTime()),
-  }));
-}
-
-// Records the teacher's answer. `user` must be allowed to act on the student
-// (an Admin, or that student's teacher) — otherwise, like a missing or
-// out-of-date prompt, it is "not_found", so ids can't be probed. Returns
-// { outcome: "answered" | "expired" | "not_found" }; "expired" means it was
-// already answered or its 15 s ran out.
-export async function answerPickupCheck(user, checkId, stillHere, now = new Date()) {
-  const today = schoolDateAsUtcMidnight(now);
-  const check = await prisma.pickupCheck.findUnique({
-    where: { id: checkId },
-    select: { id: true, studentId: true, date: true },
-  });
-  if (!check || check.date.getTime() !== today.getTime()) return { outcome: "not_found" };
-  try {
-    await assertCanAccessStudent(user, check.studentId);
-  } catch (err) {
-    if (err?.status === 403) return { outcome: "not_found" };
-    throw err;
-  }
-
-  const claimed = await prisma.pickupCheck.updateMany({
-    where: { id: checkId, answeredAt: null, expiresAt: { gt: now } },
-    data: { answeredAt: now, answer: stillHere ? "still_here" : "picked_up" },
-  });
-  if (claimed.count === 0) return { outcome: "expired" };
-
-  if (!stillHere) await autoMarkPickedUp(check.studentId, today, now, { auto: false });
-  return { outcome: "answered" };
 }

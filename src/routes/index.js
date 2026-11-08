@@ -16,6 +16,7 @@ import fileRoutes from "./files.routes.js";
 import userRoutes from "./users.routes.js";
 import profileRoutes from "./profile.routes.js";
 import centerRoutes from "./centers.routes.js";
+import schoolTimesRoutes from "./schoolTimes.routes.js";
 import activityLogRoutes from "./activityLogs.routes.js";
 import notificationRoutes from "./notifications.routes.js";
 
@@ -42,6 +43,7 @@ router.use("/files", fileRoutes); // /api/files/:filename (public - see files.ro
 router.use("/users", userRoutes); // /api/users/all, /api/users/register, /api/users/delete/:id
 router.use("/activity-logs", activityLogRoutes); // /api/activity-logs (read: Admin; POST /export: any signed-in user)
 router.use("/centers", centerRoutes); // /api/centers (list: Teacher/Admin; create/rename: Admin)
+router.use("/school-times", schoolTimesRoutes); // /api/school-times (Teacher: own center; Admin: any center)
 router.use("/profile", profileRoutes); // /api/profile/update
 router.use("/notifications", notificationRoutes); // /api/notifications/*
 

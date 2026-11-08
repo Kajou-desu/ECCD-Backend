@@ -5,7 +5,6 @@ const db = vi.hoisted(() => ({
     attendance: { findMany: vi.fn(), updateMany: vi.fn() },
     attendanceSession: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     attendanceSignal: { findMany: vi.fn() },
-    pickupCheck: { findMany: vi.fn(), create: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     pickupWatchOverride: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     notification: { createMany: vi.fn() },
     student: { findUnique: vi.fn() },
@@ -37,9 +36,8 @@ const {
   setPickupWatchRunning,
   runPickupWatch,
   resetPickupHealth,
-  listOpenPickupChecks,
-  answerPickupCheck,
-  PROMPT_TTL_MS,
+  presenceStatus,
+  NOT_DETECTED_AFTER_MS,
 } = await import("../src/services/pickupWatch.service.js");
 
 const T = (iso) => new Date(iso);
@@ -71,9 +69,8 @@ describe("pickup window", () => {
 
 describe("absentSince", () => {
   it("is the latest of every reason the clock could have restarted", () => {
-    const base = { lastFaceAt: at("02:40"), lastBleAt: at("02:41"), stillHereAt: undefined, arrivedAt: at("00:00"), windowStart: MORNING_START, unhealthyAt: at("02:00") };
+    const base = { lastFaceAt: at("02:40"), lastBleAt: at("02:41"), arrivedAt: at("00:00"), windowStart: MORNING_START, unhealthyAt: at("02:00") };
     expect(absentSince(base)).toEqual(at("02:41"));
-    expect(absentSince({ ...base, stillHereAt: at("02:45") })).toEqual(at("02:45"));
     expect(absentSince({ ...base, unhealthyAt: at("02:50") })).toEqual(at("02:50"));
     expect(absentSince({ ...base, lastFaceAt: undefined, lastBleAt: undefined, arrivedAt: at("02:44") })).toEqual(at("02:44"));
   });
@@ -81,33 +78,45 @@ describe("absentSince", () => {
 
 describe("decidePickupAction", () => {
   const since = at("02:30");
-  const decide = (now, lastCheck = null) => decidePickupAction({ now, absentSince: since, lastCheck, cfg: CFG });
-  const check = (createdAt, over = {}) => ({ createdAt, expiresAt: new Date(createdAt.getTime() + PROMPT_TTL_MS), answeredAt: null, ...over });
+  const decide = (now) => decidePickupAction({ now, absentSince: since, cfg: CFG });
 
-  it("waits for the first minute", () => {
-    expect(decide(at("02:30", 59))).toBe("wait");
+  it("waits until 5 minutes have passed", () => {
+    expect(decide(at("02:31", 0))).toBe("wait");
+    expect(decide(at("02:34", 59))).toBe("wait");
   });
-  it("prompts after one minute unseen", () => {
-    expect(decide(at("02:31", 0))).toBe("prompt");
+  it("marks picked up at 5 minutes unseen", () => {
+    expect(decide(at("02:35", 0))).toBe("pick_up");
   });
-  it("does not stack a second prompt while one is open", () => {
-    expect(decide(at("02:31", 10), check(at("02:31", 0)))).toBe("wait");
+  it("counts from the latest sighting, not from the first one", () => {
+    expect(decidePickupAction({ now: at("02:36", 0), absentSince: at("02:35", 0), cfg: CFG })).toBe("wait");
   });
-  it("prompts again a minute after the unanswered one expired", () => {
-    const c = check(at("02:31", 0)); // expires 02:31:15
-    expect(decide(at("02:32", 14), c)).toBe("wait");
-    expect(decide(at("02:32", 15), c)).toBe("prompt");
+});
+
+describe("presenceStatus", () => {
+  const base = { now: at("02:40"), pickedUpAt: null, detectionActive: true, arrivedAt: at("02:00"), unhealthyAt: at("02:00") };
+
+  it("is Picked Up once a pickup is recorded, however long ago anything was seen", () => {
+    expect(presenceStatus({ ...base, pickedUpAt: at("02:39") })).toBe("picked_up");
+    expect(presenceStatus({ ...base, pickedUpAt: at("02:39"), detectionActive: false })).toBe("picked_up");
   });
-  it("marks picked up at 5 minutes with no answer", () => {
-    expect(decide(at("02:35", 0), check(at("02:33", 30)))).toBe("pick_up");
+  it("is Inside while either signal was seen within the last minute", () => {
+    expect(presenceStatus({ ...base, lastFaceAt: at("02:39", 30) })).toBe("inside");
+    expect(presenceStatus({ ...base, lastBleAt: at("02:39", 30) })).toBe("inside");
   });
-  it("still lets an open prompt finish before auto-marking at the 5 minute mark", () => {
-    expect(decide(at("02:35", 5), check(at("02:35", 0)))).toBe("wait");
-    expect(decide(at("02:35", 15), check(at("02:35", 0)))).toBe("pick_up");
+  it("is Not Detected once neither signal has been seen for a minute", () => {
+    expect(NOT_DETECTED_AFTER_MS).toBe(60_000);
+    expect(presenceStatus({ ...base, lastFaceAt: at("02:39", 0), lastBleAt: at("02:38", 0) })).toBe("not_detected");
+    expect(presenceStatus({ ...base, lastFaceAt: at("02:39", 1) })).toBe("inside");
   });
-  it("ignores prompts from before the student was last seen", () => {
-    const seenLater = decidePickupAction({ now: at("02:36", 0), absentSince: at("02:35", 0), lastCheck: check(at("02:31", 0)), cfg: CFG });
-    expect(seenLater).toBe("prompt");
+  it("counts from arrival when the student was never seen again", () => {
+    expect(presenceStatus({ ...base, arrivedAt: at("02:39", 30) })).toBe("inside");
+    expect(presenceStatus(base)).toBe("not_detected");
+  });
+  it("never says Not Detected while the camera or the tag reader is down", () => {
+    expect(presenceStatus({ ...base, detectionActive: false })).toBe("inside");
+  });
+  it("restarts the count after a hardware outage", () => {
+    expect(presenceStatus({ ...base, unhealthyAt: at("02:39", 30) })).toBe("inside");
   });
 });
 
@@ -132,8 +141,6 @@ beforeEach(() => {
   prisma.attendanceSession.findFirst.mockResolvedValue(null);
   prisma.attendanceSession.updateMany.mockResolvedValue({ count: 1 });
   prisma.attendanceSignal.findMany.mockResolvedValue([]);
-  prisma.pickupCheck.findMany.mockResolvedValue([]);
-  prisma.pickupCheck.create.mockResolvedValue({});
   prisma.pickupWatchOverride.findMany.mockResolvedValue([]);
   prisma.pickupWatchOverride.findFirst.mockResolvedValue(null);
   prisma.pickupWatchOverride.updateMany.mockResolvedValue({ count: 1 });
@@ -178,23 +185,10 @@ describe("runPickupWatch — when it acts", () => {
     expect(notifyPickup).not.toHaveBeenCalled();
   });
 
-  it("prompts the teacher after 1 minute and does not mark yet", async () => {
+  it("does nothing before the 5 minutes are up", async () => {
     prisma.attendance.findMany.mockResolvedValue([record()]);
-    const now = at("02:31", 5);
-    await runPickupWatch(now);
-    expect(prisma.pickupCheck.create).toHaveBeenCalledWith({
-      data: { studentId: 5, date: TODAY, expiresAt: new Date(now.getTime() + 15_000) },
-    });
+    await runPickupWatch(at("02:31", 5));
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-  });
-
-  it("does not prompt again while a prompt is still open", async () => {
-    prisma.attendance.findMany.mockResolvedValue([record()]);
-    prisma.pickupCheck.findMany.mockResolvedValue([
-      { studentId: 5, createdAt: at("02:31", 0), expiresAt: at("02:31", 15), answeredAt: null, answer: null },
-    ]);
-    await runPickupWatch(at("02:31", 10));
-    expect(prisma.pickupCheck.create).not.toHaveBeenCalled();
   });
 
   it("leaves a student alone while either signal keeps seeing them", async () => {
@@ -204,24 +198,12 @@ describe("runPickupWatch — when it acts", () => {
     ]);
     await runPickupWatch(at("02:36")); // BLE seen 30 s ago
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    expect(prisma.pickupCheck.create).not.toHaveBeenCalled();
-  });
-
-  it("restarts the clock when the teacher says the student is still here", async () => {
-    prisma.attendance.findMany.mockResolvedValue([record()]);
-    prisma.pickupCheck.findMany.mockResolvedValue([
-      { studentId: 5, createdAt: at("02:34", 50), expiresAt: at("02:35", 5), answeredAt: at("02:35", 0), answer: "still_here" },
-    ]);
-    await runPickupWatch(at("02:36")); // 6 min since the window, but only 1 min since "still here"
-    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    expect(prisma.pickupCheck.create).toHaveBeenCalledTimes(1); // the normal 1-minute prompt
   });
 
   it("counts a late arrival from when they arrived, not from the window start", async () => {
     prisma.attendance.findMany.mockResolvedValue([record({ arrivedAt: at("02:35", 30) })]);
     await runPickupWatch(at("02:36"));
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    expect(prisma.pickupCheck.create).not.toHaveBeenCalled();
   });
 });
 
@@ -229,12 +211,11 @@ describe("runPickupWatch — hardware must be alive", () => {
   it.each([
     ["the ESP32 gateway is offline", () => isGatewayOnline.mockResolvedValue(false)],
     ["the camera isn't sending frames", () => isCameraAlive.mockReturnValue(false)],
-  ])("never prompts or marks anyone when %s", async (_name, breakIt) => {
+  ])("never marks anyone when %s", async (_name, breakIt) => {
     breakIt();
     prisma.attendance.findMany.mockResolvedValue([record()]);
     await runPickupWatch(at("02:40")); // 10 min of silence
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    expect(prisma.pickupCheck.create).not.toHaveBeenCalled();
   });
 
   it("starts counting again only from when the hardware came back", async () => {
@@ -244,10 +225,8 @@ describe("runPickupWatch — hardware must be alive", () => {
     isCameraAlive.mockReturnValue(true);
     await runPickupWatch(at("02:40", 10)); // back: silence before this is ignored
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    expect(prisma.pickupCheck.create).not.toHaveBeenCalled();
-    await runPickupWatch(at("02:41", 15)); // a minute later it prompts as normal
-    expect(prisma.pickupCheck.create).toHaveBeenCalledTimes(1);
-    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
+    await runPickupWatch(at("02:45", 15)); // five minutes after it came back
+    expect(prisma.attendance.updateMany).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -511,72 +490,6 @@ describe("runPickupWatch — stop reminder", () => {
   });
 });
 
-describe("teacher prompts", () => {
-  const NOW = at("02:31", 5);
-  const teacher = { id: 3, role: "Teacher" };
-
-  it("lists only the teacher's own students' open prompts, with time left", async () => {
-    prisma.pickupCheck.findMany.mockResolvedValue([
-      { id: 9, studentId: 5, expiresAt: at("02:31", 15), student: { name: "Ana Cruz" } },
-    ]);
-    const checks = await listOpenPickupChecks(teacher, NOW);
-    expect(checks).toEqual([{ id: 9, studentId: 5, name: "Ana Cruz", expiresInMs: 10_000 }]);
-    expect(prisma.pickupCheck.findMany.mock.calls[0][0].where).toMatchObject({
-      date: TODAY, answeredAt: null, expiresAt: { gt: NOW }, student: { teacherId: 3 },
-    });
-  });
-
-  describe("answerPickupCheck", () => {
-    beforeEach(() => {
-      prisma.pickupCheck.findUnique.mockResolvedValue({ id: 9, studentId: 5, date: TODAY });
-      prisma.pickupCheck.updateMany.mockResolvedValue({ count: 1 });
-      prisma.student.findUnique.mockResolvedValue({ teacherId: 3 });
-    });
-
-    it("'still here' records the answer and marks nobody", async () => {
-      expect(await answerPickupCheck(teacher, 9, true, NOW)).toEqual({ outcome: "answered" });
-      expect(prisma.pickupCheck.updateMany.mock.calls[0][0].data).toEqual({ answeredAt: NOW, answer: "still_here" });
-      expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    });
-
-    it("'picked up' marks the student straight away as a manual (never undone) pickup and notifies parents", async () => {
-      expect(await answerPickupCheck(teacher, 9, false, NOW)).toEqual({ outcome: "answered" });
-      expect(prisma.attendance.updateMany.mock.calls[0][0].data).toEqual({ pickedUpAt: NOW, pickedUpAuto: false });
-      await Promise.resolve();
-      expect(notifyPickup).toHaveBeenCalledWith(5, NOW);
-    });
-
-    it("refuses an answer that arrives after the 15 seconds (or twice)", async () => {
-      prisma.pickupCheck.updateMany.mockResolvedValue({ count: 0 });
-      expect(await answerPickupCheck(teacher, 9, false, NOW)).toEqual({ outcome: "expired" });
-      expect(prisma.pickupCheck.updateMany.mock.calls[0][0].where).toMatchObject({ answeredAt: null, expiresAt: { gt: NOW } });
-      expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    });
-
-    it("cannot be answered by another teacher, and looks the same as a missing prompt", async () => {
-      prisma.student.findUnique.mockResolvedValue({ teacherId: 99 });
-      expect(await answerPickupCheck(teacher, 9, false, NOW)).toEqual({ outcome: "not_found" });
-      expect(prisma.pickupCheck.updateMany).not.toHaveBeenCalled();
-      expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    });
-
-    it("lets an Admin answer for any student", async () => {
-      prisma.student.findUnique.mockResolvedValue({ teacherId: 99 });
-      expect(await answerPickupCheck({ id: 1, role: "Admin" }, 9, true, NOW)).toEqual({ outcome: "answered" });
-    });
-
-    it("does not accept a prompt from another day", async () => {
-      prisma.pickupCheck.findUnique.mockResolvedValue({ id: 9, studentId: 5, date: T("2026-10-09T00:00:00.000Z") });
-      expect(await answerPickupCheck(teacher, 9, false, NOW)).toEqual({ outcome: "not_found" });
-    });
-
-    it("answers not_found for an unknown id", async () => {
-      prisma.pickupCheck.findUnique.mockResolvedValue(null);
-      expect(await answerPickupCheck(teacher, 404, false, NOW)).toEqual({ outcome: "not_found" });
-    });
-  });
-});
-
 // ---- the teacher's manual Start / Stop ---------------------------------------
 
 describe("manual Start / Stop", () => {
@@ -645,14 +558,13 @@ describe("manual Start / Stop", () => {
   });
 
   describe("runPickupWatch", () => {
-    it("a stopped center is left alone: no prompt, no pickup, and its session stays open", async () => {
+    it("a stopped center is left alone: no pickup, and its session stays open", async () => {
       prisma.attendance.findMany.mockResolvedValue([centerRecord(1)]);
       prisma.attendanceSession.findMany.mockResolvedValue([session({ centerId: 1 })]);
       prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: 1, ...off(at("02:31")) }]);
       await runPickupWatch(at("02:40")); // 10 min of silence
       expect(markedStudents()).toEqual([]);
-      expect(prisma.pickupCheck.create).not.toHaveBeenCalled();
-      expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled(); // not closed, not restarted
+        expect(prisma.attendanceSession.updateMany).not.toHaveBeenCalled(); // not closed, not restarted
       expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
     });
 

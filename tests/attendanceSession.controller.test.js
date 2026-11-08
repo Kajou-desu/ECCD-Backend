@@ -7,7 +7,6 @@ vi.mock("../src/lib/prisma.js", () => ({
       create: vi.fn(),
       updateMany: vi.fn(),
     },
-    pickupCheck: { findMany: vi.fn().mockResolvedValue([]) },
     pickupWatchOverride: { findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]), create: vi.fn(), updateMany: vi.fn() },
   },
 }));
@@ -51,8 +50,7 @@ describe("getCurrentSession", () => {
     prisma.attendanceSession.findFirst.mockResolvedValue(null);
     const res = mockRes();
     await getCurrentSession(teacherReq, res, vi.fn());
-    expect(res.json).toHaveBeenCalledWith({ session: null, pickupChecks: [], pickupWindow: { active: false, endsAt: null, mode: "auto" } });
-    expect(prisma.pickupCheck.findMany).not.toHaveBeenCalled(); // nothing to look up without a session
+    expect(res.json).toHaveBeenCalledWith({ session: null, pickupWindow: { active: false, endsAt: null, mode: "auto" } });
   });
 
   it("returns the active session without leaking who started it", async () => {
@@ -65,28 +63,11 @@ describe("getCurrentSession", () => {
     expect(session).not.toHaveProperty("centerId");
   });
 
-  it("includes the teacher's open pickup prompts, scoped to their own students", async () => {
+  it("no longer carries pickup prompts", async () => {
     prisma.attendanceSession.findFirst.mockResolvedValue(row());
-    prisma.pickupCheck.findMany.mockResolvedValue([
-      { id: 9, studentId: 5, expiresAt: new Date(Date.now() + 12_000), student: { name: "Ana Cruz" } },
-    ]);
     const res = mockRes();
     await getCurrentSession(teacherReq, res, vi.fn());
-
-    expect(res.json.mock.calls[0][0].pickupChecks).toEqual([
-      { id: 9, studentId: 5, name: "Ana Cruz", expiresInMs: 12_000 },
-    ]);
-    expect(prisma.pickupCheck.findMany.mock.calls[0][0].where).toMatchObject({
-      answeredAt: null,
-      student: { teacherId: 3 },
-    });
-  });
-
-  it("lets an Admin see every open prompt of the center they named", async () => {
-    prisma.attendanceSession.findFirst.mockResolvedValue(row());
-    prisma.pickupCheck.findMany.mockResolvedValue([]);
-    await getCurrentSession(adminReq({ query: { centerId: "1" } }), mockRes(), vi.fn());
-    expect(prisma.pickupCheck.findMany.mock.calls[0][0].where).not.toHaveProperty("student");
+    expect(res.json.mock.calls[0][0]).not.toHaveProperty("pickupChecks");
   });
 
   it("passes database errors to next() instead of responding", async () => {
@@ -261,7 +242,7 @@ describe("sessions are per center", () => {
     it("sees no session (and the database isn't read) until a center is named", async () => {
       const res = mockRes();
       await getCurrentSession(adminReq({ query: {} }), res, vi.fn());
-      expect(res.json.mock.calls[0][0]).toMatchObject({ session: null, pickupChecks: [] });
+      expect(res.json.mock.calls[0][0]).toMatchObject({ session: null });
       expect(prisma.attendanceSession.findFirst).not.toHaveBeenCalled();
     });
 

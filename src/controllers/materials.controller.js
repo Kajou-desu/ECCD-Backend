@@ -1,7 +1,9 @@
 import { prisma } from "../lib/prisma.js";
 import { fileUrl } from "../middleware/upload.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
-import { parseId, parsePagination, requireNonEmptyString, optionalString } from "../utils/validate.js";
+import { parseId, parsePagination, requireNonEmptyString, optionalString, requireSession } from "../utils/validate.js";
+import { AppError } from "../middleware/errorHandler.js";
+import { studentScopeFor } from "../utils/ownership.js";
 import { removeStoredFiles } from "../lib/fileStorage.js";
 import {
   contentScopeFor,
@@ -19,9 +21,21 @@ function toMaterialResponse(req, material) {
 // ?page & ?pageSize are optional; omitting both returns every material
 // exactly as before (see parsePagination). Total count sent via
 // X-Total-Count when paginated, so the response body shape never changes.
+// ?session=morning|afternoon (Teacher/Admin only) narrows the list to materials
+// that students of that session have submitted work for, within the students the
+// caller may see. A material nobody has submitted work for belongs to neither session.
 export async function getMaterials(req, res, next) {
   try {
     const pagination = parsePagination(req.query);
+    let sessionFilter = null;
+    if (req.query.session !== undefined) {
+      // Parents/Guardians must not be able to probe which sessions' children have submitted work.
+      if (req.user?.role !== "Teacher" && req.user?.role !== "Admin") throw new AppError("Forbidden", 403);
+      const session = requireSession(req.query.session);
+      const studentScope = studentScopeFor(req.user);
+      if (!studentScope) throw new AppError("Forbidden", 403); // default deny
+      sessionFilter = { submissions: { some: { student: { ...studentScope, session } } } };
+    }
 
     // No scope = no center yet: an empty list, never another center's materials.
     const scope = contentScopeFor(req.user);
@@ -30,13 +44,14 @@ export async function getMaterials(req, res, next) {
       return res.json([]);
     }
 
+    const where = sessionFilter ? { ...scope, ...sessionFilter } : scope;
     const [materials, total] = await Promise.all([
       prisma.material.findMany({
-        where: scope,
+        where,
         orderBy: { createdAt: "desc" },
         ...(pagination && { skip: pagination.skip, take: pagination.take }),
       }),
-      pagination ? prisma.material.count({ where: scope }) : Promise.resolve(null),
+      pagination ? prisma.material.count({ where }) : Promise.resolve(null),
     ]);
 
     if (pagination) res.set("X-Total-Count", String(total));

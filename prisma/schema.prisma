@@ -110,8 +110,30 @@ model Center {
   pickupWatchOverrides PickupWatchOverride[]
   materials Material[]
   albums    Album[]
+  schoolTimes SchoolTimeSettings?
 
   @@map("centers")
+}
+
+// A center's school hours, as minutes since midnight in the school's timezone.
+// A morning student is late after morningStartMin and an afternoon student after
+// afternoonStartMin (utils/late.js). A center with no row uses the defaults in
+// utils/schoolTimes.js, so nothing changes until someone saves times. The
+// migration also adds CHECK constraints (range and ordering) that Prisma's
+// schema language cannot express.
+model SchoolTimeSettings {
+  id                Int      @id @default(autoincrement())
+  centerId          Int      @unique
+  morningStartMin   Int
+  morningEndMin     Int
+  afternoonStartMin Int
+  afternoonEndMin   Int
+  updatedAt         DateTime @updatedAt
+
+  // Cascade: these are a center's settings, not history.
+  center Center @relation(fields: [centerId], references: [id], onDelete: Cascade)
+
+  @@map("school_time_settings")
 }
 
 model PasswordResetOtp {

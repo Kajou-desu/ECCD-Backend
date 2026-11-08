@@ -201,6 +201,19 @@ export const accountOtpLimiter = perUserLimiter(
   "Too many attempts, please try again later"
 );
 
+// Deleting attendance (single, bulk or a whole day) and saving school times are
+// rare, deliberate staff actions: capped per account, not per IP.
+export const attendanceDeleteLimiter = perUserLimiter(
+  "rl:attendance-delete:",
+  30,
+  "Too many requests, please try again later"
+);
+export const schoolTimesUserLimiter = perUserLimiter(
+  "rl:school-times:",
+  30,
+  "Too many requests, please try again later"
+);
+
 // Notifications: per-IP ceiling before auth (sized for a whole school behind
 // one IP), then per-user after auth. 200 / 15 min per user covers a 30 s poll
 // (~30 per tab) across several open tabs, plus mark-read/dismiss actions.

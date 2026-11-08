@@ -4,6 +4,8 @@ import { requireNonEmptyString, optionalString, requireStringArray, requireDateS
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 import { studentScopeFor } from "../utils/ownership.js";
 import { contentScopeFor, staffContentScopeFor, inContentScope } from "../utils/contentScope.js";
+import { isLateArrival } from "../utils/late.js";
+import { loadSchoolTimes, schoolTimesFor } from "../lib/schoolTimes.js";
 
 // The numbers cover the students and materials the user can see: a Teacher's
 // whole center (teachers at one center share their data), an Admin's everyone.
@@ -19,14 +21,28 @@ export async function getDashboardStats(req, res, next) {
     // A Teacher with no center yet sees no materials (see contentScopeFor).
     const materialScope = contentScopeFor(req.user);
 
-    const [totalStudents, presentToday, absentToday, totalMaterials] = await Promise.all([
+    // Present records are read (not just counted) because who is late depends on
+    // each arrival time against the student's own center's school times.
+    const [totalStudents, presentRows, absentToday, excusedToday, totalMaterials] = await Promise.all([
       prisma.student.count({ where: scope }),
-      prisma.attendance.count({ where: { date: todayDate, status: "present", ...studentFilter } }),
+      prisma.attendance.findMany({
+        where: { date: todayDate, status: "present", ...studentFilter },
+        select: {
+          arrivedAt: true,
+          student: { select: { session: true, teacher: { select: { centerId: true } } } },
+        },
+      }),
       prisma.attendance.count({ where: { date: todayDate, status: "absent", ...studentFilter } }),
+      prisma.attendance.count({ where: { date: todayDate, status: "excused", ...studentFilter } }),
       materialScope ? prisma.material.count({ where: materialScope }) : 0,
     ]);
+    const schoolTimes = await loadSchoolTimes(presentRows.map((r) => r.student.teacher?.centerId));
+    // Late is a subset of present: they did arrive, just after their session began.
+    const lateToday = presentRows.filter((r) =>
+      isLateArrival("present", r.arrivedAt, r.student.session, schoolTimesFor(schoolTimes, r.student.teacher?.centerId)),
+    ).length;
 
-    res.json({ totalStudents, presentToday, absentToday, totalMaterials });
+    res.json({ totalStudents, presentToday: presentRows.length, lateToday, absentToday, excusedToday, totalMaterials });
   } catch (err) {
     next(err);
   }

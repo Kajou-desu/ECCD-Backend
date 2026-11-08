@@ -4,6 +4,7 @@ import { AppError } from "../middleware/errorHandler.js";
 import { signFileUrl } from "../lib/signedFileUrl.js";
 import { schoolMinutesOfDay, schoolDateString } from "../utils/schoolDate.js";
 import { isLateArrival } from "../utils/late.js";
+import { loadSchoolTimes, schoolTimesFor } from "../lib/schoolTimes.js";
 import { notifyArrival, notifyPickup } from "../services/attendanceNotification.service.js";
 import {
   parseId,
@@ -57,12 +58,15 @@ export async function getAttendance(req, res, next) {
     const [students, total] = await Promise.all([
       prisma.student.findMany({
         where,
-        select: { id: true, name: true, session: true, photo: true },
+        select: { id: true, name: true, session: true, photo: true, teacher: { select: { centerId: true } } },
         orderBy: { name: "asc" },
         ...(pagination && { skip: pagination.skip, take: pagination.take }),
       }),
       pagination ? prisma.student.count({ where }) : Promise.resolve(null),
     ]);
+
+    // Late is judged against each student's own center's school times.
+    const schoolTimes = await loadSchoolTimes(students.map((s) => s.teacher?.centerId));
 
     // Only look up attendance for the students actually returned on this
     // page, not the whole roster.
@@ -84,6 +88,7 @@ export async function getAttendance(req, res, next) {
         attendanceByStudentId.get(s.id)?.status,
         attendanceByStudentId.get(s.id)?.arrivedAt,
         s.session,
+        schoolTimesFor(schoolTimes, s.teacher?.centerId),
       ),
       // true only for a "present" the system recorded itself (face + BLE); a
       // record a teacher entered or changed by hand is never "verified".
@@ -298,12 +303,15 @@ export async function getChildAttendance(req, res, next) {
     await assertCanAccessStudent(req.user, childId);
 
     // Which cutoff applies depends on the student's own session (morning vs
-    // afternoon), not the server's clock or a fixed cutoff for everyone.
+    // afternoon) and their center's school times, not the server's clock or a
+    // fixed cutoff for everyone.
     const student = await prisma.student.findUnique({
       where: { id: childId },
-      select: { session: true },
+      select: { session: true, teacher: { select: { centerId: true } } },
     });
     const session = student?.session;
+    const centerId = student?.teacher?.centerId;
+    const schoolTimes = schoolTimesFor(await loadSchoolTimes([centerId]), centerId);
 
     const [year, mon] = month.split("-").map(Number);
     const start = new Date(Date.UTC(year, mon - 1, 1));
@@ -326,7 +334,7 @@ export async function getChildAttendance(req, res, next) {
 
       if (r.status === "present") {
         presentDays += 1;
-        if (isLateArrival(r.status, r.arrivedAt, session)) lateArrivals += 1;
+        if (isLateArrival(r.status, r.arrivedAt, session, schoolTimes)) lateArrivals += 1;
       } else if (r.status === "absent") absentDays += 1;
       else if (r.status === "excused") excusedDays += 1;
 

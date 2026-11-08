@@ -1,16 +1,17 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
-import { findActiveSession } from "../lib/activeSession.js";
+import { centerKey, findActiveSession } from "../lib/activeSession.js";
 import { schoolDateAsUtcMidnight } from "../utils/schoolDate.js";
 import { isSignalPresent } from "../services/attendanceVerification.service.js";
 import { isRecognitionConfigured } from "../services/recognitionClient.js";
-import { isGatewayOnline } from "../lib/hardwareStatus.js";
+import { isCameraAlive, isGatewayOnline } from "../lib/hardwareStatus.js";
 import {
   findPickupOverride,
-  listOpenPickupChecks,
   pickupWatchStatus,
   pickupWindowStatus,
+  presenceStatus,
   setPickupWatchRunning,
+  unhealthySinceFor,
 } from "../services/pickupWatch.service.js";
 import { liveStudentScope } from "../utils/studentScope.js";
 import { sessionCenterFor } from "../utils/sessionScope.js";
@@ -40,12 +41,9 @@ function toResponse(session) {
 const findActive = (centerId) => findActiveSession(centerId, SELECT);
 
 // GET /attendance/session/current
-//   -> { session: {...} | null, pickupChecks: [...], pickupWindow: { active, endsAt } }
-// pickupChecks are the "is this student still in the center?" prompts open for
-// this user right now; pickupWindow says whether automatic pickup tracking is
-// running (the page uses it to start the camera). They ride on this response
-// because the header already polls it every few seconds, which keeps a
-// 15-second prompt timely without another poller eating into the rate limit.
+//   -> { session: {...} | null, pickupWindow: { active, endsAt } }
+// pickupWindow says whether automatic pickup tracking is running (the page uses
+// it to start the camera).
 export async function getCurrentSession(req, res, next) {
   try {
     // An Admin who has not named a center has no session to show (not an error:
@@ -54,7 +52,6 @@ export async function getCurrentSession(req, res, next) {
     const session = centerId === undefined ? null : await findActive(centerId);
     res.json({
       session: toResponse(session),
-      pickupChecks: session ? await listOpenPickupChecks(req.user) : [],
       pickupWindow:
         centerId === undefined ? pickupWindowStatus() : pickupWatchStatus(new Date(), await findPickupOverride(centerId)),
     });
@@ -159,7 +156,8 @@ export async function getMonitor(req, res, next) {
     if (!session) return res.json({ session: null });
 
     const now = new Date();
-    const [signals, verifications, gateway] = await Promise.all([
+    const today = schoolDateAsUtcMidnight(now);
+    const [signals, verifications, gateway, presentToday] = await Promise.all([
       prisma.attendanceSignal.findMany({
         where: { sessionId: session.id, student: scope },
         select: {
@@ -179,6 +177,10 @@ export async function getMonitor(req, res, next) {
         },
       }),
       isGatewayOnline(now),
+      prisma.attendance.findMany({
+        where: { date: today, status: "present", student: scope },
+        select: { studentId: true, arrivedAt: true, pickedUpAt: true, student: { select: { name: true } } },
+      }),
     ]);
 
     const byStudent = new Map();
@@ -210,6 +212,41 @@ export async function getMonitor(req, res, next) {
           a.name.localeCompare(b.name),
       );
 
+    // The Present Students table: everyone marked present today, however they
+    // got marked, and whether they are still inside. Silence only counts while
+    // the gateway and this center's camera are both alive (see presenceStatus).
+    const detectionActive = gateway && isCameraAlive(centerKey(centerId), now);
+    const unhealthyAt = unhealthySinceFor(centerId);
+    const lastSeen = new Map(); // `${studentId}:${kind}` -> newest sighting today, across sessions
+    if (presentToday.length > 0) {
+      const sightings = await prisma.attendanceSignal.findMany({
+        where: { studentId: { in: presentToday.map((r) => r.studentId) }, session: { date: today } },
+        select: { studentId: true, kind: true, lastSeenAt: true },
+      });
+      for (const s of sightings) {
+        const key = `${s.studentId}:${s.kind}`;
+        if (!lastSeen.has(key) || s.lastSeenAt > lastSeen.get(key)) lastSeen.set(key, s.lastSeenAt);
+      }
+    }
+    const statusRank = { not_detected: 0, inside: 1, picked_up: 2 };
+    const presentStudents = presentToday
+      .map((r) => ({
+        studentId: r.studentId,
+        name: r.student.name,
+        arrivedAt: r.arrivedAt,
+        pickedUpAt: r.pickedUpAt,
+        status: presenceStatus({
+          now,
+          pickedUpAt: r.pickedUpAt,
+          detectionActive,
+          lastFaceAt: lastSeen.get(`${r.studentId}:face`),
+          lastBleAt: lastSeen.get(`${r.studentId}:ble`),
+          arrivedAt: r.arrivedAt,
+          unhealthyAt,
+        }),
+      }))
+      .sort((a, b) => statusRank[a.status] - statusRank[b.status] || a.name.localeCompare(b.name));
+
     const count = (status) => students.filter((s) => s.status === status).length;
     res.json({
       session: toResponse(session),
@@ -217,6 +254,8 @@ export async function getMonitor(req, res, next) {
       recognitionAvailable: isRecognitionConfigured(),
       counts: { verified: count("verified"), faceOnly: count("face_only"), bleOnly: count("ble_only") },
       students,
+      detectionActive,
+      presentStudents,
     });
   } catch (err) {
     next(err);

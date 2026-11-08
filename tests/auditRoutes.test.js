@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 
 vi.mock("../src/lib/prisma.js", () => ({
-  prisma: { user: { findUnique: vi.fn() }, student: { findUnique: vi.fn() } },
+  prisma: { user: { findUnique: vi.fn() }, student: { findUnique: vi.fn() }, center: { findUnique: vi.fn() } },
 }));
 vi.mock("../src/services/activityLog.service.js", () => ({ recordActivity: vi.fn() }));
 
@@ -58,6 +58,42 @@ describe("audit routes", () => {
     expect(recordActivity).not.toHaveBeenCalled();
     await run(routes.auditAttendanceImport, { body: { dryRun: false, created: 2, updated: 1, unchanged: 0, failed: [] } });
     expect(recordActivity.mock.calls[0][0].summary).toContain("2 added, 1 updated");
+  });
+
+  it("an attendance delete preview, or one that removed nothing, is not logged; a real one is", async () => {
+    const req = { body: { from: "2026-09-01", to: "2026-09-05", studentIds: [1, 2, 2] } };
+    await run(routes.auditAttendanceDelete, { req, body: { dryRun: true, wouldDelete: 4 } });
+    await run(routes.auditAttendanceDelete, { req, body: { dryRun: false, deleted: 0 } });
+    expect(recordActivity).not.toHaveBeenCalled();
+
+    await run(routes.auditAttendanceDelete, { req, body: { dryRun: false, deleted: 4 } });
+    expect(recordActivity.mock.calls[0][0]).toMatchObject({
+      action: "attendance.delete",
+      summary: "Deleted 4 attendance record(s) for 2 student(s), 2026-09-01 to 2026-09-05",
+    });
+
+    await run(routes.auditAttendanceDelete, {
+      req: { body: { from: "2026-09-01", allStudents: true } },
+      body: { dryRun: false, deleted: 9 },
+    });
+    expect(recordActivity.mock.calls[1][0].summary).toBe("Deleted 9 attendance record(s) for all students, 2026-09-01");
+  });
+
+  it("saving school times names the center, from the body for an Admin and the account for a Teacher", async () => {
+    const saved = { centerId: 3, morningStart: "08:30", morningEnd: "11:00", afternoonStart: "13:00", afternoonEnd: "15:00" };
+    prisma.center.findUnique.mockResolvedValue({ name: "ECCD Angeles" });
+
+    await run(routes.auditSchoolTimesUpdate, { req: { body: { centerId: 3 } }, body: saved });
+    expect(prisma.center.findUnique.mock.calls[0][0].where).toEqual({ id: 3 });
+    expect(recordActivity.mock.calls[0][0]).toMatchObject({
+      action: "center.school_times",
+      summary: 'Set school times for "ECCD Angeles": morning 08:30-11:00, afternoon 13:00-15:00',
+    });
+
+    // a Teacher's own center wins over anything in the body
+    const teacher = { id: 5, email: "t@school.test", role: "Teacher", centerId: 8 };
+    await run(routes.auditSchoolTimesUpdate, { req: { user: teacher, body: { centerId: 3 } }, body: saved });
+    expect(prisma.center.findUnique.mock.calls[1][0].where).toEqual({ id: 8 });
   });
 
   it("a student delete names the student read before the delete", async () => {

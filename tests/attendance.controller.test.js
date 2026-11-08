@@ -5,6 +5,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     student: { findMany: vi.fn(), count: vi.fn(), findUnique: vi.fn() },
     attendance: { findMany: vi.fn(), upsert: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
     attendanceVerification: { deleteMany: vi.fn() },
+    schoolTimeSettings: { findMany: vi.fn() },
     $transaction: vi.fn(),
   },
 }));
@@ -100,6 +101,38 @@ describe("getAttendance — late flag", () => {
   });
 });
 
+describe("getAttendance — late flag follows each center's school times", () => {
+  // 8:20 AM local (Asia/Manila) on the school day.
+  const arrivedAt = new Date("2026-09-20T00:20:00Z");
+  const record = (studentId) => ({ studentId, status: "present", arrivedAt, verification: null });
+
+  it("judges every student against their own center's morning start", async () => {
+    prisma.student.findMany.mockResolvedValueOnce([
+      { id: 1, name: "A", session: "morning", photo: null, teacher: { centerId: 10 } }, // center 10 starts at 8:30
+      { id: 2, name: "B", session: "morning", photo: null, teacher: { centerId: 20 } }, // center 20 has saved nothing
+      { id: 3, name: "C", session: "morning", photo: null, teacher: null }, // no teacher yet
+    ]);
+    prisma.attendance.findMany.mockResolvedValueOnce([record(1), record(2), record(3)]);
+    prisma.schoolTimeSettings.findMany.mockResolvedValueOnce([
+      { centerId: 10, morningStartMin: 8 * 60 + 30, afternoonStartMin: 13 * 60 },
+    ]);
+    const res = mockRes();
+    await getAttendance({ user: admin, query: { date: "2026-09-20" } }, res, vi.fn());
+
+    expect(res.json.mock.calls[0][0].map((s) => [s.id, s.late])).toEqual([[1, false], [2, true], [3, true]]);
+    // one query for all the centers involved, never one per student
+    expect(prisma.schoolTimeSettings.findMany).toHaveBeenCalledOnce();
+    expect(prisma.schoolTimeSettings.findMany.mock.calls[0][0].where).toEqual({ centerId: { in: [10, 20] } });
+  });
+
+  it("does not query school times when no student has a center", async () => {
+    prisma.student.findMany.mockResolvedValueOnce([{ id: 1, name: "A", session: "morning", photo: null }]);
+    prisma.attendance.findMany.mockResolvedValueOnce([]);
+    await getAttendance({ user: admin, query: { date: "2026-09-20" } }, mockRes(), vi.fn());
+    expect(prisma.schoolTimeSettings.findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("manual edits supersede automatic evidence", () => {
   it("updateAttendance clears the verification of the record it changed", async () => {
     prisma.attendance.upsert.mockResolvedValue({ id: 55, studentId: 5, status: "absent" });
@@ -156,6 +189,20 @@ describe("getChildAttendance — lateArrivals", () => {
     prisma.attendance.findMany.mockResolvedValue([
       record(1, "2026-09-01T04:59:00.000Z"), // 12:59 PM local — on time
       record(2, "2026-09-01T05:01:00.000Z"), // 01:01 PM local — late
+    ]);
+    const res = mockRes();
+    await getChildAttendance(req(), res, vi.fn());
+    expect(res.json.mock.calls[0][0].stats.lateArrivals).toBe(1);
+  });
+
+  it("uses the student's center's school times for the late count", async () => {
+    prisma.student.findUnique.mockResolvedValue({ session: "morning", teacher: { centerId: 10 } });
+    prisma.schoolTimeSettings.findMany.mockResolvedValue([
+      { centerId: 10, morningStartMin: 8 * 60 + 30, afternoonStartMin: 13 * 60 },
+    ]);
+    prisma.attendance.findMany.mockResolvedValue([
+      record(1, "2026-09-01T00:20:00.000Z"), // 08:20 AM local — late by default, on time at 8:30
+      record(2, "2026-09-01T00:31:00.000Z"), // 08:31 AM local — late
     ]);
     const res = mockRes();
     await getChildAttendance(req(), res, vi.fn());

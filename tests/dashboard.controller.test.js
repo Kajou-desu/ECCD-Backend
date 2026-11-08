@@ -4,7 +4,8 @@ vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     dailyTheme: { findUnique: vi.fn(), upsert: vi.fn() },
     student: { count: vi.fn() },
-    attendance: { count: vi.fn() },
+    attendance: { count: vi.fn(), findMany: vi.fn() },
+    schoolTimeSettings: { findMany: vi.fn() },
     material: { count: vi.fn(), findUnique: vi.fn() },
   },
 }));
@@ -24,6 +25,8 @@ const ADMIN = { id: 1, role: "Admin", centerId: null };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prisma.attendance.findMany.mockReset().mockResolvedValue([]);
+  prisma.schoolTimeSettings.findMany.mockReset().mockResolvedValue([]);
 });
 
 describe("upsertDailyTheme", () => {
@@ -197,21 +200,55 @@ describe("getDailyTheme", () => {
 describe("getDashboardStats", () => {
   afterEach(() => vi.useRealTimers());
 
+  // 8:20 AM and 7:50 AM local time (Asia/Manila) on the school day 2026-09-30.
+  const row = (arrivedAt, centerId = undefined, session = "morning") => ({
+    arrivedAt: arrivedAt ? new Date(arrivedAt) : null,
+    student: { session, teacher: centerId === undefined ? null : { centerId } },
+  });
+
   it("counts the school's current day, not the server's (UTC) day", async () => {
     // 7:30 AM Sept 30 in Manila is still Sept 29 in UTC.
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-29T23:30:00.000Z"));
     prisma.student.count.mockResolvedValue(10);
-    prisma.attendance.count.mockResolvedValueOnce(4).mockResolvedValueOnce(1);
+    prisma.attendance.findMany.mockResolvedValue([row("2026-09-29T23:50:00Z"), row("2026-09-30T00:20:00Z")]);
+    prisma.attendance.count.mockResolvedValueOnce(1).mockResolvedValueOnce(2);
     prisma.material.count.mockResolvedValue(3);
 
     const res = mockRes();
     await getDashboardStats({ user: { id: 1, role: "Admin" } }, res, vi.fn());
 
     const day = new Date("2026-09-30T00:00:00.000Z");
-    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "present", student: {} } });
+    expect(prisma.attendance.findMany.mock.calls[0][0].where).toEqual({ date: day, status: "present", student: {} });
     expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "absent", student: {} } });
-    expect(res.json).toHaveBeenCalledWith({ totalStudents: 10, presentToday: 4, absentToday: 1, totalMaterials: 3 });
+    expect(prisma.attendance.count).toHaveBeenCalledWith({ where: { date: day, status: "excused", student: {} } });
+    expect(res.json).toHaveBeenCalledWith({
+      totalStudents: 10,
+      presentToday: 2,
+      lateToday: 1,
+      absentToday: 1,
+      excusedToday: 2,
+      totalMaterials: 3,
+    });
+  });
+
+  it("counts late against each student's own center's school times", async () => {
+    prisma.student.count.mockResolvedValue(3);
+    prisma.attendance.count.mockResolvedValue(0);
+    prisma.material.count.mockResolvedValue(0);
+    prisma.attendance.findMany.mockResolvedValue([
+      row("2026-09-30T00:20:00Z", 4), // 8:20 — center 4 starts at 8:30, so on time
+      row("2026-09-30T00:20:00Z", 5), // 8:20 — center 5 has saved nothing, default 8:00
+      row("2026-09-30T00:20:00Z"), // 8:20 — no teacher, default
+      row(null, 5), // marked by hand: never late
+    ]);
+    prisma.schoolTimeSettings.findMany.mockResolvedValue([
+      { centerId: 4, morningStartMin: 8 * 60 + 30, afternoonStartMin: 13 * 60 },
+    ]);
+    const res = mockRes();
+    await getDashboardStats({ user: ADMIN }, res, vi.fn());
+    expect(res.json.mock.calls[0][0]).toMatchObject({ presentToday: 4, lateToday: 2 });
+    expect(prisma.schoolTimeSettings.findMany.mock.calls[0][0].where).toEqual({ centerId: { in: [4, 5] } });
   });
 
   it("counts a Teacher's whole center, so two teachers there get the same numbers", async () => {
@@ -222,9 +259,15 @@ describe("getDashboardStats", () => {
       vi.clearAllMocks();
       prisma.student.count.mockResolvedValue(3);
       prisma.attendance.count.mockResolvedValue(2);
+      prisma.attendance.findMany.mockResolvedValue([]);
       await getDashboardStats({ user: { id, role: "Teacher", centerId: 4 } }, mockRes(), vi.fn());
       expect(prisma.student.count).toHaveBeenCalledWith({ where: { teacher: { centerId: 4 } } });
-      for (const status of ["present", "absent"]) {
+      expect(prisma.attendance.findMany.mock.calls[0][0].where).toEqual({
+        date: expect.any(Date),
+        status: "present",
+        student: { teacher: { centerId: 4 } },
+      });
+      for (const status of ["absent", "excused"]) {
         expect(prisma.attendance.count).toHaveBeenCalledWith({
           where: { date: expect.any(Date), status, student: { teacher: { centerId: 4 } } },
         });

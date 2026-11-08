@@ -5,6 +5,7 @@ vi.mock("../src/lib/prisma.js", () => ({
     attendanceSession: { findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
     attendanceSignal: { findMany: vi.fn() },
     attendanceVerification: { findMany: vi.fn() },
+    attendance: { findMany: vi.fn() },
     bleGateway: { findFirst: vi.fn() },
   },
 }));
@@ -13,6 +14,8 @@ vi.mock("../src/services/recognitionClient.js", () => ({ isRecognitionConfigured
 const { prisma } = await import("../src/lib/prisma.js");
 const { isRecognitionConfigured } = await import("../src/services/recognitionClient.js");
 const { getMonitor } = await import("../src/controllers/attendanceSession.controller.js");
+const { touchCamera } = await import("../src/lib/hardwareStatus.js");
+const { resetPickupHealth } = await import("../src/services/pickupWatch.service.js");
 
 const NOW = new Date("2026-09-20T00:00:30.000Z");
 const ago = (secs) => new Date(NOW.getTime() - secs * 1000);
@@ -45,6 +48,9 @@ beforeEach(() => {
   prisma.attendanceSession.findFirst.mockResolvedValue(SESSION);
   prisma.attendanceSignal.findMany.mockResolvedValue([]);
   prisma.attendanceVerification.findMany.mockResolvedValue([]);
+  prisma.attendance.findMany.mockResolvedValue([]);
+  resetPickupHealth(ago(3600));
+  touchCamera(1, NOW); // this center's camera is streaming
   prisma.bleGateway.findFirst.mockResolvedValue({ id: 1 });
   isRecognitionConfigured.mockReturnValue(true);
 });
@@ -196,5 +202,64 @@ describe("getMonitor — whose students are shown", () => {
     const { body, next } = await monitor({ id: 3, role: "Parent" }, {});
     expect(body).toBeUndefined();
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
+  });
+
+  describe("presentStudents (the Present Students table)", () => {
+    const present = (studentId, name, arrivedAt, pickedUpAt = null) => ({ studentId, arrivedAt, pickedUpAt, student: { name } });
+    const seen = (studentId, kind, lastSeenAt) => ({ studentId, kind, lastSeenAt });
+    const rows = (body) => body.presentStudents.map((r) => [r.name, r.status]);
+
+    it("is empty when nobody is present", async () => {
+      const { body } = await monitor();
+      expect(body.presentStudents).toEqual([]);
+      expect(body.detectionActive).toBe(true);
+    });
+
+    it("labels Inside, Not Detected and Picked Up, with Not Detected first", async () => {
+      prisma.attendance.findMany.mockResolvedValue([
+        present(1, "Ana", ago(600)),
+        present(2, "Ben", ago(600)),
+        present(3, "Cara", ago(600), ago(100)),
+      ]);
+      // The 2nd call to attendanceSignal.findMany is the sightings lookup.
+      prisma.attendanceSignal.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([seen(1, "face", ago(10)), seen(2, "ble", ago(300)), seen(3, "ble", ago(500))]);
+      const { body } = await monitor();
+      expect(rows(body)).toEqual([["Ben", "not_detected"], ["Ana", "inside"], ["Cara", "picked_up"]]);
+    });
+
+    it("reads only today's present records inside the caller's scope, and today's sightings", async () => {
+      prisma.attendance.findMany.mockResolvedValue([present(1, "Ana", ago(600))]);
+      await monitor({ id: 3, role: "Teacher", centerId: 1 }, {});
+      expect(prisma.attendance.findMany.mock.calls[0][0].where).toEqual({
+        date: SESSION.date, status: "present", student: { teacher: { centerId: 1 } },
+      });
+      expect(prisma.attendanceSignal.findMany.mock.calls[1][0].where).toEqual({
+        studentId: { in: [1] }, session: { date: SESSION.date },
+      });
+    });
+
+    it("never says Not Detected while the camera is down, and says so", async () => {
+      touchCamera(1, ago(120)); // last frame two minutes ago
+      prisma.attendance.findMany.mockResolvedValue([present(2, "Ben", ago(600))]);
+      const { body } = await monitor();
+      expect(body.detectionActive).toBe(false);
+      expect(rows(body)).toEqual([["Ben", "inside"]]);
+    });
+
+    it("never says Not Detected while the tag reader is offline", async () => {
+      prisma.bleGateway.findFirst.mockResolvedValue(null);
+      prisma.attendance.findMany.mockResolvedValue([present(2, "Ben", ago(600))]);
+      const { body } = await monitor();
+      expect(body.detectionActive).toBe(false);
+      expect(rows(body)).toEqual([["Ben", "inside"]]);
+    });
+
+    it("does not expose anything beyond the student's id, name and times", async () => {
+      prisma.attendance.findMany.mockResolvedValue([present(1, "Ana", ago(600))]);
+      const { body } = await monitor();
+      expect(Object.keys(body.presentStudents[0]).sort()).toEqual(["arrivedAt", "name", "pickedUpAt", "status", "studentId"]);
+    });
   });
 });

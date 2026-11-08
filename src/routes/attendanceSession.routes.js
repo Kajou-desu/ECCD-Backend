@@ -16,9 +16,6 @@ import {
   stopSession,
 } from "../controllers/attendanceSession.controller.js";
 import { processFrame } from "../controllers/attendanceFrame.controller.js";
-import { answerCheck } from "../controllers/pickupCheck.controller.js";
-import { validateBody } from "../middleware/validateBody.js";
-import { pickupCheckAnswerSchema } from "../schemas/pickupCheck.schema.js";
 
 const router = Router();
 
@@ -52,6 +49,5 @@ router.post("/start", startSession);
 router.post("/stop", stopSession);
 router.post("/pickup-watch/start", startPickupWatch);
 router.post("/pickup-watch/stop", stopPickupWatch);
-router.post("/pickup-checks/:id/answer", validateBody(pickupCheckAnswerSchema), answerCheck);
 
 export default router;

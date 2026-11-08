@@ -103,6 +103,17 @@ export const auditAttendancePickup = audit("attendance.pickup", {
   describe: (_req, _body, before) => before && `Recorded pickup of ${before.name}`,
 });
 
+export const auditAttendanceDelete = audit("attendance.delete", {
+  describe: (req, body) => {
+    if (!body || body.dryRun !== false || !body.deleted) return null; // a preview deletes nothing
+    // from/to/studentIds passed validation, or the request would not have succeeded.
+    const { from, to = from, studentIds } = req.body;
+    const days = to === from ? from : `${from} to ${to}`;
+    const who = Array.isArray(studentIds) ? `${new Set(studentIds).size} student(s)` : "all students";
+    return `Deleted ${body.deleted} attendance record(s) for ${who}, ${days}`;
+  },
+});
+
 // ---- centers, events, materials ----
 export const auditCenterCreate = audit("center.create", {
   target: "center",
@@ -141,4 +152,18 @@ export const auditMaterialDelete = audit("material.delete", {
   target: "material",
   snapshot: (req) => prisma.material.findUnique({ where: { id: idOf(req.params.id) ?? -1 }, select: { title: true } }),
   describe: (_req, _body, before) => before && `Deleted material ${quote(before.title)}`,
+});
+
+// ---- school times (filed under the "center" category: they are a center's settings) ----
+export const auditSchoolTimesUpdate = audit("center.school_times", {
+  target: "center",
+  // An Admin names the center in the body; a Teacher's is their own.
+  snapshot: (req) =>
+    prisma.center.findUnique({
+      where: { id: req.user.role === "Admin" ? (idOf(req.body?.centerId) ?? -1) : (req.user.centerId ?? -1) },
+      select: { name: true },
+    }),
+  describe: (_req, body, before) =>
+    body?.morningStart &&
+    `Set school times for ${quote(before?.name ?? "?")}: morning ${body.morningStart}-${body.morningEnd}, afternoon ${body.afternoonStart}-${body.afternoonEnd}`,
 });
