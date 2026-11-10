@@ -286,13 +286,24 @@ model Attendance {
   // this column existed (judged live until the backfill script has run).
   late      Boolean?
   // When the student was picked up. Set either manually via
-  // PATCH /attendance/:studentId/pickup (Teacher/Admin), or automatically by
-  // the pickup watch (services/pickupWatch.service.js) once neither the face
-  // nor the BLE tag has been seen for a while and the teacher hasn't said the
-  // student is still here. pickedUpAuto marks the automatic case: only those
-  // are undone if the student is seen again.
+  // PATCH /attendance/:studentId/pickup (Teacher/Admin), or automatically: first
+  // by the EXIT camera recognising the face during the pickup window
+  // (controllers/attendanceFrame.controller.js), and as a backup by the pickup
+  // watch (services/pickupWatch.service.js) once the BLE tag has been unseen
+  // for a while and the exit camera never saw the student. pickedUpAuto marks
+  // the automatic case. An automatic pickup is never undone by the system: if
+  // the entry camera sees the student again, the teachers are told instead.
   pickedUpAt   DateTime?
   pickedUpAuto Boolean   @default(false)
+  // When the teachers were told that an automatically picked-up student was seen
+  // at the entry camera again. Claimed once per automatic pickup, so a student
+  // walking past the camera does not notify on every frame.
+  pickupReturnAlertedAt DateTime?
+  // When a teacher last pressed "Still here" on this student's Not Detected row
+  // (PATCH /attendance/:studentId/still-here). The pickup watch counts the
+  // unseen time from here, so the student is neither Not Detected nor
+  // auto-picked-up until the clock runs out again.
+  stillHereAt  DateTime?
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
@@ -408,9 +419,12 @@ model AttendanceSession {
   @@map("attendance_sessions")
 }
 
+// face = the ENTRY camera's face match (arrival), ble = the tag reader,
+// exit = the EXIT camera's face match (automatic pickup).
 enum SignalKind {
   face
   ble
+  exit
 }
 
 // The latest sighting of a student by one signal source during a session: one

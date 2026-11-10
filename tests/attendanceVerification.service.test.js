@@ -107,6 +107,14 @@ describe("isSignalPresent", () => {
     expect(isSignalPresent("ble", sig(-71, 2, T0), at(5), CFG)).toBe(false); // too far away
     expect(isSignalPresent("ble", sig(-60, 1, T0), at(5), CFG)).toBe(false);
   });
+
+  it("exit (the exit camera) is a face distance like face, NOT an RSSI", () => {
+    expect(isSignalPresent("exit", sig(0.4, 2, T0), at(5), CFG)).toBe(true);
+    expect(isSignalPresent("exit", sig(0.5, 2, T0), at(5), CFG)).toBe(true); // boundary inclusive
+    expect(isSignalPresent("exit", sig(0.51, 2, T0), at(5), CFG)).toBe(false); // too far
+    expect(isSignalPresent("exit", sig(0.4, 1, T0), at(5), CFG)).toBe(false); // one sighting
+    expect(isSignalPresent("exit", sig(0.4, 2, T0), at(31), CFG)).toBe(false); // stale
+  });
 });
 
 describe("evaluate", () => {

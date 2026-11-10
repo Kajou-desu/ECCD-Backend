@@ -3,7 +3,8 @@
 A student is marked present **automatically** only when **both** of these are seen
 in the classroom within a short window:
 
-1. their **face**, matched by a camera; and
+1. their **face**, matched by the **entry camera** (the one that watches students
+   coming into the classroom); and
 2. their **BLE tag**, heard by an ESP32.
 
 Either one alone is never enough. A teacher can always mark attendance by hand,
@@ -27,6 +28,22 @@ and a manual entry wins over an automatic one, except a manual **absent** (see b
 
 Only pixels leave the teacher's device: the server decides who is in each frame.
 Frames are handled in memory and never stored.
+
+## Two cameras: entry and exit
+
+A center uses **two cameras**, each a device (a tablet or laptop) with the Live
+attendance page open and its camera role chosen on that page:
+
+| Camera | Watches | Feeds | Endpoint |
+|---|---|---|---|
+| **Entry** | students coming **into** the classroom | automatic **attendance** (face + BLE) | `POST /attendance/session/frame` (or `?camera=entry`) |
+| **Exit** | students going **out** | automatic **pickup** (face only, during the pickup window) | `POST /attendance/session/frame?camera=exit` |
+
+`camera` is a query parameter (the upload form allows no extra fields) and must be
+`entry` or `exit`; anything else is a 400. Leaving it out means `entry`, which is
+what clients sent before there were two cameras. Liveness is tracked per center
+**and** per camera (`lib/hardwareStatus.js`), so the entry camera being up never
+vouches for the exit camera.
 
 ## When is a student marked present?
 
@@ -101,7 +118,9 @@ The defaults are starting points, not measurements.
   (`Permissions-Policy: camera=(self)`); a blanket `camera=()` blocks it silently.
 - **Rate limits**: session, gateway and frame paths each have their own budgets
   (per IP before login, per user/device after) and are exempt from the general
-  300-per-15-minutes limit, which polling would exhaust.
+  300-per-15-minutes limit, which polling would exhaust. A frame stream is about 1300
+  requests per 15 minutes, so the per-user frame budget (4000) covers two cameras
+  signed in as the same teacher.
 - **Old data**: `attendance_signals` rows are working state and are not purged
   automatically. Clear old sessions occasionally, e.g.
   `DELETE FROM attendance_signals WHERE "sessionId" IN (SELECT id FROM attendance_sessions WHERE status = 'closed' AND "endedAt" < now() - interval '30 days');`
@@ -144,44 +163,68 @@ students only; re-marking a student's status clears a prior pickup.
 
 ### Automatic pickup
 
-`services/pickupWatch.service.js`, run every 10 s by `lib/pickupJob.js`. Morning
-students are watched from `PICKUP_MORNING_START` (10:30) and afternoon students
-from `PICKUP_AFTERNOON_START` (14:30), for `PICKUP_WINDOW_HOURS` (2).
+The **exit camera is the primary signal**; the **BLE tag is the backup** for a
+student the exit camera missed. Morning students are covered from
+`PICKUP_MORNING_START` (10:30) and afternoon students from `PICKUP_AFTERNOON_START`
+(14:30), for `PICKUP_WINDOW_HOURS` (2), or by a window a teacher started (below).
+
+**Exit camera (primary)** — `services/pickupCamera.service.js`, called by the frame
+controller:
+
+- A confident face match at the exit camera, seen `VERIFY_MIN_HITS` (2) times in a
+  row, marks the student picked up (`pickedUpAuto = true`) and parents get the same
+  notification as a manual pickup, immediately.
+- Only while a pickup window covers that student (their own session's scheduled
+  window, or a window a teacher started). A face at the exit camera outside the
+  window changes nothing and writes nothing, so a child leaving at 9:30 stays a
+  manual pickup.
+- Only a student who is **present**, has **arrived** and is **not already picked up**
+  is marked (a guarded write, so two frames or instances cannot both notify).
+- It works for students with no BLE tag too.
+- The exit sighting is stored as an `attendance_signals` row of kind `exit`. It is
+  separate from the arrival `face` signal and is never used for arrival.
+
+**Seen again at the entry camera** — an automatic pickup is **never undone by the
+system**. If a student picked up automatically is steadily seen by the **entry**
+camera again (`VERIFY_MIN_HITS` in a row), every teacher at that student's center
+gets an in-app notification (not a toast), once per automatic pickup
+(`attendance.pickupReturnAlertedAt`), and a teacher decides. Manual pickups never alert.
+
+**BLE tag (backup)** — `services/pickupWatch.service.js`, run every 10 s by
+`lib/pickupJob.js`:
 
 - No teacher has to press Start: the job starts an attendance session itself
-  (`autoStarted`), because the ESP32 only scans and the camera only sends frames
-  while one is active. If a teacher presses Stop on it, it is not restarted in
-  that window. It closes itself once every watched student is picked up;
-  otherwise teachers get an in-app reminder when the window ends.
-- A present student with an enabled tag whose **face and tag have both gone
-  unseen** gets an in-app prompt for the teacher after 1 minute: "is this
-  student still in the center?" It lasts 15 s (`pickup_checks`). *Still here*
-  restarts the clock; *Picked up* marks the student at once (a manual pickup).
-  Unanswered, a new prompt comes a minute later.
-- After `PICKUP_ABSENT_MIN` (5) minutes unseen with no "still here", the student
-  is marked picked up (`pickedUpAuto = true`) and parents get the same
-  notification as a manual pickup.
-- An auto-marked student whose face and tag both reappear inside the window is
-  put back. After the window the pickup stands. Manual pickups are never undone.
-- Silence is weak evidence, so nothing happens unless the ESP32 gateway is
-  online **and** the camera has sent a frame in the last 30 s, and the unseen
-  clock restarts after any outage. This means the teacher must keep the Live
-  attendance page open (it owns the camera) during the window.
-- Assumes a single API instance (the job and the camera heartbeat are in-process).
-- **Manual Start / Stop** (button on the Live attendance page):
-  `POST /api/attendance/session/pickup-watch/start` and `/stop` (Teacher, or an
-  Admin naming `centerId`; acts on that center only; idempotent). The choice is
-  one row per center per day (`pickup_watch_overrides`), so it survives a restart.
-  *Stop* pauses the window that is open: nothing is prompted or marked for that
-  center and its session is left running (a window that opens later, such as the
-  afternoon one, is unaffected). *Start* opens a window of its own, even outside
-  the schedule: it covers morning and afternoon students, lasts
-  `PICKUP_WINDOW_HOURS` from the press, and silence is counted only from then
-  (so resuming never marks anyone for the time it was stopped). `GET
-  /attendance/session/current` reports `pickupWindow: { active, endsAt, mode }`
-  with `mode` of `auto` (the schedule), `on` or `off`.
-- The ESP32 only reports tags at or above -70 dBm: check the whole room is
-  covered from the teacher's table, or students will look "gone".
+  (`autoStarted`), because the ESP32 only scans and the cameras only send frames
+  while one is active. It does so for any present student in the window, tagged or
+  not, since the exit camera needs the session. If a teacher presses Stop on it, it
+  is not restarted in that window. It closes itself once every watched student is
+  picked up; otherwise teachers get an in-app reminder when the window ends.
+- A present student with an enabled tag whose face and tag have both gone unseen
+  shows as **Not Detected** in the Live table after 1 minute. After
+  `PICKUP_ABSENT_MIN` (5) minutes unseen, **and** with no exit-camera sighting in
+  that time, the student is marked picked up automatically.
+- Silence is weak evidence, so the backup does nothing unless the ESP32 gateway is
+  online **and the exit camera** has sent a frame in the last 30 s, and the unseen
+  clock restarts after any outage. The Live table shows Not Detected only under the
+  same two conditions (`cameras` in `GET /attendance/session/monitor` reports each
+  camera's liveness).
+- Assumes a single API instance (the job and the camera heartbeats are in-process).
+
+**Manual Start / Stop** (button on the Live attendance page):
+`POST /api/attendance/session/pickup-watch/start` and `/stop` (Teacher, or an
+Admin naming `centerId`; acts on that center only; idempotent). The choice is
+one row per center per day (`pickup_watch_overrides`), so it survives a restart.
+*Stop* pauses the window that is open: neither camera nor the backup marks anyone
+for that center and its session is left running (a window that opens later, such as
+the afternoon one, is unaffected). *Start* opens a window of its own, even outside
+the schedule: it covers morning and afternoon students, lasts
+`PICKUP_WINDOW_HOURS` from the press, and silence is counted only from then
+(so resuming never marks anyone for the time it was stopped). `GET
+/attendance/session/current` reports `pickupWindow: { active, endsAt, mode }`
+with `mode` of `auto` (the schedule), `on` or `off`.
+
+The ESP32 only reports tags at or above -70 dBm: check the whole room is
+covered from the teacher's table, or the backup will think students are "gone".
 
 - **Email** goes through Resend's HTTPS API when `RESEND_API_KEY` is set (use a
   sender on the verified `eccdsmarttrack.app` domain in `SMTP_FROM`), and falls

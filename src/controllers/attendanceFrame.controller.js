@@ -2,15 +2,26 @@ import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
 import { centerKey, findActiveSessionsFor, sessionsByCenter } from "../lib/activeSession.js";
-import { touchCamera } from "../lib/hardwareStatus.js";
+import { CAMERA_ROLES, touchCamera } from "../lib/hardwareStatus.js";
 import { recordSignal } from "../services/attendanceVerification.service.js";
+import { alertStudentsSeenAfterAutoPickup, handleExitSighting } from "../services/pickupCamera.service.js";
 import { isRecognitionConfigured, recognizeFrame } from "../services/recognitionClient.js";
 import { liveStudentScope } from "../utils/studentScope.js";
 import { mapWithLimit, SIGNAL_CONCURRENCY } from "../utils/concurrency.js";
 
-// POST /attendance/session/frame — Teacher/Admin only, multipart field "frame".
+// POST /attendance/session/frame?camera=entry|exit — Teacher/Admin only,
+// multipart field "frame". The center has two cameras: the ENTRY camera feeds
+// automatic attendance (face + BLE), the EXIT camera feeds automatic pickup.
+// `camera` defaults to "entry", which is what clients sent before there were two.
 // The frame lives in memory only (multer memoryStorage); it is never written to
 // disk or logged, and is forwarded to the recognition service and dropped.
+
+// The camera role from the query string: "entry" when absent, null when invalid
+// (anything but one of CAMERA_ROLES, including repeated or non-string values).
+export function parseCameraRole(raw) {
+  if (raw === undefined) return "entry";
+  return typeof raw === "string" && CAMERA_ROLES.includes(raw) ? raw : null;
+}
 
 // JPEG files begin FF D8 FF. multer only sees the client-declared mimetype, so
 // the bytes are checked as well (same idea as the upload middleware).
@@ -30,6 +41,9 @@ export function isConfidentMatch(face, cfg = env.verification) {
 export async function processFrame(req, res, next) {
   try {
     const scope = liveStudentScope(req.user);
+
+    const role = parseCameraRole(req.query?.camera);
+    if (!role) return res.status(400).json({ message: "Invalid camera" });
 
     if (!isRecognitionConfigured()) {
       return res.status(503).json({ message: "Recognition unavailable" });
@@ -54,9 +68,9 @@ export async function processFrame(req, res, next) {
       return res.status(502).json({ message: "Recognition unavailable" });
     }
     // The pickup watch only trusts "not seen" while frames are flowing, judged per
-    // center. An Admin's frames can't say which center's camera this is, so they
-    // vouch for none (the safe side: no automatic pickups on their account).
-    if (req.user.role === "Teacher") touchCamera(req.user.centerId);
+    // center and per camera. An Admin's frames can't say which center's camera
+    // this is, so they vouch for none (the safe side: no backup pickups on their account).
+    if (req.user.role === "Teacher") touchCamera(req.user.centerId, new Date(), role);
 
     // One student appearing as two faces in the same frame is impossible, so
     // it means at least one is a mis-match: trust neither.
@@ -71,19 +85,58 @@ export async function processFrame(req, res, next) {
           // Faces of students outside the caller's own list are dropped here, so
           // they show up as an unnamed box and never get a signal recorded.
           where: { id: { in: candidates.map((f) => f.studentId) }, status: "active", ...scope },
-          select: { id: true, name: true, teacher: { select: { centerId: true } } },
+          select: { id: true, name: true, session: true, teacher: { select: { centerId: true } } },
         })
       : [];
     // Each student's signal goes to THEIR center's session; one whose center has
     // no session running is treated like an unknown face (an unnamed box).
+    // `session` is the attendance session, `classSession` morning | afternoon.
     const students = found
-      .map((s) => ({ id: s.id, name: s.name, session: sessions.get(centerKey(s.teacher?.centerId)) }))
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        classSession: s.session,
+        centerId: s.teacher?.centerId ?? null,
+        session: sessions.get(centerKey(s.teacher?.centerId)),
+      }))
       .filter((s) => s.session);
     const studentById = new Map(students.map((s) => [s.id, s]));
 
     const verified = [];
     const verifiedIds = new Set();
+    const pickedUp = [];
     const now = new Date();
+
+    if (role === "exit") {
+      // Every candidate is a different student (see above), so they can be
+      // handled together. A face outside a pickup window changes nothing.
+      const exitKnown = candidates.filter((face) => studentById.has(face.studentId));
+      const overrides = new Map();
+      const exitOutcomes = await mapWithLimit(exitKnown, SIGNAL_CONCURRENCY, (face) => {
+        const student = studentById.get(face.studentId);
+        return handleExitSighting({
+          session: student.session,
+          student: { id: student.id, session: student.classSession, centerId: student.centerId },
+          distance: face.distance,
+          now,
+          overrides,
+        });
+      });
+      exitKnown.forEach((face, i) => {
+        if (exitOutcomes[i].pickedUp) pickedUp.push({ studentId: face.studentId, name: studentById.get(face.studentId).name });
+      });
+      const pickedUpIds = new Set(pickedUp.map((p) => p.studentId));
+      const exitFaces = result.faces.map((f) => {
+        const student = candidates.includes(f) ? studentById.get(f.studentId) : undefined;
+        return {
+          box: f.box,
+          student: student ? { id: student.id, name: student.name } : null,
+          verified: false,
+          pickedUp: student ? pickedUpIds.has(student.id) : false,
+        };
+      });
+      return res.json({ camera: role, width: result.width, height: result.height, faces: exitFaces, verified, pickedUp });
+    }
     // Every candidate is a different student (a student seen twice was dropped
     // above), so their rows never overlap and they can be recorded together;
     // the smoothing only needs ONE student's readings to arrive in order, and
@@ -107,6 +160,16 @@ export async function processFrame(req, res, next) {
       verifiedIds.add(student.id);
     });
 
+    // A student who was picked up automatically and is now steadily seen at the
+    // ENTRY camera again: tell the teachers (once). Never undoes the pickup.
+    // Best effort: a failed alert must not fail the frame.
+    const steady = known
+      .filter((_, i) => (outcomes[i].hits ?? 0) >= env.verification.minHits)
+      .map((face) => ({ studentId: face.studentId, date: studentById.get(face.studentId).session.date }));
+    await alertStudentsSeenAfterAutoPickup(steady, now).catch((err) =>
+      logger.error({ err }, "Seen-again alert lookup failed"),
+    );
+
     // Names are returned only for confident matches — an unrecognised or
     // ambiguous face is reported as just a box.
     const faces = result.faces.map((f) => {
@@ -118,7 +181,7 @@ export async function processFrame(req, res, next) {
       };
     });
 
-    res.json({ width: result.width, height: result.height, faces, verified });
+    res.json({ camera: role, width: result.width, height: result.height, faces, verified, pickedUp });
   } catch (err) {
     next(err);
   }

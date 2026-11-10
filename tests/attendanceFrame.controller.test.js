@@ -11,6 +11,10 @@ vi.mock("../src/lib/hardwareStatus.js", async (importOriginal) => ({
   touchCamera: vi.fn(),
 }));
 vi.mock("../src/services/attendanceVerification.service.js", () => ({ recordSignal: vi.fn() }));
+vi.mock("../src/services/pickupCamera.service.js", () => ({
+  handleExitSighting: vi.fn(),
+  alertStudentsSeenAfterAutoPickup: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("../src/services/recognitionClient.js", () => ({
   isRecognitionConfigured: vi.fn(),
   recognizeFrame: vi.fn(),
@@ -20,8 +24,9 @@ const { prisma } = await import("../src/lib/prisma.js");
 const { findActiveSessionsFor } = await import("../src/lib/activeSession.js");
 const { touchCamera } = await import("../src/lib/hardwareStatus.js");
 const { recordSignal } = await import("../src/services/attendanceVerification.service.js");
+const { handleExitSighting, alertStudentsSeenAfterAutoPickup } = await import("../src/services/pickupCamera.service.js");
 const { isRecognitionConfigured, recognizeFrame } = await import("../src/services/recognitionClient.js");
-const { processFrame, isJpeg, isConfidentMatch } = await import("../src/controllers/attendanceFrame.controller.js");
+const { processFrame, isJpeg, isConfidentMatch, parseCameraRole } = await import("../src/controllers/attendanceFrame.controller.js");
 
 const CFG = { faceMaxDistance: 0.5, faceMinMargin: 0.05 };
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
@@ -50,6 +55,8 @@ beforeEach(() => {
   recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [] });
   prisma.student.findMany.mockResolvedValue([{ id: 5, name: "Ana Reyes" }]);
   recordSignal.mockResolvedValue({ state: "pending" });
+  handleExitSighting.mockResolvedValue({ pickedUp: false });
+  alertStudentsSeenAfterAutoPickup.mockResolvedValue(undefined);
 });
 
 describe("isJpeg", () => {
@@ -254,7 +261,7 @@ describe("processFrame — sessions are per center", () => {
   it("a Teacher's frames vouch for their own center's camera only", async () => {
     await run({ user: { id: 7, role: "Teacher", centerId: 41 } });
     expect(touchCamera).toHaveBeenCalledTimes(1);
-    expect(touchCamera).toHaveBeenCalledWith(41);
+    expect(touchCamera).toHaveBeenCalledWith(41, expect.any(Date), "entry");
   });
 
   it("an Admin's frames vouch for no center's camera", async () => {
@@ -292,5 +299,103 @@ describe("processFrame — whose students can be recognised", () => {
       expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
     }
     expect(recognizeFrame).not.toHaveBeenCalled();
+  });
+});
+
+describe("processFrame — two cameras", () => {
+  const student = (id, centerId = null, session = "morning") => ({ id, name: `S${id}`, session, teacher: { centerId } });
+  const exitRun = (over = {}) => run({ query: { camera: "exit" }, ...over });
+
+  it("parseCameraRole: entry by default, only entry|exit otherwise", () => {
+    expect(parseCameraRole(undefined)).toBe("entry");
+    expect(parseCameraRole("entry")).toBe("entry");
+    expect(parseCameraRole("exit")).toBe("exit");
+    for (const bad of ["", "Exit", "both", "exit,entry", ["exit"], { a: 1 }, 1, null]) {
+      expect(parseCameraRole(bad)).toBeNull();
+    }
+  });
+
+  it("rejects an unknown camera before touching recognition", async () => {
+    const { res } = await run({ query: { camera: "roof" } });
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(recognizeFrame).not.toHaveBeenCalled();
+    expect(touchCamera).not.toHaveBeenCalled();
+  });
+
+  it("a frame with no camera is the entry camera, exactly as before", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    prisma.student.findMany.mockResolvedValue([student(5)]);
+    const { body } = await run();
+    expect(body.camera).toBe("entry");
+    expect(recordSignal).toHaveBeenCalledTimes(1);
+    expect(handleExitSighting).not.toHaveBeenCalled();
+  });
+
+  it("the exit camera records no arrival signal and vouches for the EXIT camera only", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    prisma.student.findMany.mockResolvedValue([student(5, 41)]);
+    await exitRun({ user: { id: 7, role: "Teacher", centerId: 41 } });
+    expect(recordSignal).not.toHaveBeenCalled();
+    expect(touchCamera).toHaveBeenCalledWith(41, expect.any(Date), "exit");
+    expect(touchCamera).not.toHaveBeenCalledWith(41, expect.any(Date), "entry");
+  });
+
+  it("the exit camera hands each confident, in-scope face to the pickup logic", async () => {
+    recognizeFrame.mockResolvedValue({
+      width: 640, height: 480,
+      faces: [face(), face({ studentId: 6, box: [5, 6, 7, 8], distance: 0.9 })], // second is not a confident match
+    });
+    prisma.student.findMany.mockResolvedValue([student(5, null, "afternoon")]);
+    await exitRun();
+    expect(handleExitSighting).toHaveBeenCalledTimes(1);
+    expect(handleExitSighting.mock.calls[0][0]).toMatchObject({
+      session: SESSION,
+      student: { id: 5, session: "afternoon", centerId: null },
+      distance: 0.4,
+    });
+  });
+
+  it("reports who was picked up, and nothing about arrival", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face(), face({ studentId: 6, box: [5, 6, 7, 8] })] });
+    prisma.student.findMany.mockResolvedValue([student(5), student(6)]);
+    handleExitSighting.mockImplementation(async ({ student: s }) => ({ pickedUp: s.id === 5 }));
+    const { body } = await exitRun();
+    expect(body.camera).toBe("exit");
+    expect(body.pickedUp).toEqual([{ studentId: 5, name: "S5" }]);
+    expect(body.verified).toEqual([]);
+    expect(body.faces.map((f) => [f.student?.id, f.pickedUp, f.verified])).toEqual([[5, true, false], [6, false, false]]);
+  });
+
+  it("an ambiguous exit face (same student twice) is trusted for nothing", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face(), face({ box: [9, 9, 9, 9] })] });
+    prisma.student.findMany.mockResolvedValue([student(5)]);
+    await exitRun();
+    expect(handleExitSighting).not.toHaveBeenCalled();
+  });
+
+  it("an exit face of a student outside a Teacher's list is dropped by the same scope as entry", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    prisma.student.findMany.mockResolvedValue([]); // the scoped lookup found nobody
+    await exitRun({ user: TEACHER });
+    expect(prisma.student.findMany.mock.calls[0][0].where).toEqual({ id: { in: [5] }, status: "active", teacherId: 7 });
+    expect(handleExitSighting).not.toHaveBeenCalled();
+  });
+
+  it("the entry camera passes stable sightings on for the seen-again alert", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face(), face({ studentId: 6, box: [5, 6, 7, 8] })] });
+    prisma.student.findMany.mockResolvedValue([student(5), student(6)]);
+    recordSignal.mockImplementation(async ({ studentId }) => ({ state: "pending", hits: studentId === 5 ? 2 : 1 }));
+    await run();
+    expect(alertStudentsSeenAfterAutoPickup).toHaveBeenCalledWith([{ studentId: 5, date: SESSION.date }], expect.any(Date));
+  });
+
+  it("a failed seen-again lookup never fails the frame", async () => {
+    recognizeFrame.mockResolvedValue({ width: 640, height: 480, faces: [face()] });
+    prisma.student.findMany.mockResolvedValue([student(5)]);
+    recordSignal.mockResolvedValue({ state: "pending", hits: 3 });
+    alertStudentsSeenAfterAutoPickup.mockRejectedValue(new Error("db down"));
+    const { res, next } = await run();
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalled();
   });
 });

@@ -4,32 +4,42 @@ import { env } from "../config/env.js";
 import { centerKey, findActiveSession, findActiveSessions, sessionsByCenter } from "../lib/activeSession.js";
 import { isCameraAlive, isGatewayOnline } from "../lib/hardwareStatus.js";
 import { schoolDateAsUtcMidnight, schoolMinutesOfDay } from "../utils/schoolDate.js";
-import { evaluate } from "./attendanceVerification.service.js";
 import { notifyPickup } from "./attendanceNotification.service.js";
 
 // Automatic pickup.
 //
-// During a pickup window (morning students from PICKUP_MORNING_START, afternoon
-// students from PICKUP_AFTERNOON_START, for PICKUP_WINDOW_HOURS) a present
-// student whose face AND BLE tag have both gone unseen is checked on:
+// The PRIMARY signal is the EXIT camera: during a pickup window (morning
+// students from PICKUP_MORNING_START, afternoon students from
+// PICKUP_AFTERNOON_START, for PICKUP_WINDOW_HOURS, or a window the teacher
+// started by hand) a student whose face the exit camera recognises is marked
+// picked up. That happens in the frame controller, through pickupCamera.service.js
+// and autoMarkPickedUp below; this file owns the window rules it relies on.
 //
-//   * after 1 minute unseen the student shows as "Not Detected" in the Live
+// The BLE tag is the BACKUP, for a student the exit camera missed. During the same
+// window, a present student with an enabled tag whose face AND tag have both
+// gone unseen is checked on (the in-room face signal is only the entry
+// camera's arrival sighting, so in practice this is the tag going quiet):
+//
+//   * after 3 minutes unseen the student shows as "Not Detected" in the Live
 //     attendance table (see presenceStatus), where the teacher can mark them
-//     picked up by hand. Nothing pops up: the table is the notification;
-//   * after PICKUP_ABSENT_MIN (5) minutes unseen the student is marked picked up
-//     automatically. Parents get the same notification as a manual pickup;
-//   * an auto-marked student who is seen again (face + tag) inside the window is
-//     put back. Outside the window the pickup stands.
+//     picked up by hand, or press "Still here" to restart the unseen clock.
+//     Nothing pops up: the table is the notification;
+//   * after PICKUP_ABSENT_MIN (5) minutes unseen (and no "Still here") the student
+//     is marked picked up automatically. Parents get the same notification as a manual pickup.
 //
-// Silence is weak evidence, so nothing happens unless the ESP32 gateway AND the
-// camera are demonstrably alive, and the clock restarts after any outage.
-// Every center is watched on its own: its students, its session, its camera
-// and its outage clock, so one center's dead camera never pauses (and one
+// An automatic pickup is never undone by the system. If the entry camera sees an
+// automatically picked-up student again, the teachers get an in-app notification
+// (pickupCamera.service.js) and decide.
+//
+// Silence is weak evidence, so the backup does nothing unless the ESP32 gateway
+// AND the EXIT camera are demonstrably alive, and the clock restarts after any
+// outage. Every center is watched on its own: its students, its session, its
+// camera and its outage clock, so one center's dead camera never pauses (and one
 // center's live camera never vouches for) another's.
 // The decisions are pure functions; runPickupWatch is the database wrapper.
 
 // How long neither signal may go unseen before a present student shows as "Not Detected".
-export const NOT_DETECTED_AFTER_MS = 60_000;
+export const NOT_DETECTED_AFTER_MS = 3 * 60_000;
 const SESSIONS = ["morning", "afternoon"];
 // A "pickup window is over" reminder is only worth sending soon after the end.
 const REMINDER_GRACE_MIN = 60;
@@ -89,6 +99,18 @@ export function isManualWindowOpen(override, now = new Date(), cfg = env.pickup)
 
 export function isScheduledWindowPaused(override, scheduledStart) {
   return override?.mode === "off" && scheduledStart != null && override.setAt >= scheduledStart;
+}
+
+// Is a student of this class session ("morning" | "afternoon") inside an open
+// pickup window right now? The same rules runPickupWatch applies, for one
+// student: a window the teacher started covers everyone; otherwise the
+// scheduled window of the student's own session counts unless a teacher has
+// stopped it. `override` is that center's row for today (or null).
+export function pickupWindowCovers(override, studentSession, now = new Date(), cfg = env.pickup) {
+  if (isManualWindowOpen(override, now, cfg)) return true;
+  const nowMinutes = schoolMinutesOfDay(now);
+  if (!sessionsInWindow(nowMinutes, cfg).includes(studentSession)) return false;
+  return !isScheduledWindowPaused(override, scheduledWindowStart(now, cfg));
 }
 
 // What the Live attendance page shows: is tracking running right now, until when,
@@ -154,10 +176,11 @@ export async function setPickupWatchRunning(centerId, running, now = new Date())
 const latestOf = (dates) => dates.filter(Boolean).reduce((a, b) => (b > a ? b : a), new Date(0));
 
 // When the current continuous "neither face nor tag seen" stretch began: the
-// latest of the last sighting by either signal, the student's arrival, the start
-// of the window, and the end of the last hardware outage.
-export function absentSince({ lastFaceAt, lastBleAt, arrivedAt, windowStart, unhealthyAt }) {
-  return latestOf([lastFaceAt, lastBleAt, arrivedAt, windowStart, unhealthyAt]);
+// latest of the last sighting by either signal (or the exit camera), a teacher's
+// "Still here", the student's arrival, the start of the window, and the end of the
+// last hardware outage.
+export function absentSince({ lastFaceAt, lastBleAt, lastExitAt, stillHereAt, arrivedAt, windowStart, unhealthyAt }) {
+  return latestOf([lastFaceAt, lastBleAt, lastExitAt, stillHereAt, arrivedAt, windowStart, unhealthyAt]);
 }
 
 // "wait" | "pick_up".
@@ -184,14 +207,16 @@ export const unhealthySinceFor = (centerId) => unhealthyAtFor(centerKey(centerId
 
 // Marks today's record picked up unless it already is (or isn't "present").
 // Race-safe: the guarded updateMany lets only one caller win, and only the
-// winner notifies parents. Returns whether this call did it.
-export async function autoMarkPickedUp(studentId, today, now = new Date()) {
+// winner notifies parents. Returns whether this call did it. `source` is for the
+// log only: "exit_camera" (primary) or "silence" (the BLE backup).
+export async function autoMarkPickedUp(studentId, today, now = new Date(), source = "silence") {
   const { count } = await prisma.attendance.updateMany({
     where: { studentId, date: today, status: "present", arrivedAt: { not: null }, pickedUpAt: null },
-    data: { pickedUpAt: now, pickedUpAuto: true },
+    // A new automatic pickup may need a new "seen at the entrance again" alert.
+    data: { pickedUpAt: now, pickedUpAuto: true, pickupReturnAlertedAt: null },
   });
   if (count === 0) return false;
-  logger.info({ studentId }, "Student marked picked up by the pickup watch");
+  logger.info({ studentId, source }, "Student marked picked up automatically");
   // Fire-and-forget, same as the manual path: a failed SMS must not undo this.
   Promise.resolve()
     .then(() => notifyPickup(studentId, now))
@@ -319,9 +344,10 @@ export async function runPickupWatch(now = new Date()) {
   for (const [key, override] of overrides) if (isManualWindowOpen(override, now)) manualStart.set(key, override.setAt);
   if (types.length === 0 && manualStart.size === 0) return;
 
-  // Present, not yet picked up (or auto-picked up, for the undo), with at
-  // least one enabled tag: without a tag "both gone" can't be judged, so those
-  // students stay manual.
+  // Present students in the window, picked up or not. Every one of them keeps the
+  // pickup session (and so the exit camera) running; only those with an enabled
+  // tag are also judged by the BLE backup, since without a tag silence can't be
+  // judged and the exit camera or a teacher is the only way they are picked up.
   const records = await prisma.attendance.findMany({
     where: {
       date: today,
@@ -330,16 +356,22 @@ export async function runPickupWatch(now = new Date()) {
       student: {
         status: "active",
         session: { in: manualStart.size > 0 ? SESSIONS : types },
-        bleDevices: { some: { enabled: true } },
       },
     },
     select: {
       id: true,
       studentId: true,
       arrivedAt: true,
+      stillHereAt: true,
       pickedUpAt: true,
       pickedUpAuto: true,
-      student: { select: { session: true, teacher: { select: { centerId: true } } } },
+      student: {
+        select: {
+          session: true,
+          teacher: { select: { centerId: true } },
+          bleDevices: { where: { enabled: true }, select: { id: true }, take: 1 },
+        },
+      },
     },
   });
   const scheduledStart = types.length > 0 ? scheduledWindowStart(now) : null;
@@ -393,7 +425,6 @@ export async function runPickupWatch(now = new Date()) {
 // session (or null).
 async function watchCenter({ key, records, session, today, now, windowStart, paused }) {
   const pending = records.filter((r) => !r.pickedUpAt);
-  const autoPickedUp = records.filter((r) => r.pickedUpAt && r.pickedUpAuto);
 
   // No teacher has to press Start: the ESP32 only scans, and the camera only
   // sends frames, while a session is active.
@@ -410,12 +441,18 @@ async function watchCenter({ key, records, session, today, now, windowStart, pau
   }
   if (records.length === 0) return;
 
-  if (!session || !(await isGatewayOnline(now)) || !isCameraAlive(key, now)) {
+  // The backup judges silence, so both the tag reader and the EXIT camera must be
+  // demonstrably alive: a dead exit camera means a child could have left unseen
+  // by it, and a dead reader means the tag could not be heard.
+  if (!session || !(await isGatewayOnline(now)) || !isCameraAlive(key, now, "exit")) {
     unhealthyAt.set(key, now); // never count silence while the eyes were closed
     return;
   }
 
-  const ids = records.map((r) => r.studentId);
+  // Only students with a tag can be judged by silence.
+  const tagged = pending.filter((r) => r.student.bleDevices.length > 0);
+  if (tagged.length === 0) return;
+  const ids = tagged.map((r) => r.studentId);
   const signals = await prisma.attendanceSignal.findMany({
     where: { studentId: { in: ids }, session: { date: today } },
     select: { studentId: true, kind: true, score: true, hits: true, lastSeenAt: true },
@@ -428,38 +465,26 @@ async function watchCenter({ key, records, session, today, now, windowStart, pau
     if (!latest.has(key) || s.lastSeenAt > latest.get(key).lastSeenAt) latest.set(key, s);
   }
 
-  for (const record of pending) {
+  for (const record of tagged) {
     try {
       const { studentId } = record;
+      // A single exit-camera sighting is not enough to pick up (that takes
+      // VERIFY_MIN_HITS), but it does show the student near the door, so it
+      // restarts the clock: the backup is for a student the exit camera MISSED.
       const since = absentSince({
         lastFaceAt: latest.get(`${studentId}:face`)?.lastSeenAt,
         lastBleAt: latest.get(`${studentId}:ble`)?.lastSeenAt,
+        lastExitAt: latest.get(`${studentId}:exit`)?.lastSeenAt,
+        stillHereAt: record.stillHereAt,
         arrivedAt: record.arrivedAt,
         windowStart: record.windowStart,
         unhealthyAt: unhealthyAtFor(key),
       });
       if (decidePickupAction({ now, absentSince: since }) === "pick_up") {
-        await autoMarkPickedUp(studentId, today, now);
+        await autoMarkPickedUp(studentId, today, now, "silence");
       }
     } catch (err) {
       logger.error({ err, studentId: record.studentId }, "Pickup watch failed for a student");
-    }
-  }
-
-  for (const record of autoPickedUp) {
-    try {
-      const face = latest.get(`${record.studentId}:face`);
-      const ble = latest.get(`${record.studentId}:ble`);
-      // Both signals must be new since the pickup AND pass the same test as arrival.
-      if (!face || !ble || face.lastSeenAt <= record.pickedUpAt || ble.lastSeenAt <= record.pickedUpAt) continue;
-      if (evaluate({ face, ble, now }) !== "verified") continue;
-      const { count } = await prisma.attendance.updateMany({
-        where: { id: record.id, pickedUpAuto: true, pickedUpAt: { not: null } },
-        data: { pickedUpAt: null, pickedUpAuto: false },
-      });
-      if (count > 0) logger.info({ studentId: record.studentId }, "Automatic pickup undone: student seen again");
-    } catch (err) {
-      logger.error({ err, studentId: record.studentId }, "Pickup undo failed for a student");
     }
   }
 }

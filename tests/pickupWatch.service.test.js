@@ -73,6 +73,9 @@ describe("absentSince", () => {
     expect(absentSince(base)).toEqual(at("02:41"));
     expect(absentSince({ ...base, unhealthyAt: at("02:50") })).toEqual(at("02:50"));
     expect(absentSince({ ...base, lastFaceAt: undefined, lastBleAt: undefined, arrivedAt: at("02:44") })).toEqual(at("02:44"));
+    expect(absentSince({ ...base, stillHereAt: at("02:46") })).toEqual(at("02:46"));
+    expect(absentSince({ ...base, stillHereAt: at("02:30") })).toEqual(at("02:41")); // an old press changes nothing
+    expect(absentSince({ ...base, stillHereAt: null })).toEqual(at("02:41"));
   });
 });
 
@@ -99,24 +102,28 @@ describe("presenceStatus", () => {
     expect(presenceStatus({ ...base, pickedUpAt: at("02:39") })).toBe("picked_up");
     expect(presenceStatus({ ...base, pickedUpAt: at("02:39"), detectionActive: false })).toBe("picked_up");
   });
-  it("is Inside while either signal was seen within the last minute", () => {
-    expect(presenceStatus({ ...base, lastFaceAt: at("02:39", 30) })).toBe("inside");
-    expect(presenceStatus({ ...base, lastBleAt: at("02:39", 30) })).toBe("inside");
+  it("is Inside while either signal was seen within the last 3 minutes", () => {
+    expect(presenceStatus({ ...base, lastFaceAt: at("02:37", 30) })).toBe("inside");
+    expect(presenceStatus({ ...base, lastBleAt: at("02:37", 30) })).toBe("inside");
   });
-  it("is Not Detected once neither signal has been seen for a minute", () => {
-    expect(NOT_DETECTED_AFTER_MS).toBe(60_000);
-    expect(presenceStatus({ ...base, lastFaceAt: at("02:39", 0), lastBleAt: at("02:38", 0) })).toBe("not_detected");
-    expect(presenceStatus({ ...base, lastFaceAt: at("02:39", 1) })).toBe("inside");
+  it("is Not Detected once neither signal has been seen for 3 minutes", () => {
+    expect(NOT_DETECTED_AFTER_MS).toBe(180_000);
+    expect(presenceStatus({ ...base, lastFaceAt: at("02:37", 0), lastBleAt: at("02:36", 0) })).toBe("not_detected");
+    expect(presenceStatus({ ...base, lastFaceAt: at("02:37", 1) })).toBe("inside");
+  });
+  it("is Inside again for 3 minutes after a teacher presses Still here", () => {
+    expect(presenceStatus({ ...base, stillHereAt: at("02:38", 0) })).toBe("inside");
+    expect(presenceStatus({ ...base, stillHereAt: at("02:37", 0) })).toBe("not_detected");
   });
   it("counts from arrival when the student was never seen again", () => {
-    expect(presenceStatus({ ...base, arrivedAt: at("02:39", 30) })).toBe("inside");
+    expect(presenceStatus({ ...base, arrivedAt: at("02:37", 30) })).toBe("inside");
     expect(presenceStatus(base)).toBe("not_detected");
   });
   it("never says Not Detected while the camera or the tag reader is down", () => {
     expect(presenceStatus({ ...base, detectionActive: false })).toBe("inside");
   });
   it("restarts the count after a hardware outage", () => {
-    expect(presenceStatus({ ...base, unhealthyAt: at("02:39", 30) })).toBe("inside");
+    expect(presenceStatus({ ...base, unhealthyAt: at("02:38", 30) })).toBe("inside");
   });
 });
 
@@ -124,7 +131,7 @@ describe("presenceStatus", () => {
 
 const record = (over = {}) => ({
   id: 100, studentId: 5, arrivedAt: at("00:00"), pickedUpAt: null, pickedUpAuto: false,
-  student: { session: "morning" }, ...over,
+  student: { session: "morning", bleDevices: [{ id: 1 }] }, ...over,
 });
 const session = (over = {}) => ({ id: 1, date: TODAY, autoStarted: true, startedAt: at("02:30"), stopReminderSentAt: null, ...over });
 
@@ -155,13 +162,34 @@ describe("runPickupWatch — when it acts", () => {
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
   });
 
-  it("only looks at present, arrived, unpicked students with an enabled tag, of the open session", async () => {
+  it("looks at present, arrived students of the open session, tagged or not", async () => {
     await runPickupWatch(at("02:36"));
     const { where } = prisma.attendance.findMany.mock.calls[0][0];
     expect(where).toMatchObject({
       date: TODAY, status: "present", arrivedAt: { not: null },
-      student: { status: "active", session: { in: ["morning"] }, bleDevices: { some: { enabled: true } } },
+      student: { status: "active", session: { in: ["morning"] } },
     });
+    // An untagged student still keeps the session (and the exit camera) running.
+    expect(where.student).not.toHaveProperty("bleDevices");
+  });
+
+  it("only judges students with an enabled tag by silence", async () => {
+    prisma.attendance.findMany.mockResolvedValue([
+      record({ studentId: 5 }),
+      record({ id: 101, studentId: 6, student: { session: "morning", bleDevices: [] } }), // no tag
+    ]);
+    await runPickupWatch(at("02:36")); // 6 min of silence for both
+    const marked = prisma.attendance.updateMany.mock.calls.map(([a]) => a.where.studentId);
+    expect(marked).toEqual([5]);
+  });
+
+  it("keeps the pickup session running for a class with no tags at all", async () => {
+    prisma.attendanceSession.findMany.mockResolvedValue([]);
+    prisma.attendanceSession.create.mockResolvedValue(session());
+    prisma.attendance.findMany.mockResolvedValue([record({ student: { session: "morning", bleDevices: [] } })]);
+    await runPickupWatch(at("02:31"));
+    expect(prisma.attendanceSession.create).toHaveBeenCalledTimes(1); // the exit camera needs a session
+    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
   });
 
   it("marks a student picked up after 5 minutes of neither face nor tag, and notifies parents", async () => {
@@ -171,10 +199,19 @@ describe("runPickupWatch — when it acts", () => {
 
     expect(prisma.attendance.updateMany).toHaveBeenCalledWith({
       where: { studentId: 5, date: TODAY, status: "present", arrivedAt: { not: null }, pickedUpAt: null },
-      data: { pickedUpAt: now, pickedUpAuto: true },
+      data: { pickedUpAt: now, pickedUpAuto: true, pickupReturnAlertedAt: null },
     });
     await Promise.resolve();
     expect(notifyPickup).toHaveBeenCalledWith(5, now);
+  });
+
+  it("treats a single exit-camera sighting as proof the student was near the door, restarting the clock", async () => {
+    prisma.attendance.findMany.mockResolvedValue([record()]);
+    prisma.attendanceSignal.findMany.mockResolvedValue([
+      { studentId: 5, kind: "exit", score: 0.3, hits: 1, lastSeenAt: at("02:35", 30) },
+    ]);
+    await runPickupWatch(at("02:36")); // the exit camera saw them 30 s ago
+    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
   });
 
   it("does not notify when someone else (a teacher) already marked the pickup", async () => {
@@ -210,12 +247,21 @@ describe("runPickupWatch — when it acts", () => {
 describe("runPickupWatch — hardware must be alive", () => {
   it.each([
     ["the ESP32 gateway is offline", () => isGatewayOnline.mockResolvedValue(false)],
-    ["the camera isn't sending frames", () => isCameraAlive.mockReturnValue(false)],
+    ["the exit camera isn't sending frames", () => isCameraAlive.mockReturnValue(false)],
   ])("never marks anyone when %s", async (_name, breakIt) => {
     breakIt();
     prisma.attendance.findMany.mockResolvedValue([record()]);
     await runPickupWatch(at("02:40")); // 10 min of silence
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("vouches for silence only through the EXIT camera, not the entry one", async () => {
+    // The entry camera is up but the exit camera is down: a child could have walked out unseen.
+    isCameraAlive.mockImplementation((_center, _now, role) => role === "entry");
+    prisma.attendance.findMany.mockResolvedValue([record()]);
+    await runPickupWatch(at("02:40"));
+    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
+    expect(isCameraAlive).toHaveBeenCalledWith(null, expect.any(Date), "exit");
   });
 
   it("starts counting again only from when the hardware came back", async () => {
@@ -293,7 +339,7 @@ describe("runPickupWatch — the session", () => {
 
 describe("runPickupWatch — every center on its own", () => {
   const inCenter = (centerId, over = {}) =>
-    record({ student: { session: "morning", teacher: { centerId } }, ...over });
+    record({ student: { session: "morning", bleDevices: [{ id: 1 }], teacher: { centerId } }, ...over });
   const sessionAt = (centerId, over = {}) => session({ id: 10 + centerId, centerId, ...over });
   const markedStudents = () => prisma.attendance.updateMany.mock.calls.map(([a]) => a.where.studentId);
 
@@ -307,8 +353,9 @@ describe("runPickupWatch — every center on its own", () => {
     await runPickupWatch(at("02:40")); // 10 min of silence for both
 
     expect(markedStudents()).toEqual([5]); // center 1 judged; center 2's silence means nothing
-    expect(isCameraAlive).toHaveBeenCalledWith(1, expect.any(Date));
-    expect(isCameraAlive).toHaveBeenCalledWith(2, expect.any(Date));
+    // Each center's EXIT camera is the one that vouches for its silence.
+    expect(isCameraAlive).toHaveBeenCalledWith(1, expect.any(Date), "exit");
+    expect(isCameraAlive).toHaveBeenCalledWith(2, expect.any(Date), "exit");
   });
 
   it("a center's outage restarts only that center's clock", async () => {
@@ -389,49 +436,26 @@ describe("runPickupWatch — every center on its own", () => {
   });
 });
 
-describe("runPickupWatch — seen again", () => {
+describe("runPickupWatch — an automatic pickup is never undone", () => {
   const picked = (over = {}) => record({ pickedUpAt: at("02:36"), pickedUpAuto: true, ...over });
   const seen = (lastSeenAt) => [
     { studentId: 5, kind: "face", score: 0.3, hits: 5, lastSeenAt },
     { studentId: 5, kind: "ble", score: -55, hits: 5, lastSeenAt },
   ];
 
-  beforeEach(() => {
-    // Someone else is still unpicked, so the session stays open.
+  it("leaves an automatic pickup in place even when both signals see the student again", async () => {
+    // Someone else is still unpicked, so the session stays open and signals are read.
     prisma.attendance.findMany.mockResolvedValue([picked(), record({ id: 101, studentId: 6 })]);
-  });
-
-  it("puts an automatically picked-up student back when both signals see them again", async () => {
-    prisma.attendanceSignal.findMany.mockResolvedValue(seen(at("02:39", 50)));
-    await runPickupWatch(at("02:40"));
-    expect(prisma.attendance.updateMany).toHaveBeenCalledWith({
-      where: { id: 100, pickedUpAuto: true, pickedUpAt: { not: null } },
-      data: { pickedUpAt: null, pickedUpAuto: false },
-    });
-  });
-
-  it("needs BOTH signals, and both newer than the pickup", async () => {
-    prisma.attendanceSignal.findMany.mockResolvedValue([seen(at("02:39", 50))[1]]); // tag only
-    await runPickupWatch(at("02:40"));
-    prisma.attendanceSignal.findMany.mockResolvedValue(seen(at("02:35", 0))); // before the pickup
-    await runPickupWatch(at("02:40"));
-    const undo = prisma.attendance.updateMany.mock.calls.filter(([a]) => a.data.pickedUpAt === null);
-    expect(undo).toHaveLength(0);
-  });
-
-  it("never undoes a pickup a teacher made", async () => {
-    prisma.attendance.findMany.mockResolvedValue([picked({ pickedUpAuto: false }), record({ id: 101, studentId: 6 })]);
     prisma.attendanceSignal.findMany.mockResolvedValue(seen(at("02:39", 50)));
     await runPickupWatch(at("02:40"));
     const undo = prisma.attendance.updateMany.mock.calls.filter(([a]) => a.data.pickedUpAt === null);
-    expect(undo).toHaveLength(0);
+    expect(undo).toHaveLength(0); // the entry camera alerts the teachers instead (pickupCamera.service)
   });
 
-  it("leaves the pickup alone once the window is over", async () => {
-    prisma.attendanceSignal.findMany.mockResolvedValue(seen(at("04:49", 50)));
-    await runPickupWatch(at("04:50")); // 12:50 Manila, window closed at 12:30
-    const undo = prisma.attendance.updateMany.mock.calls.filter(([a]) => a.data.pickedUpAt === null);
-    expect(undo).toHaveLength(0);
+  it("does not judge an already picked-up student by silence", async () => {
+    prisma.attendance.findMany.mockResolvedValue([picked()]);
+    await runPickupWatch(at("02:50"));
+    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -495,7 +519,7 @@ describe("runPickupWatch — stop reminder", () => {
 describe("manual Start / Stop", () => {
   const off = (setAt) => ({ mode: "off", setAt });
   const on = (setAt) => ({ mode: "on", setAt });
-  const centerRecord = (centerId, over = {}) => record({ student: { session: "morning", teacher: { centerId } }, ...over });
+  const centerRecord = (centerId, over = {}) => record({ student: { session: "morning", bleDevices: [{ id: 1 }], teacher: { centerId } }, ...over });
   const markedStudents = () => prisma.attendance.updateMany.mock.calls.map(([a]) => a.where.studentId);
 
   describe("pickupWatchStatus", () => {
@@ -577,7 +601,7 @@ describe("manual Start / Stop", () => {
     });
 
     it("a Stop from the morning window does not stop the afternoon one", async () => {
-      prisma.attendance.findMany.mockResolvedValue([centerRecord(null, { student: { session: "afternoon", teacher: { centerId: null } } })]);
+      prisma.attendance.findMany.mockResolvedValue([centerRecord(null, { student: { session: "afternoon", bleDevices: [{ id: 1 }], teacher: { centerId: null } } })]);
       prisma.attendanceSession.findMany.mockResolvedValue([session({ centerId: null })]);
       prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: null, ...off(at("03:00")) }]);
       resetPickupHealth(at("06:00"));

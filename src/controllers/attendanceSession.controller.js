@@ -179,7 +179,7 @@ export async function getMonitor(req, res, next) {
       isGatewayOnline(now),
       prisma.attendance.findMany({
         where: { date: today, status: "present", student: scope },
-        select: { studentId: true, arrivedAt: true, pickedUpAt: true, student: { select: { name: true } } },
+        select: { studentId: true, arrivedAt: true, stillHereAt: true, pickedUpAt: true, student: { select: { name: true } } },
       }),
     ]);
 
@@ -191,6 +191,8 @@ export async function getMonitor(req, res, next) {
       return byStudent.get(studentId);
     };
     for (const sig of signals) {
+      // "exit" sightings are the pickup camera's: they are not part of arrival.
+      if (sig.kind === "exit") continue;
       if (isSignalPresent(sig.kind, sig, now)) entry(sig.studentId, sig.student.name)[sig.kind] = true;
     }
     for (const v of verifications) {
@@ -214,8 +216,11 @@ export async function getMonitor(req, res, next) {
 
     // The Present Students table: everyone marked present today, however they
     // got marked, and whether they are still inside. Silence only counts while
-    // the gateway and this center's camera are both alive (see presenceStatus).
-    const detectionActive = gateway && isCameraAlive(centerKey(centerId), now);
+    // the gateway and this center's EXIT camera are both alive (see presenceStatus):
+    // a student the exit camera could not have seen leaving is not "not detected".
+    const entryCameraAlive = isCameraAlive(centerKey(centerId), now, "entry");
+    const exitCameraAlive = isCameraAlive(centerKey(centerId), now, "exit");
+    const detectionActive = gateway && exitCameraAlive;
     const unhealthyAt = unhealthySinceFor(centerId);
     const lastSeen = new Map(); // `${studentId}:${kind}` -> newest sighting today, across sessions
     if (presentToday.length > 0) {
@@ -241,6 +246,8 @@ export async function getMonitor(req, res, next) {
           detectionActive,
           lastFaceAt: lastSeen.get(`${r.studentId}:face`),
           lastBleAt: lastSeen.get(`${r.studentId}:ble`),
+          lastExitAt: lastSeen.get(`${r.studentId}:exit`),
+          stillHereAt: r.stillHereAt,
           arrivedAt: r.arrivedAt,
           unhealthyAt,
         }),
@@ -255,6 +262,7 @@ export async function getMonitor(req, res, next) {
       counts: { verified: count("verified"), faceOnly: count("face_only"), bleOnly: count("ble_only") },
       students,
       detectionActive,
+      cameras: { entry: entryCameraAlive, exit: exitCameraAlive },
       presentStudents,
     });
   } catch (err) {

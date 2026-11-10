@@ -206,6 +206,29 @@ export async function markPickedUp(req, res, next) {
   }
 }
 
+// Teacher/admin only (enforced at route level). "Still here" on a Not Detected
+// row: restarts the pickup watch's unseen clock for TODAY's record. Only for a
+// student who arrived today and hasn't been picked up. Nothing is shown to
+// parents.
+export async function markStillHere(req, res, next) {
+  try {
+    const studentId = parseId(req.params.studentId, "studentId");
+    await assertCanAccessStudent(req.user, studentId);
+    const today = toDate(schoolDateString());
+
+    const { count } = await prisma.attendance.updateMany({
+      where: { studentId, date: today, status: "present", arrivedAt: { not: null }, pickedUpAt: null },
+      data: { stillHereAt: new Date() },
+    });
+    if (count === 0) {
+      return res.status(400).json({ message: "Student is not present and inside today" });
+    }
+    res.json({ studentId, stillHereAt: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // Teacher/admin only (enforced at route level).
 export async function recordAttendance(req, res, next) {
   try {

@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../src/lib/prisma.js", () => ({
   prisma: {
     student: { findMany: vi.fn(), count: vi.fn(), findUnique: vi.fn() },
-    attendance: { findMany: vi.fn(), upsert: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
+    attendance: { findMany: vi.fn(), upsert: vi.fn(), findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     attendanceVerification: { deleteMany: vi.fn() },
     parentChild: { findUnique: vi.fn() },
     schoolTimeSettings: { findMany: vi.fn() },
@@ -21,7 +21,7 @@ vi.mock("../src/services/attendanceNotification.service.js", () => ({
 }));
 
 const { prisma } = await import("../src/lib/prisma.js");
-const { getAttendance, updateAttendance, recordAttendance, markPickedUp } = await import(
+const { getAttendance, updateAttendance, recordAttendance, markPickedUp, markStillHere } = await import(
   "../src/controllers/attendance.controller.js"
 );
 const { notifyArrival, notifyPickup } = await import(
@@ -134,6 +134,50 @@ describe("markPickedUp — ownership", () => {
 
     expect(next).not.toHaveBeenCalled();
     expect(notifyPickup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("markStillHere — ownership", () => {
+  it("forbids a Teacher on another teacher's student, with no write", async () => {
+    prisma.student.findUnique.mockResolvedValue({ teacherId: 99 });
+    const next = vi.fn();
+
+    await markStillHere({ user: teacher, params: { studentId: "5" } }, mockRes(), next);
+
+    expectForbidden(next);
+    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("restarts the clock for a Teacher's own present, not-picked-up student", async () => {
+    prisma.student.findUnique.mockResolvedValue({ teacherId: 7 });
+    prisma.attendance.updateMany.mockResolvedValue({ count: 1 });
+    const next = vi.fn();
+    const res = mockRes();
+
+    await markStillHere({ user: teacher, params: { studentId: "5" } }, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    const { where, data } = prisma.attendance.updateMany.mock.calls[0][0];
+    expect(where).toMatchObject({ studentId: 5, status: "present", pickedUpAt: null, arrivedAt: { not: null } });
+    expect(data.stillHereAt).toBeInstanceOf(Date);
+    expect(notifyPickup).not.toHaveBeenCalled();
+  });
+
+  it("answers 400 when the student isn't present and inside today", async () => {
+    prisma.student.findUnique.mockResolvedValue({ teacherId: 7 });
+    prisma.attendance.updateMany.mockResolvedValue({ count: 0 });
+    const res = mockRes();
+
+    await markStillHere({ user: teacher, params: { studentId: "5" } }, res, vi.fn());
+
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  it("rejects a malformed id before touching the database", async () => {
+    const next = vi.fn();
+    await markStillHere({ user: teacher, params: { studentId: "5; DROP" } }, mockRes(), next);
+    expect(next.mock.calls[0][0].status).toBe(400);
+    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
   });
 });
 

@@ -208,6 +208,13 @@ export const attendanceDeleteLimiter = perUserLimiter(
   30,
   "Too many requests, please try again later"
 );
+// "Still here" on Not Detected rows: a teacher may press it for several students
+// every few minutes, and it changes nothing anyone else sees.
+export const stillHereLimiter = perUserLimiter(
+  "rl:still-here:",
+  120,
+  "Too many requests, please try again later"
+);
 // Starting or answering a student transfer: rare, deliberate, and each one
 // notifies another teacher.
 export const studentTransferLimiter = perUserLimiter(
@@ -293,7 +300,7 @@ export const gatewayDeviceLimiter = rateLimit({
 // must never exhaust the budget for Start/Stop or status polling, or vice versa.
 export const frameIpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 6000,
+  limit: 8000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many requests, please try again later" },
@@ -301,9 +308,11 @@ export const frameIpLimiter = rateLimit({
   passOnStoreError: true,
 });
 
+// A center now streams from two cameras (entry + exit), and both may sign in as
+// the same teacher, so the per-user budget covers two streams (~2600 / 15 min).
 export const frameUserLimiter = perUserLimiter(
   "rl:frame-user:",
-  2000,
+  4000,
   "Too many requests, please try again later"
 );
 

@@ -32,7 +32,9 @@ export function isSignalPresent(kind, signal, now, cfg = env.verification) {
   if (!signal) return false;
   if (now.getTime() - signal.lastSeenAt.getTime() > cfg.windowMs) return false;
   if (signal.hits < cfg.minHits) return false;
-  return kind === "face" ? signal.score <= cfg.faceMaxDistance : signal.score >= cfg.bleMinRssi;
+  // "face" (entry camera) and "exit" (exit camera) are both match distances;
+  // only "ble" is an RSSI.
+  return kind === "ble" ? signal.score >= cfg.bleMinRssi : signal.score <= cfg.faceMaxDistance;
 }
 
 // "verified" only if both signals are present; otherwise "pending".
@@ -100,7 +102,8 @@ async function markVerified({ sessionId, sessionDate, studentId, face, ble, now 
 // Records one sighting and, if it completes the pair, marks the student present.
 // Callers must already have established that the session is active and the
 // student exists and is active. `kind` is "face" (value = match distance) or
-// "ble" (value = RSSI). Returns { state: "pending" | "verified" | "already_recorded" }.
+// "ble" (value = RSSI). Returns { state: "pending" | "verified" | "already_recorded",
+// hits } where hits is how many sightings in a row this signal now has.
 export async function recordSignal({ sessionId, sessionDate, studentId, kind, value, now = new Date() }) {
   const prev = await prisma.attendanceSignal.findUnique({
     where: keyOf(sessionId, studentId, kind),
@@ -122,7 +125,7 @@ export async function recordSignal({ sessionId, sessionDate, studentId, kind, va
 
   const face = kind === "face" ? next : other;
   const ble = kind === "ble" ? next : other;
-  if (evaluate({ face, ble, now }) !== "verified") return { state: "pending" };
+  if (evaluate({ face, ble, now }) !== "verified") return { state: "pending", hits: next.hits };
 
-  return markVerified({ sessionId, sessionDate, studentId, face, ble, now });
+  return { ...(await markVerified({ sessionId, sessionDate, studentId, face, ble, now })), hits: next.hits };
 }

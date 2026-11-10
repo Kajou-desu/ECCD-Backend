@@ -50,7 +50,8 @@ beforeEach(() => {
   prisma.attendanceVerification.findMany.mockResolvedValue([]);
   prisma.attendance.findMany.mockResolvedValue([]);
   resetPickupHealth(ago(3600));
-  touchCamera(1, NOW); // this center's camera is streaming
+  touchCamera(1, NOW, "entry"); // this center's cameras are streaming
+  touchCamera(1, NOW, "exit");
   prisma.bleGateway.findFirst.mockResolvedValue({ id: 1 });
   isRecognitionConfigured.mockReturnValue(true);
 });
@@ -240,11 +241,35 @@ describe("getMonitor — whose students are shown", () => {
       });
     });
 
-    it("never says Not Detected while the camera is down, and says so", async () => {
-      touchCamera(1, ago(120)); // last frame two minutes ago
+    it("never says Not Detected while the EXIT camera is down, and says so", async () => {
+      touchCamera(1, ago(120), "exit"); // last exit frame two minutes ago
       prisma.attendance.findMany.mockResolvedValue([present(2, "Ben", ago(600))]);
       const { body } = await monitor();
       expect(body.detectionActive).toBe(false);
+      expect(rows(body)).toEqual([["Ben", "inside"]]);
+    });
+
+    it("the entry camera being up does not vouch for the exit camera", async () => {
+      touchCamera(1, ago(120), "exit");
+      prisma.attendance.findMany.mockResolvedValue([present(2, "Ben", ago(600))]);
+      const { body } = await monitor();
+      expect(body.cameras).toEqual({ entry: true, exit: false });
+      expect(body.detectionActive).toBe(false);
+    });
+
+    it("ignores exit-camera sightings in the arrival list (they are not face or tag)", async () => {
+      prisma.attendanceSignal.findMany.mockResolvedValueOnce([sig(2, "Ben", "exit", 0.3, 3, ago(2))]);
+      const { body } = await monitor();
+      expect(body.students).toEqual([]);
+      expect(body.counts).toEqual({ verified: 0, faceOnly: 0, bleOnly: 0 });
+    });
+
+    it("an exit-camera sighting counts as Inside (near the door) for a minute", async () => {
+      prisma.attendance.findMany.mockResolvedValue([present(2, "Ben", ago(600))]);
+      prisma.attendanceSignal.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([seen(2, "exit", ago(20))]);
+      const { body } = await monitor();
       expect(rows(body)).toEqual([["Ben", "inside"]]);
     });
 

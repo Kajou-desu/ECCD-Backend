@@ -53,9 +53,24 @@ describe("POST /attendance/session/frame", () => {
       const res = await request(app).post(`${prefix}/attendance/session/frame`).set("Authorization", auth())
         .attach("frame", JPEG, { filename: "f.jpg", contentType: "image/jpeg" });
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ width: 640, height: 480, faces: [], verified: [] });
+      expect(res.body).toEqual({ camera: "entry", width: 640, height: 480, faces: [], verified: [], pickedUp: [] });
     }
     expect(recognizeFrame.mock.calls[0][0].equals(JPEG)).toBe(true); // exact bytes forwarded
+  });
+
+  it("takes the camera role from the query string; an unknown one is a 400 before recognition", async () => {
+    const exit = await request(app).post(`${URL}?camera=exit`).set("Authorization", auth())
+      .attach("frame", JPEG, { filename: "f.jpg", contentType: "image/jpeg" });
+    expect(exit.status).toBe(200);
+    expect(exit.body.camera).toBe("exit");
+
+    recognizeFrame.mockClear();
+    for (const q of ["camera=roof", "camera=exit&camera=entry", "camera="]) {
+      const res = await request(app).post(`${URL}?${q}`).set("Authorization", auth())
+        .attach("frame", JPEG, { filename: "f.jpg", contentType: "image/jpeg" });
+      expect(res.status).toBe(400);
+    }
+    expect(recognizeFrame).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized frame (>200 KB) before any recognition", async () => {

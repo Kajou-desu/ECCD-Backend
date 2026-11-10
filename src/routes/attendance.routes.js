@@ -5,9 +5,10 @@ import {
   updateAttendance,
   recordAttendance,
   markPickedUp,
+  markStillHere,
 } from "../controllers/attendance.controller.js";
 import { getAttendanceRange, importAttendance, deleteAttendance } from "../controllers/attendanceBulk.controller.js";
-import { attendanceDeleteLimiter } from "../middleware/rateLimit.js";
+import { attendanceDeleteLimiter, stillHereLimiter } from "../middleware/rateLimit.js";
 import {
   auditAttendanceImport,
   auditAttendanceUpdate,
@@ -27,6 +28,7 @@ router.post("/import", requireRole("Teacher", "Admin"), auditAttendanceImport, i
 router.post("/delete", requireRole("Teacher", "Admin"), attendanceDeleteLimiter, auditAttendanceDelete, deleteAttendance);
 router.put("/:studentId", requireRole("Teacher", "Admin"), auditAttendanceUpdate, updateAttendance);
 router.patch("/:studentId/pickup", requireRole("Teacher", "Admin"), auditAttendancePickup, markPickedUp);
+router.patch("/:studentId/still-here", requireRole("Teacher", "Admin"), stillHereLimiter, markStillHere);
 router.post("/", requireRole("Teacher", "Admin"), auditAttendanceBulk, recordAttendance);
 
 export default router;
