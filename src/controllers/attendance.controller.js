@@ -285,6 +285,18 @@ export async function recordAttendance(req, res, next) {
       });
     }
 
+    // Same as a single save: a genuine change TO present for today is a live
+    // arrival, so the parents are told (fire-and-forget). Entries already
+    // present were filtered out above, so none is notified twice.
+    const today = schoolDateString();
+    for (const [i, entry] of toWrite.entries()) {
+      if (entry.status === "present" && entry.dateString === today) {
+        Promise.resolve()
+          .then(() => notifyArrival(entry.studentId, written[i].arrivedAt))
+          .catch(() => {});
+      }
+    }
+
     // Respond in request order, mixing untouched and written records.
     const writtenByKey = new Map(toWrite.map((entry, i) => [keyOf(entry), written[i]]));
     const results = validated.map((entry) => writtenByKey.get(keyOf(entry)) ?? existingByKey.get(keyOf(entry)));

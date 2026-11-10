@@ -305,6 +305,23 @@ model Attendance {
   @@map("attendance")
 }
 
+// One row per (day, session, center) once the automatic absences for it have
+// been recorded, so the job runs each at most once and a teacher who later
+// deletes or changes an auto-marked record isn't overruled. centerKey is the
+// center's id, or 0 for students whose teacher has no center; it is not a
+// foreign key, so a deleted center leaves the history intact.
+model AutoAbsentRun {
+  id          Int      @id @default(autoincrement())
+  date        DateTime @db.Date
+  session     Session
+  centerKey   Int
+  absentCount Int
+  createdAt   DateTime @default(now())
+
+  @@unique([date, session, centerKey])
+  @@map("auto_absent_runs")
+}
+
 enum PickupCheckAnswer {
   still_here
   picked_up

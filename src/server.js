@@ -5,6 +5,7 @@ import { logger } from "./lib/logger.js";
 import { startOtpCleanupJob } from "./lib/otpCleanup.js";
 import { startSessionCleanupJob } from "./lib/sessionCleanup.js";
 import { startPickupJob } from "./lib/pickupJob.js";
+import { startAutoAbsentJob } from "./lib/autoAbsentJob.js";
 import { getStorage } from "./storage/index.js";
 
 const server = app.listen(env.port, () => {
@@ -14,6 +15,7 @@ const server = app.listen(env.port, () => {
 const otpCleanupHandle = startOtpCleanupJob();
 const sessionCleanupHandle = startSessionCleanupJob();
 const pickupJobHandle = startPickupJob();
+const autoAbsentJobHandle = startAutoAbsentJob();
 
 // Surface a misconfigured bucket (bad credentials, wrong endpoint or bucket
 // name) in the startup log instead of at the first user's upload. Logged, not
@@ -37,6 +39,7 @@ async function shutdown(signal) {
   clearInterval(otpCleanupHandle);
   clearInterval(sessionCleanupHandle);
   clearInterval(pickupJobHandle);
+  clearInterval(autoAbsentJobHandle);
 
   server.close(async () => {
     await prisma.$disconnect();

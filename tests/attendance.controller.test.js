@@ -302,11 +302,35 @@ describe("re-marking a status resets pickup", () => {
 });
 
 describe("recordAttendance — bulk entry", () => {
-  it("never sends arrival notifications (bulk/backfill is not a live event)", async () => {
-    prisma.$transaction.mockResolvedValue([{ id: 11 }]);
-    prisma.attendance.upsert.mockReturnValue({});
+  const bulk = async (body) => {
+    prisma.attendance.findMany.mockResolvedValue([]);
+    prisma.attendance.upsert.mockImplementation(({ create }) => ({ id: 11, ...create }));
+    prisma.$transaction.mockImplementation(async (ops) => ops);
+    await recordAttendance({ user: admin, body }, mockRes(), vi.fn());
+    await flush();
+  };
+
+  it("tells the parents about a live arrival, like a single save", async () => {
+    await bulk([{ studentId: 1, date: schoolDateString(), status: "present" }]);
+    expect(notifyArrival).toHaveBeenCalledTimes(1);
+    expect(notifyArrival).toHaveBeenCalledWith(1, expect.any(Date));
+  });
+
+  it("never notifies for a back-dated day (backfill is not a live event)", async () => {
+    await bulk([{ studentId: 1, date: "2026-01-05", status: "present" }]);
+    expect(notifyArrival).not.toHaveBeenCalled();
+  });
+
+  it("never notifies for absent or excused, or for a student already present", async () => {
+    prisma.attendance.findMany.mockResolvedValue([{ studentId: 2, date: new Date(`${schoolDateString()}T00:00:00.000Z`), status: "present" }]);
+    prisma.attendance.upsert.mockImplementation(({ create }) => ({ id: 11, ...create }));
+    prisma.$transaction.mockImplementation(async (ops) => ops);
     await recordAttendance(
-      { user: admin, body: [{ studentId: 1, date: schoolDateString(), status: "present" }] },
+      { user: admin, body: [
+        { studentId: 1, date: schoolDateString(), status: "absent" },
+        { studentId: 3, date: schoolDateString(), status: "excused" },
+        { studentId: 2, date: schoolDateString(), status: "present" },
+      ] },
       mockRes(), vi.fn(),
     );
     await flush();
