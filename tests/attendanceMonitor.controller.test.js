@@ -15,7 +15,6 @@ const { prisma } = await import("../src/lib/prisma.js");
 const { isRecognitionConfigured } = await import("../src/services/recognitionClient.js");
 const { getMonitor } = await import("../src/controllers/attendanceSession.controller.js");
 const { touchCamera } = await import("../src/lib/hardwareStatus.js");
-const { resetPickupHealth } = await import("../src/services/pickupWatch.service.js");
 
 const NOW = new Date("2026-09-20T00:00:30.000Z");
 const ago = (secs) => new Date(NOW.getTime() - secs * 1000);
@@ -49,7 +48,6 @@ beforeEach(() => {
   prisma.attendanceSignal.findMany.mockResolvedValue([]);
   prisma.attendanceVerification.findMany.mockResolvedValue([]);
   prisma.attendance.findMany.mockResolvedValue([]);
-  resetPickupHealth(ago(3600));
   touchCamera(1, NOW, "entry"); // this center's cameras are streaming
   touchCamera(1, NOW, "exit");
   prisma.bleGateway.findFirst.mockResolvedValue({ id: 1 });

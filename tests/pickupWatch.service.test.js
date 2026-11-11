@@ -35,7 +35,6 @@ const {
   pickupWatchStatus,
   setPickupWatchRunning,
   runPickupWatch,
-  resetPickupHealth,
   presenceStatus,
   NOT_DETECTED_AFTER_MS,
 } = await import("../src/services/pickupWatch.service.js");
@@ -69,9 +68,9 @@ describe("pickup window", () => {
 
 describe("absentSince", () => {
   it("is the latest of every reason the clock could have restarted", () => {
-    const base = { lastFaceAt: at("02:40"), lastBleAt: at("02:41"), arrivedAt: at("00:00"), windowStart: MORNING_START, unhealthyAt: at("02:00") };
+    const base = { lastFaceAt: at("02:40"), lastBleAt: at("02:41"), arrivedAt: at("00:00"), windowStart: MORNING_START };
     expect(absentSince(base)).toEqual(at("02:41"));
-    expect(absentSince({ ...base, unhealthyAt: at("02:50") })).toEqual(at("02:50"));
+    expect(absentSince({ ...base, unhealthyAt: at("02:50") })).toEqual(at("02:41")); // an outage is not a reason
     expect(absentSince({ ...base, lastFaceAt: undefined, lastBleAt: undefined, arrivedAt: at("02:44") })).toEqual(at("02:44"));
     expect(absentSince({ ...base, stillHereAt: at("02:46") })).toEqual(at("02:46"));
     expect(absentSince({ ...base, stillHereAt: at("02:30") })).toEqual(at("02:41")); // an old press changes nothing
@@ -96,7 +95,7 @@ describe("decidePickupAction", () => {
 });
 
 describe("presenceStatus", () => {
-  const base = { now: at("02:40"), pickedUpAt: null, detectionActive: true, arrivedAt: at("02:00"), unhealthyAt: at("02:00") };
+  const base = { now: at("02:40"), pickedUpAt: null, detectionActive: true, arrivedAt: at("02:00") };
 
   it("is Picked Up once a pickup is recorded, however long ago anything was seen", () => {
     expect(presenceStatus({ ...base, pickedUpAt: at("02:39") })).toBe("picked_up");
@@ -122,8 +121,8 @@ describe("presenceStatus", () => {
   it("never says Not Detected while the camera or the tag reader is down", () => {
     expect(presenceStatus({ ...base, detectionActive: false })).toBe("inside");
   });
-  it("restarts the count after a hardware outage", () => {
-    expect(presenceStatus({ ...base, unhealthyAt: at("02:38", 30) })).toBe("inside");
+  it("does not restart the count after a hardware outage", () => {
+    expect(presenceStatus({ ...base, unhealthyAt: at("02:38", 30) })).toBe("not_detected");
   });
 });
 
@@ -137,7 +136,6 @@ const session = (over = {}) => ({ id: 1, date: TODAY, autoStarted: true, started
 
 beforeEach(() => {
   vi.clearAllMocks();
-  resetPickupHealth(at("02:00")); // healthy since before the window
   isGatewayOnline.mockResolvedValue(true);
   isCameraAlive.mockReturnValue(true);
   prisma.attendance.findMany.mockResolvedValue([]);
@@ -264,15 +262,29 @@ describe("runPickupWatch — hardware must be alive", () => {
     expect(isCameraAlive).toHaveBeenCalledWith(null, expect.any(Date), "exit");
   });
 
-  it("starts counting again only from when the hardware came back", async () => {
+  it("does not restart the 5-minute clock when the hardware comes back", async () => {
     prisma.attendance.findMany.mockResolvedValue([record()]);
+    prisma.attendanceSignal.findMany.mockResolvedValue([
+      { studentId: 5, kind: "ble", score: -60, hits: 3, lastSeenAt: at("02:35") },
+    ]);
     isCameraAlive.mockReturnValue(false);
-    await runPickupWatch(at("02:40")); // outage noticed
-    isCameraAlive.mockReturnValue(true);
-    await runPickupWatch(at("02:40", 10)); // back: silence before this is ignored
+    await runPickupWatch(at("02:38")); // outage: nobody is marked, and nothing is reset
     expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
-    await runPickupWatch(at("02:45", 15)); // five minutes after it came back
+    isCameraAlive.mockReturnValue(true);
+    await runPickupWatch(at("02:40", 10)); // back: 5 min 10 s since the last sighting
     expect(prisma.attendance.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("still waits out the full 5 minutes when the outage began before that", async () => {
+    prisma.attendance.findMany.mockResolvedValue([record()]);
+    prisma.attendanceSignal.findMany.mockResolvedValue([
+      { studentId: 5, kind: "ble", score: -60, hits: 3, lastSeenAt: at("02:38") },
+    ]);
+    isCameraAlive.mockReturnValue(false);
+    await runPickupWatch(at("02:39"));
+    isCameraAlive.mockReturnValue(true);
+    await runPickupWatch(at("02:41")); // only 3 min since the last sighting
+    expect(prisma.attendance.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -358,7 +370,7 @@ describe("runPickupWatch — every center on its own", () => {
     expect(isCameraAlive).toHaveBeenCalledWith(2, expect.any(Date), "exit");
   });
 
-  it("a center's outage restarts only that center's clock", async () => {
+  it("a center's outage does not restart that center's clock either", async () => {
     prisma.attendanceSession.findMany.mockResolvedValue([sessionAt(1), sessionAt(2)]);
     prisma.attendance.findMany.mockResolvedValue([
       inCenter(1, { studentId: 5 }),
@@ -369,8 +381,8 @@ describe("runPickupWatch — every center on its own", () => {
     prisma.attendance.updateMany.mockClear();
 
     isCameraAlive.mockReturnValue(true); // both cameras alive again
-    await runPickupWatch(at("02:41")); // center 2 has only been back 1 min: not picked up yet
-    expect(markedStudents()).toEqual([5]); // center 1 never had an outage, still judged from its own silence
+    await runPickupWatch(at("02:41")); // center 2 is back, and its silence since 02:30 already exceeds 5 min
+    expect(markedStudents()).toEqual([5, 6]); // both are past 5 min of silence; the mock doesn't persist center 1's earlier mark
   });
 
   it("starts a session only for the center that has someone left to watch", async () => {
@@ -604,14 +616,12 @@ describe("manual Start / Stop", () => {
       prisma.attendance.findMany.mockResolvedValue([centerRecord(null, { student: { session: "afternoon", bleDevices: [{ id: 1 }], teacher: { centerId: null } } })]);
       prisma.attendanceSession.findMany.mockResolvedValue([session({ centerId: null })]);
       prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: null, ...off(at("03:00")) }]);
-      resetPickupHealth(at("06:00"));
       await runPickupWatch(at("06:40")); // 14:40 Manila, ten minutes into the afternoon window
       expect(markedStudents()).toEqual([5]);
     });
 
     it("Start tracks every student outside the schedule, counting silence only from the press", async () => {
       const startedAt = at("00:00"); // 08:00 Manila, no scheduled window
-      resetPickupHealth(at("00:00"));
       prisma.attendance.findMany.mockResolvedValue([centerRecord(null, { arrivedAt: at("00:00") })]);
       prisma.attendanceSession.findMany.mockResolvedValue([session({ centerId: null, startedAt })]);
       prisma.pickupWatchOverride.findMany.mockResolvedValue([{ centerId: null, ...on(startedAt) }]);
@@ -627,7 +637,6 @@ describe("manual Start / Stop", () => {
 
     it("Start does not reach back over a pause: nobody is marked for the minutes it was stopped", async () => {
       // last seen 02:35; stopped 02:36; started again 02:50 -> silence counts from 02:50, not 02:35
-      resetPickupHealth(at("02:00"));
       prisma.attendance.findMany.mockResolvedValue([centerRecord(null)]);
       prisma.attendanceSignal.findMany.mockResolvedValue([
         { studentId: 5, kind: "face", score: 0.9, hits: 3, lastSeenAt: at("02:35") },

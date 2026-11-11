@@ -31,11 +31,13 @@ import { notifyPickup } from "./attendanceNotification.service.js";
 // automatically picked-up student again, the teachers get an in-app notification
 // (pickupCamera.service.js) and decide.
 //
-// Silence is weak evidence, so the backup does nothing unless the ESP32 gateway
-// AND the EXIT camera are demonstrably alive, and the clock restarts after any
-// outage. Every center is watched on its own: its students, its session, its
-// camera and its outage clock, so one center's dead camera never pauses (and one
-// center's live camera never vouches for) another's.
+// Silence is weak evidence, so the backup never MARKS anyone unless the ESP32
+// gateway AND the EXIT camera are demonstrably alive. An outage does not restart
+// the unseen clock, though: silence keeps counting from the last sighting, so once
+// the hardware is back a student already past PICKUP_ABSENT_MIN is marked on the
+// next tick. Every center is watched on its own: its students, its session and its
+// camera, so one center's dead camera never pauses (and one center's live camera
+// never vouches for) another's.
 // The decisions are pure functions; runPickupWatch is the database wrapper.
 
 // How long neither signal may go unseen before a present student shows as "Not Detected".
@@ -177,10 +179,10 @@ const latestOf = (dates) => dates.filter(Boolean).reduce((a, b) => (b > a ? b : 
 
 // When the current continuous "neither face nor tag seen" stretch began: the
 // latest of the last sighting by either signal (or the exit camera), a teacher's
-// "Still here", the student's arrival, the start of the window, and the end of the
-// last hardware outage.
-export function absentSince({ lastFaceAt, lastBleAt, lastExitAt, stillHereAt, arrivedAt, windowStart, unhealthyAt }) {
-  return latestOf([lastFaceAt, lastBleAt, lastExitAt, stillHereAt, arrivedAt, windowStart, unhealthyAt]);
+// "Still here", the student's arrival and the start of the window. A hardware
+// outage is deliberately not one of them: it does not restart the clock.
+export function absentSince({ lastFaceAt, lastBleAt, lastExitAt, stillHereAt, arrivedAt, windowStart }) {
+  return latestOf([lastFaceAt, lastBleAt, lastExitAt, stillHereAt, arrivedAt, windowStart]);
 }
 
 // "wait" | "pick_up".
@@ -198,10 +200,6 @@ export function presenceStatus({ now, pickedUpAt, detectionActive, ...signals })
   if (!detectionActive) return "inside";
   return now.getTime() - absentSince(signals).getTime() >= NOT_DETECTED_AFTER_MS ? "not_detected" : "inside";
 }
-
-// When this center's hardware last looked down (or the process started), so the
-// table counts silence the same way the watch does.
-export const unhealthySinceFor = (centerId) => unhealthyAtFor(centerKey(centerId));
 
 // ---- shared writes ----------------------------------------------------------
 
@@ -225,17 +223,6 @@ export async function autoMarkPickedUp(studentId, today, now = new Date(), sourc
 }
 
 // ---- the periodic job -------------------------------------------------------
-
-// Start of the current "everything has been healthy" stretch, per center;
-// absence is never counted from before it. Starts at process start (a restart
-// is an outage too).
-let healthySince = new Date();
-const unhealthyAt = new Map(); // centerKey -> when that center's hardware last looked down
-const unhealthyAtFor = (key) => unhealthyAt.get(key) ?? healthySince;
-export function resetPickupHealth(date = new Date()) {
-  healthySince = date;
-  unhealthyAt.clear();
-}
 
 const SESSION_SELECT = {
   id: true,
@@ -445,8 +432,7 @@ async function watchCenter({ key, records, session, today, now, windowStart, pau
   // demonstrably alive: a dead exit camera means a child could have left unseen
   // by it, and a dead reader means the tag could not be heard.
   if (!session || !(await isGatewayOnline(now)) || !isCameraAlive(key, now, "exit")) {
-    unhealthyAt.set(key, now); // never count silence while the eyes were closed
-    return;
+    return; // never MARK anyone while the eyes were closed; the clock keeps running
   }
 
   // Only students with a tag can be judged by silence.
@@ -478,7 +464,6 @@ async function watchCenter({ key, records, session, today, now, windowStart, pau
         stillHereAt: record.stillHereAt,
         arrivedAt: record.arrivedAt,
         windowStart: record.windowStart,
-        unhealthyAt: unhealthyAtFor(key),
       });
       if (decidePickupAction({ now, absentSince: since }) === "pick_up") {
         await autoMarkPickedUp(studentId, today, now, "silence");

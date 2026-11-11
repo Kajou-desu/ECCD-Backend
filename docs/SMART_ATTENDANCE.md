@@ -110,8 +110,8 @@ The defaults are starting points, not measurements.
   query for `GET`).
 - **Everything follows the student's center.** A camera frame or BLE sighting is recorded
   in the session of *that student's* center, and ignored if that center has no session
-  running. The pickup watch judges each center on its own (its session, its camera, its
-  outage clock), so one center's dead camera never pauses another's.
+  running. The pickup watch judges each center on its own (its session and its
+  camera), so one center's dead camera never pauses another's.
 - **Camera lives on one device.** Choosing a device's camera is opt-in on the live
   screen. It turns off when you leave the page or the session ends.
 - **Deployment header**: the frontend's `vercel.json` must allow the camera
@@ -200,12 +200,14 @@ gets an in-app notification (not a toast), once per automatic pickup
   is not restarted in that window. It closes itself once every watched student is
   picked up; otherwise teachers get an in-app reminder when the window ends.
 - A present student with an enabled tag whose face and tag have both gone unseen
-  shows as **Not Detected** in the Live table after 1 minute. After
+  shows as **Not Detected** in the Live table after 3 minutes. After
   `PICKUP_ABSENT_MIN` (5) minutes unseen, **and** with no exit-camera sighting in
   that time, the student is marked picked up automatically.
 - Silence is weak evidence, so the backup does nothing unless the ESP32 gateway is
-  online **and the exit camera** has sent a frame in the last 30 s, and the unseen
-  clock restarts after any outage. The Live table shows Not Detected only under the
+  online **and the exit camera** has sent a frame in the last 30 s. An outage does
+  **not** restart the unseen clock: silence keeps counting from the last sighting, so
+  a student already past `PICKUP_ABSENT_MIN` is marked on the first check after the
+  hardware is back. The Live table shows Not Detected only under the
   same two conditions (`cameras` in `GET /attendance/session/monitor` reports each
   camera's liveness).
 - Assumes a single API instance (the job and the camera heartbeats are in-process).

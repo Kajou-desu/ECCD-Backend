@@ -11,7 +11,6 @@ import {
   pickupWindowStatus,
   presenceStatus,
   setPickupWatchRunning,
-  unhealthySinceFor,
 } from "../services/pickupWatch.service.js";
 import { liveStudentScope } from "../utils/studentScope.js";
 import { sessionCenterFor } from "../utils/sessionScope.js";
@@ -221,7 +220,6 @@ export async function getMonitor(req, res, next) {
     const entryCameraAlive = isCameraAlive(centerKey(centerId), now, "entry");
     const exitCameraAlive = isCameraAlive(centerKey(centerId), now, "exit");
     const detectionActive = gateway && exitCameraAlive;
-    const unhealthyAt = unhealthySinceFor(centerId);
     const lastSeen = new Map(); // `${studentId}:${kind}` -> newest sighting today, across sessions
     if (presentToday.length > 0) {
       const sightings = await prisma.attendanceSignal.findMany({
@@ -249,7 +247,6 @@ export async function getMonitor(req, res, next) {
           lastExitAt: lastSeen.get(`${r.studentId}:exit`),
           stillHereAt: r.stillHereAt,
           arrivedAt: r.arrivedAt,
-          unhealthyAt,
         }),
       }))
       .sort((a, b) => statusRank[a.status] - statusRank[b.status] || a.name.localeCompare(b.name));
