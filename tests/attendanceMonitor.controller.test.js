@@ -122,8 +122,8 @@ describe("getMonitor", () => {
   it("reports gateway and recognition availability", async () => {
     let { body } = await monitor();
     expect(body).toMatchObject({ gatewayOnline: true, recognitionAvailable: true });
-    // "online" = seen within 30 s
-    expect(prisma.bleGateway.findFirst.mock.calls[0][0].where.lastSeenAt.gt).toEqual(ago(30));
+    // "online" = seen within 45 s
+    expect(prisma.bleGateway.findFirst.mock.calls[0][0].where.lastSeenAt.gt).toEqual(ago(45));
     expect(prisma.bleGateway.findFirst.mock.calls[0][0].where.enabled).toBe(true);
 
     prisma.bleGateway.findFirst.mockResolvedValue(null);

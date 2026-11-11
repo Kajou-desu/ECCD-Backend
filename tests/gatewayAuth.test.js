@@ -6,6 +6,7 @@ vi.mock("../src/lib/prisma.js", () => ({
 
 const { prisma } = await import("../src/lib/prisma.js");
 const { requireGateway } = await import("../src/middleware/gatewayAuth.js");
+const { GATEWAY_ONLINE_MS, GATEWAY_TOUCH_MS } = await import("../src/lib/hardwareStatus.js");
 const { generateSecret, hashSecret, formatDeviceKey } = await import("../src/utils/deviceKey.js");
 
 function mockRes() {
@@ -76,6 +77,22 @@ describe("requireGateway (default deny)", () => {
     prisma.bleGateway.findUnique.mockResolvedValue(row({ lastSeenAt: null }));
     await requireGateway(reqWithKey(goodKey), mockRes(), vi.fn());
     expect(prisma.bleGateway.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes the heartbeat every 10 s, well inside the online window", async () => {
+    prisma.bleGateway.findUnique.mockResolvedValue(row({ lastSeenAt: new Date(Date.now() - 5_000) }));
+    await requireGateway(reqWithKey(goodKey), mockRes(), vi.fn());
+    expect(prisma.bleGateway.update).not.toHaveBeenCalled();
+
+    prisma.bleGateway.findUnique.mockResolvedValue(row({ lastSeenAt: new Date(Date.now() - 11_000) }));
+    await requireGateway(reqWithKey(goodKey), mockRes(), vi.fn());
+    expect(prisma.bleGateway.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("a healthy gateway never reads offline between heartbeat writes", () => {
+    // lastSeenAt can be up to one touch interval old plus a slow check-in; the
+    // online window must cover that with room to spare.
+    expect(GATEWAY_ONLINE_MS).toBeGreaterThanOrEqual(GATEWAY_TOUCH_MS * 4);
   });
 
   it("a failing heartbeat write never fails the request", async () => {

@@ -5,8 +5,16 @@ import { prisma } from "./prisma.js";
 // would have seen them was working, otherwise a dead ESP32, a closed laptop or
 // a dropped Wi-Fi would make the whole class look like it left.
 
-// A gateway that has been heard from this recently counts as online.
-export const GATEWAY_ONLINE_MS = 30_000;
+// The gateway checks in every few seconds, but the server only writes its
+// `lastSeenAt` this often (see middleware/gatewayAuth.js) so a chatty gateway
+// doesn't turn every request into a write.
+export const GATEWAY_TOUCH_MS = 10_000;
+
+// A gateway heard from this recently counts as online. It must stay well above
+// GATEWAY_TOUCH_MS: `lastSeenAt` is up to one touch interval old even while the
+// gateway is healthy, so an equal value made it read "offline" every cycle. This
+// leaves room for a missed check-in or two (a slow Wi-Fi moment, a 429 back-off).
+export const GATEWAY_ONLINE_MS = 45_000;
 
 export async function isGatewayOnline(now = new Date()) {
   const gateway = await prisma.bleGateway.findFirst({

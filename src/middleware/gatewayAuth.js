@@ -1,9 +1,9 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { parseDeviceKey, secretMatches } from "../utils/deviceKey.js";
+import { GATEWAY_TOUCH_MS } from "../lib/hardwareStatus.js";
 
 const KEY_HEADER = "x-device-key";
-const TOUCH_INTERVAL_MS = 30_000;
 
 // Compared against when the id doesn't exist, so an unknown id and a wrong
 // secret cost the same and can't be told apart by timing.
@@ -34,7 +34,7 @@ export async function requireGateway(req, res, next) {
     // Heartbeat for "gateway online" — throttled so a chatty gateway doesn't
     // turn every request into a write. Never blocks or fails the request.
     const last = gateway.lastSeenAt?.getTime() ?? 0;
-    if (Date.now() - last > TOUCH_INTERVAL_MS) {
+    if (Date.now() - last > GATEWAY_TOUCH_MS) {
       Promise.resolve(
         prisma.bleGateway.update({ where: { id: gateway.id }, data: { lastSeenAt: new Date() } }),
       ).catch((err) => logger.warn({ err, gatewayId: gateway.id }, "Gateway heartbeat update failed"));
